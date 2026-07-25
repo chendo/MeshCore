@@ -38,6 +38,18 @@ class WebPanelServer {
 public:
   WebPanelServer();
 
+#if defined(ESP_PLATFORM) && WITH_WEB_PANEL
+  // Extension hook: a target/composition can register extra httpd routes on the
+  // panel's server. The registrar runs at the end of every successful start().
+  typedef void (*ExtRoutesFn)(httpd_handle_t server, WebPanelServer* panel);
+  static void setExtRoutesRegistrar(ExtRoutesFn fn) { _ext_routes_fn = fn; }
+  // when set, start() does not register the "/" route — the extension
+  // registrar serves its own index page (stock SPA stays at /app)
+  static void setExtOwnsIndex(bool owns) { _ext_owns_index = owns; }
+  // for extension handlers: session-token check + activity refresh
+  bool extAuthorize(httpd_req_t* req);
+#endif
+
   void setCommandRunner(WebPanelCommandRunner* runner);
   bool start();
   void stop(bool clear_session = true);
@@ -75,6 +87,8 @@ private:
   void refreshToken();
   bool isAuthorized(httpd_req_t* req) const;
   void noteActivity();
+  static ExtRoutesFn _ext_routes_fn;
+  static bool _ext_owns_index;
 #else
   WebPanelCommandRunner* _runner;
 #endif

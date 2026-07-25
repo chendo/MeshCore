@@ -27,7 +27,7 @@ namespace {
 constexpr size_t kWebServerStackSize = WEB_PANEL_STACK_SIZE;
 constexpr size_t kWebPasswordBufferSize = 80;
 constexpr size_t kWebCommandBufferSize = 192;
-constexpr size_t kWebReplyBufferSize = 256;
+constexpr size_t kWebReplyBufferSize = 1024;
 constexpr size_t kWebStatsQueryBufferSize = 96;
 constexpr size_t kWebStatsReplyBufferSize = 4608;
 constexpr size_t kWebPageChunkSize = 768;
@@ -1060,6 +1060,7 @@ const char kWebPanelAppHtml[] PROGMEM = R"HTML(
       <h2>Stats</h2>
       <div class="quick" style="margin-bottom:12px">
         <button id="openStatsPanelBtn">Open /stats</button>
+        <button onclick="location.href='/multi'">Open /multi</button>
       </div>
       <div class="stats-empty">Current status and historical trends have moved to the dedicated stats page.</div>
     </section>
@@ -3291,6 +3292,15 @@ const char kWebPanelAppHtml[] PROGMEM = R"HTML(
 
 }  // namespace
 
+WebPanelServer::ExtRoutesFn WebPanelServer::_ext_routes_fn = nullptr;
+bool WebPanelServer::_ext_owns_index = false;
+
+bool WebPanelServer::extAuthorize(httpd_req_t* req) {
+  if (!isAuthorized(req)) return false;
+  noteActivity();
+  return true;
+}
+
 WebPanelServer::WebPanelServer()
     : _runner(nullptr), _server(nullptr), _redirect_server(nullptr), _token{0}, _last_activity_ms(0), _route_context{this} {
 }
@@ -3308,7 +3318,7 @@ bool WebPanelServer::start() {
 
   httpd_ssl_config_t config = HTTPD_SSL_CONFIG_DEFAULT();
   config.httpd.max_open_sockets = 2;
-  config.httpd.max_uri_handlers = 9;
+  config.httpd.max_uri_handlers = _ext_routes_fn ? 18 : 9;   // headroom for extension routes
   config.httpd.max_resp_headers = 4;
   config.httpd.backlog_conn = 2;
   config.httpd.recv_wait_timeout = 15;
@@ -3341,7 +3351,9 @@ bool WebPanelServer::start() {
   httpd_uri_t command_uri = {.uri = "/api/command", .method = HTTP_POST, .handler = &WebPanelServer::handleCommand, .user_ctx = &_route_context};
   httpd_uri_t firmware_update_uri = {.uri = "/api/firmware-update", .method = HTTP_POST, .handler = &WebPanelServer::handleFirmwareUpdate, .user_ctx = &_route_context};
   httpd_uri_t stats_uri = {.uri = "/api/stats", .method = HTTP_GET, .handler = &WebPanelServer::handleStats, .user_ctx = &_route_context};
-  httpd_register_uri_handler(_server, &index_uri);
+  if (!_ext_owns_index) {
+    httpd_register_uri_handler(_server, &index_uri);
+  }
   httpd_register_uri_handler(_server, &favicon_uri);
   httpd_register_uri_handler(_server, &app_uri);
   httpd_register_uri_handler(_server, &stats_page_uri);
@@ -3350,6 +3362,10 @@ bool WebPanelServer::start() {
   httpd_register_uri_handler(_server, &command_uri);
   httpd_register_uri_handler(_server, &firmware_update_uri);
   httpd_register_uri_handler(_server, &stats_uri);
+
+  if (_ext_routes_fn) {
+    _ext_routes_fn(_server, this);
+  }
 
   httpd_config_t redirect_config = HTTPD_DEFAULT_CONFIG();
   redirect_config.server_port = 80;
@@ -3503,7 +3519,9 @@ esp_err_t WebPanelServer::handleLogin(httpd_req_t* req) {
   }
 
   freeScratchBuffer(password);
-  ctx->self->refreshToken();
+  if (ctx->self->_token[0] == 0) {
+    ctx->self->refreshToken();   // only mint a new token when no session is active,
+  }                              // so a second browser/device doesn't kick the first
   ctx->self->noteActivity();
   WEB_PANEL_LOG("login accepted");
   httpd_resp_set_type(req, "text/plain; charset=utf-8");
