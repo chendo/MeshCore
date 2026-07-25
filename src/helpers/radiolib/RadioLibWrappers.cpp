@@ -52,6 +52,7 @@ void RadioLibWrapper::setTxPower(int8_t dbm) {
 }
 
 void RadioLibWrapper::idle() {
+  if (state == STATE_TX_WAIT) { MESH_DEBUG_PRINTLN("DIAG: idle() while TX_WAIT!"); }
   _radio->standby();
   state = STATE_IDLE;   // need another startReceive()
 }
@@ -65,6 +66,7 @@ void RadioLibWrapper::triggerNoiseFloorCalibrate(int threshold) {
 }
 
 void RadioLibWrapper::doResetAGC() {
+  if (state == STATE_TX_WAIT) { MESH_DEBUG_PRINTLN("DIAG: doResetAGC() while TX_WAIT!"); }
   _radio->sleep();  // warm sleep to reset analog frontend
 }
 
@@ -105,6 +107,7 @@ void RadioLibWrapper::loop() {
 }
 
 void RadioLibWrapper::startRecv() {
+  if (state == STATE_TX_WAIT) { MESH_DEBUG_PRINTLN("DIAG: startRecv() while TX_WAIT!"); }
   int err = _radio->startReceive();
   if (err == RADIOLIB_ERR_NONE) {
     state = STATE_RX;
@@ -137,6 +140,7 @@ int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
   }
 
   if (state != STATE_RX) {
+    if (state == STATE_TX_WAIT) { MESH_DEBUG_PRINTLN("DIAG: recvRaw() re-arm while TX_WAIT!"); }
     int err = _radio->startReceive();
     if (err == RADIOLIB_ERR_NONE) {
       state = STATE_RX;
