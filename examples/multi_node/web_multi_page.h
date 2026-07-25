@@ -37,6 +37,11 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
 .tabpane{display:none}.tabpane.on{display:block}
 .warn{background:#3a2d16;border:1px solid #6b5320;color:#e8c874;padding:8px 10px;border-radius:6px;margin-bottom:10px;font-size:13px}
 .hop{cursor:help;border-bottom:1px dotted #5c6875}
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:8px;margin-bottom:4px}
+.tile{background:#12171d;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.tile .val{font-size:21px;font-weight:650;margin-top:2px}
+.tile .lbl{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em}
+.tile .sub{font-size:11px;color:var(--mut)}
 </style></head><body>
 <header><b id="panel-title">MeshCore Multi</b>
 <nav>
@@ -54,6 +59,15 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
 <main>
 
 <div id="tab-dash" class="tabpane on">
+  <div class="tiles" id="dash-tiles"></div>
+  <div class="card"><h3>Trends</h3>
+    <div class="row" style="gap:20px;align-items:flex-start">
+      <div class="grow"><div class="mut" style="font-size:12px">battery (mV) <span id="dv-battery" class="mut"></span></div>
+        <canvas id="dc-battery" width="420" height="60" style="width:100%"></canvas></div>
+      <div class="grow"><div class="mut" style="font-size:12px">radio packets / min <span id="dv-packets" class="mut"></span></div>
+        <canvas id="dc-packets" width="420" height="60" style="width:100%"></canvas></div>
+    </div>
+  </div>
   <div class="card"><h3>Node</h3><pre id="dash-info" class="mut">loading...</pre></div>
   <div class="card"><h3>Actions</h3>
     <div class="row">
@@ -349,6 +363,7 @@ async function pollDebug(){
       (d.companion.tcp?"listening":"down")+" client:"+(d.companion.client?"connected":"none");
     $("dbg-info").textContent=info;
     $("dash-info").textContent=info;
+    try{ renderDashTiles(d); }catch(e){}
     $("dbg-stats").innerHTML=statRow("repeater",d.stats.repeater.packets,d.stats.repeater.core)+
       statRow("room",d.stats.room.packets,d.stats.room.core);
     $("dbg-nbrs").textContent=d.neighbors||"(none heard yet)";
@@ -481,6 +496,20 @@ async function buildMesh(){
     if(contacts.some(c=>c.pk.startsWith(n.prefix.toLowerCase()))) continue;   // already listed
     rows+="<tr><td class=mut>(neighbour)</td><td class=mut>"+n.prefix.toLowerCase()+"</td><td>repeater?</td>"+
       "<td>direct (heard)</td><td>"+age(n.secsAgo)+"</td><td>-</td><td>-</td><td>"+n.snr.toFixed(1)+"</td><td></td></tr>";
+  }
+  // remembered neighbours (persisted snapshot; survive reboot/OTA)
+  if(lastDebug&&lastDebug.saved_nbrs){
+    for(const l of lastDebug.saved_nbrs.split("\n")){
+      const p=l.split(",");
+      if(p.length<3||!/^[0-9a-f]{8}$/i.test(p[0])) continue;
+      const pfx=p[0].toLowerCase();
+      if(nbrs.some(n=>n.prefix.toLowerCase()===pfx)) continue;               // live row exists
+      if(contacts.some(c=>c.pk.startsWith(pfx))) continue;                   // contact row exists
+      const agoS=Math.max(0,lastDebug.epoch-(+p[1]||0));
+      rows+="<tr><td class=mut>(remembered)</td><td class=mut>"+pfx+"</td><td>repeater?</td>"+
+        "<td class=mut>heard before restart</td><td>"+age(agoS)+"</td><td>-</td><td>-</td><td class=mut>"+
+        ((+p[2]||0)/4).toFixed(1)+"</td><td></td></tr>";
+    }
   }
   $("mesh-rows").innerHTML=rows||"<tr><td colspan=9 class=mut>nothing heard yet — wait for adverts or send one</td></tr>";
 
@@ -873,6 +902,28 @@ async function dashCmd(label,c){
   const r=stripReply(await cmd(c));
   $("dash-status").textContent=label+": "+(r||"OK");
 }
+function tile(lbl,val,sub){
+  return "<div class=tile><div class=lbl>"+lbl+"</div><div class=val>"+val+"</div>"+
+    (sub?"<div class=sub>"+sub+"</div>":"")+"</div>";
+}
+function renderDashTiles(d){
+  const core=d.stats.repeater.core||{};
+  const rp=d.stats.repeater.packets||{}, ro=d.stats.room.packets||{};
+  const wifiRssi=(d.wifi.match(/rssi=(-?\d+)/)||[])[1];
+  const up=d.uptime_s;
+  const upStr=up>=86400?Math.floor(up/86400)+"d "+Math.floor(up%86400/3600)+"h":
+    up>=3600?Math.floor(up/3600)+"h "+Math.floor(up%3600/60)+"m":Math.floor(up/60)+"m "+(up%60)+"s";
+  $("dash-tiles").innerHTML=
+    tile("Battery",core.battery_mv?(core.battery_mv/1000).toFixed(2)+" V":"-","")+
+    tile("Uptime",upStr,"")+
+    tile("Radio RX / TX",(d.radio?d.radio.rx:"-")+" / "+(d.radio?d.radio.tx:"-"),"packets since boot")+
+    tile("Noise floor",(d.radio&&d.radio.noise?d.radio.noise+" dBm":"-"),"")+
+    tile("WiFi",wifiRssi?wifiRssi+" dBm":"offline","")+
+    tile("Free heap",Math.round(d.heap/1024)+" k","psram "+Math.round(d.psram/1024)+" k")+
+    tile("Contacts",contacts.length||"-","known nodes")+
+    tile("Forwarded",(rp.flood_tx||0)+(rp.direct_tx||0),"rx errors "+((rp.recv_errors||0)+(ro.recv_errors||0)))+
+    tile("Phone app",d.companion.client?"connected":(d.companion.tcp?"waiting":"down"),"tcp/5000");
+}
 async function loadDash(){
   try{
     $("dash-ver").textContent=stripReply(await cmd("ver"));
@@ -881,7 +932,14 @@ async function loadDash(){
     const name=stripReply(await cmd("get name"));
     if(name) $("panel-title").textContent=name;
   }catch(e){}
+  for(const k of ["battery","packets"]){
+    try{
+      const d=await (await api("/api/multi/stats?series="+k)).json();
+      drawSpark("dc-"+k,"dv-"+k,d.points);
+    }catch(e){}
+  }
 }
+setInterval(()=>{ if($("tab-dash").classList.contains("on")) loadDash().catch(()=>{}); },60000);
 
 // ---- repeater tab ----
 async function loadRepTab(){
