@@ -63,6 +63,10 @@ int SharedRadioCore::takeFrame(RadioPort* p, uint8_t* dst, int sz) {
   int idx = portIndex(p);
   if (idx < 0) return 0;
   uint32_t bit = (1u << idx);
+  // A silenced identity must not receive. It also must not mark the frame
+  // consumed: the mask is compared for equality against the ACTIVE set, so an
+  // inactive bit creeping in would stall delivery permanently.
+  if ((_active_mask & bit) == 0) return 0;
   if (_consumed_mask & bit) return 0;   // this port already got it
 
   int len = _rx_len;

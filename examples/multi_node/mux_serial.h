@@ -41,7 +41,10 @@ public:
   // stock code gates some async results (e.g. trace data) on isConnected(),
   // and the web needs those mirrored even with no phone attached.
   bool isConnected() const override {
-    return tcp.isConnected() || (millis() - _last_web_ms < 60000);
+    // _last_web_ms == 0 means the web has never driven this identity; without
+    // that guard the mux claims to be connected for the first minute after
+    // boot, when millis() is still close to zero.
+    return tcp.isConnected() || (_last_web_ms != 0 && millis() - _last_web_ms < 60000);
   }
   bool isWriteBusy() const override { return tcp.isWriteBusy(); }
 

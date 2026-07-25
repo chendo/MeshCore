@@ -173,7 +173,10 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
   </div>
   <div class="card"><h3>Routing / region</h3>
     <div class="row"><span class="mut" style="width:140px">path hash mode</span>
-      <select id="radio-phm"><option value="1">1-byte</option><option value="2">2-byte</option><option value="3">3-byte</option></select>
+      <select id="radio-phm" title="firmware stores this 0-based: hash size = mode + 1 byte">
+        <option value="0">1-byte hashes (mode 0)</option>
+        <option value="1">2-byte hashes (mode 1)</option>
+        <option value="2">3-byte hashes (mode 2)</option></select>
       <button class="sec" onclick="fieldSave('set path.hash.mode '+v('radio-phm'),'radio-status')">Save</button>
       <button class="sec" onclick="fieldLoad('get path.hash.mode','radio-phm')">&#8635;</button></div>
     <div class="row"><span class="mut" style="width:140px">region</span>
