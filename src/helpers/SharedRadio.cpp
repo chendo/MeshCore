@@ -20,6 +20,16 @@ void SharedRadioCore::pump() {
 
   uint8_t tmp[MAX_TRANS_UNIT];
   int len = _real->recvRaw(tmp, sizeof(tmp));   // also re-arms real RX
+
+  // surface RX decode/CRC failures (driver only counts them) as trace events
+  if (_rx_err_fn != nullptr) {
+    uint32_t errs = _rx_err_fn();
+    while (_rx_err_seen < errs) {
+      _rx_err_seen++;
+      pktLogAdd(-1, nullptr, 0, (int8_t)(_real->getLastSNR() * 4), (int16_t)_real->getLastRSSI(), PKT_FLAG_RX_ERR);
+    }
+  }
+
   if (len > 0) {
     memcpy(_rx_buf, tmp, len);
     _rx_len = len;
@@ -62,21 +72,25 @@ bool SharedRadioCore::tryStartSend(RadioPort* p, const uint8_t* bytes, int len) 
   bool ok = _real->startSendRaw(bytes, len);
   if (ok) {
     _tx_owner = p;
+    _tx_completed = false;
     pktLogAdd((int8_t)portIndex(p), bytes, len, 0, 0);
   }
   return ok;
 }
 
-void SharedRadioCore::pktLogAdd(int8_t dir, const uint8_t* bytes, int len, int8_t snr4, int16_t rssi) {
-  if (dir < 0) _rx_total = _rx_total + 1; else _tx_total = _tx_total + 1;
+void SharedRadioCore::pktLogAdd(int8_t dir, const uint8_t* bytes, int len, int8_t snr4, int16_t rssi, uint8_t flag) {
+  if (flag == PKT_FLAG_OK) {
+    if (dir < 0) _rx_total = _rx_total + 1; else _tx_total = _tx_total + 1;
+  }
   PktLogEntry& e = _pkt_log[_pkt_seq % PKT_LOG_SIZE];
   e.t_ms = millis();
   e.dir = dir;
+  e.flag = flag;
   e.hdr = len > 0 ? bytes[0] : 0;
   e.len = (uint8_t)(len > 255 ? 255 : len);
   e.snr4 = snr4; e.rssi = rssi;
   e.raw_len = (uint8_t)(len > PKT_RAW_CAP ? PKT_RAW_CAP : len);
-  memcpy(e.raw, bytes, e.raw_len);
+  if (e.raw_len > 0 && bytes != nullptr) memcpy(e.raw, bytes, e.raw_len); else e.raw_len = 0;
   e.seq = _pkt_seq + 1;   // written last; readers treat seq==0 / stale seq as invalid
   _pkt_seq = _pkt_seq + 1;
 }
@@ -98,11 +112,17 @@ int SharedRadioCore::pktLogCopy(PktLogEntry* out, int max_entries, uint32_t afte
 
 bool SharedRadioCore::isSendCompleteFor(RadioPort* p) {
   if (_tx_owner != p) return true;   // not our send; report done so nobody hangs
-  return _real->isSendComplete();
+  bool done = _real->isSendComplete();
+  if (done) _tx_completed = true;
+  return done;
 }
 
 void SharedRadioCore::onSendFinishedFor(RadioPort* p) {
   if (_tx_owner == p) {
+    if (!_tx_completed) {
+      // the dispatcher gave up (send expiry) before TX-done arrived
+      pktLogAdd((int8_t)portIndex(p), nullptr, 0, 0, 0, PKT_FLAG_TX_FAIL);
+    }
     _real->onSendFinished();
     _tx_owner = nullptr;
   }

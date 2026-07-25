@@ -80,11 +80,16 @@ public:
 
 // One row of the radio packet trace kept by SharedRadioCore (for diagnostics /
 // the web debug panel). dir: -1 = received, >= 0 = transmitted by that port.
+// flag: 0 = ok, 1 = RX decode/CRC failure, 2 = TX never completed (timed out).
 #define PKT_RAW_CAP 200
+#define PKT_FLAG_OK      0
+#define PKT_FLAG_RX_ERR  1
+#define PKT_FLAG_TX_FAIL 2
 struct PktLogEntry {
   uint32_t seq;
   uint32_t t_ms;
   int8_t   dir;
+  uint8_t  flag;
   uint8_t  hdr;      // raw packet header byte (route/type bits)
   uint8_t  len;      // full over-the-air length
   int8_t   snr4;     // SNR * 4 (RX only)
@@ -134,6 +139,9 @@ public:
   int pktLogCopy(PktLogEntry* out, int max_entries, uint32_t after_seq);
   const char* portName(int idx) const { return (idx >= 0 && idx < _num_ports) ? _port_names[idx] : "?"; }
   void setPortName(int idx, const char* name) { if (idx >= 0 && idx < MAX_PORTS) _port_names[idx] = name; }
+  // lets pump() notice RX decode/CRC failures inside the real driver (which
+  // reports them only via a counter) and log them as trace events
+  void setRxErrorCounter(uint32_t (*fn)()) { _rx_err_fn = fn; _rx_err_seen = fn ? fn() : 0; }
 
 private:
   int portIndex(RadioPort* p) const {
@@ -156,7 +164,10 @@ private:
   int8_t   _applied_pwr;     // last power applied to the real radio (avoid redundant writes)
   bool     _real_begun = false;   // real driver's begin() must run exactly once
 
-  void pktLogAdd(int8_t dir, const uint8_t* bytes, int len, int8_t snr4, int16_t rssi);
+  void pktLogAdd(int8_t dir, const uint8_t* bytes, int len, int8_t snr4, int16_t rssi, uint8_t flag = 0);
+  uint32_t (*_rx_err_fn)() = nullptr;
+  uint32_t _rx_err_seen = 0;
+  bool _tx_completed = false;   // did the current owner's send reach TX-done?
   PktLogEntry _pkt_log[PKT_LOG_SIZE];
   volatile uint32_t _pkt_seq = 0;   // total packets ever logged; ring index = seq % SIZE
   volatile uint32_t _rx_total = 0, _tx_total = 0;

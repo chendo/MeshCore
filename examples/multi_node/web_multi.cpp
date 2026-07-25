@@ -31,6 +31,7 @@ struct StatSample {
   int16_t  noise;      // radio noise floor dBm
   uint16_t heap_kb;
   uint32_t rx_total, tx_total;
+  uint8_t  load_pct;   // main-task duty cycle
 };
 static const int STAT_SLOTS = 1440;
 static StatSample* s_stats = nullptr;
@@ -138,6 +139,7 @@ void multiWebTick() {
   s.heap_kb = (uint16_t)(ESP.getFreeHeap() / 1024);
   s.rx_total = core ? core->rxTotal() : 0;
   s.tx_total = core ? core->txTotal() : 0;
+  s.load_pct = multiLoadPct();
   s_stat_seq = s_stat_seq + 1;
 }
 
@@ -204,7 +206,11 @@ static esp_err_t handleDebug(httpd_req_t* req) {
       char buf[512]; int n = f.read((uint8_t*)buf, sizeof(buf) - 1); f.close();
       if (n > 0) { buf[n] = 0; jsonEscapeAppend(out, buf); }
     } }
-  out += "\",\"nbr_writes\":";
+  out += "\",\"load\":";
+  out += String(multiLoadPct());
+  out += ",\"lps\":";
+  out += String(multiLoopsPerSec());
+  out += ",\"nbr_writes\":";
   out += String(s_nbr_writes);
   out += ",\"epoch\":";
   out += String((unsigned long)rtc_clock.getCurrentTime());
@@ -251,6 +257,7 @@ static esp_err_t handlePackets(httpd_req_t* req) {
     if (i) out += ',';
     out += "{\"s\":"; out += String(e.seq);
     out += ",\"t\":"; out += String(e.t_ms);
+    out += ",\"e\":"; out += String(e.flag);
     out += ",\"d\":";
     if (e.dir < 0) out += "\"rx\"";
     else { out += '"'; out += core->portName(e.dir); out += '"'; }
@@ -300,6 +307,7 @@ static esp_err_t handleStatsSeries(httpd_req_t* req) {
       else if (strcmp(series, "heap") == 0)      v = s.heap_kb;
       else if (strcmp(series, "wifi_rssi") == 0) v = s.wifi_rssi;
       else if (strcmp(series, "noise") == 0)     v = s.noise;
+      else if (strcmp(series, "load") == 0)      v = s.load_pct;
       else if (strcmp(series, "packets") == 0) {
         if (have_prev) v = (long)((s.rx_total + s.tx_total) - (prev.rx_total + prev.tx_total));
         else ok = false;

@@ -390,6 +390,7 @@ void setup() {
 
   g_core = new SharedRadioCore(radio_driver);
   g_core->setTxPowerControl(&g_txpwr);
+  g_core->setRxErrorCounter([]() -> uint32_t { return radio_driver.getPacketsRecvErrors(); });
   g_core->setPortName(g_core->addPort(port_rep),  "repeater");
   g_core->setPortName(g_core->addPort(port_room), "room");
   g_core->setPortName(g_core->addPort(port_comp), "companion");
@@ -462,7 +463,18 @@ static void serviceSerial() {
   }
 }
 
+// main-task load: share of wall time spent working (vs parked in delay(1)),
+// measured over 1-second windows. This is the composition's own duty cycle,
+// not whole-chip utilisation (WiFi/BT stacks run on their own tasks).
+static uint32_t s_busy_us = 0, s_load_win_ms = 0, s_loops = 0;
+static volatile uint8_t  s_load_pct = 0;
+static volatile uint32_t s_loops_per_s = 0;
+uint8_t  multiLoadPct() { return s_load_pct; }
+uint32_t multiLoopsPerSec() { return s_loops_per_s; }
+
 void loop() {
+  uint32_t t0 = micros();
+
   // pump each identity, then fetch the next shared radio frame (order matters:
   // all ports must consume the current frame before pump() fetches the next)
   for (int i = 0; i < NUM_MODULES; i++) g_modules[i]->loop();
@@ -476,6 +488,16 @@ void loop() {
   }
   multiWebTick();                 // stats history sampler (unified panel)
   serviceSerial();
+
+  s_busy_us += micros() - t0;
+  s_loops++;
+  uint32_t now = millis();
+  if (now - s_load_win_ms >= 1000) {
+    uint32_t win_us = (now - s_load_win_ms) * 1000;
+    s_load_pct = (uint8_t)min(100UL, (unsigned long)(s_busy_us * 100 / win_us));
+    s_loops_per_s = s_loops;
+    s_busy_us = 0; s_loops = 0; s_load_win_ms = now;
+  }
 
   // Yield 1ms per pass so the FreeRTOS idle task runs (WFI clock-gates the
   // core) instead of busy-spinning at 100% — LoRa symbols are milliseconds,
