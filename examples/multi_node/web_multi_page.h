@@ -206,8 +206,9 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
   </div>
   <div class="card"><h3>Identity slots</h3>
     <div class="mut" style="font-size:12px;margin-bottom:8px">Each enabled slot is a full extra chat identity — its own
-    keypair, contacts and app connection on its own TCP port. Changes apply at the next reboot (radio ports are fixed
-    at boot). Disabling keeps the identity and its data on the filesystem, so re-enabling restores the same node.</div>
+    keypair, contacts and app connection on its own TCP port. Enabling and disabling take effect <b>immediately, no
+    reboot</b>; a disabled slot goes off air and its identity and data stay on the filesystem, so re-enabling brings the
+    same node back. (Its RAM is only reclaimed at the next restart.)</div>
     <div id="slots-list" class="mut" style="font-size:13px">loading...</div>
     <div id="slots-status" class="mut" style="font-size:12px;margin-top:6px"></div>
   </div>
@@ -1524,9 +1525,8 @@ async function loadSlots(){
 }
 async function setSlot(n,on){
   const r=stripReply(await cmd("set slot.chat"+n+" "+(on?"on":"off")));
-  $("slots-status").textContent=r;
-  await loadSlots();
-  if(/^OK/.test(r)&&confirm("Reboot now to apply?")) cmd("reboot");
+  $("slots-status").textContent=r+" — applied live, no reboot";
+  setTimeout(loadSlots,1500);
 }
 
 // ---- settings: firmware OTA upload ----

@@ -152,6 +152,28 @@ void SharedRadioCore::onSendFinishedFor(RadioPort* p) {
   }
 }
 
+void SharedRadioCore::setPortActive(int idx, bool active) {
+  if (idx < 0 || idx >= MAX_PORTS) return;
+  uint32_t bit = (1u << idx);
+  if (active) {
+    // a frame already in flight was fetched before this port was listening:
+    // mark it consumed so pump() isn't stuck waiting for it
+    if (_rx_len > 0) _consumed_mask |= bit;
+    _active_mask |= bit;
+  } else {
+    _active_mask &= ~bit;
+    _consumed_mask |= bit;        // never wait on a silenced port
+    if (_tx_owner != nullptr && portIndex(_tx_owner) == idx) {
+      _real->onSendFinished();    // don't strand the transmitter
+      _tx_owner = nullptr;
+    }
+  }
+}
+
+bool SharedRadioCore::portActive(int idx) const {
+  return idx >= 0 && idx < MAX_PORTS && (_active_mask & (1u << idx)) != 0;
+}
+
 void SharedRadioCore::beginRealOnce() {
   if (_real_begun) return;
   _real_begun = true;

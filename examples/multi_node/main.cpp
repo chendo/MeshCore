@@ -61,6 +61,10 @@ static SubdirFS       fs_chat[MULTI_MAX_CHAT_SLOTS];
 static SharedRadioCore* g_core = nullptr;
 static RadioPort        port_rep, port_room, port_comp;
 static RadioPort        port_chat[MULTI_MAX_CHAT_SLOTS];
+static int              g_slot_port_idx[MULTI_MAX_CHAT_SLOTS];
+static bool             g_slot_started[MULTI_MAX_CHAT_SLOTS];   // setup() has run this boot
+// requests from the web/serial task, applied in loop(): 0 none, 1 start, 2 stop
+static volatile uint8_t g_slot_request[MULTI_MAX_CHAT_SLOTS];
 
 static NetworkService   network;
 static WebService       web;
@@ -324,8 +328,10 @@ public:
       }
       bool on = strcmp(arg + 1, "on") == 0 || strcmp(arg + 1, "1") == 0;
       multiChatSlotSetEnabled(idx, on);
-      snprintf(reply, reply_size, "OK - chat slot %d %s; reboot to apply (app port %d)",
-               idx + 1, on ? "enabled" : "disabled", multiChatSlotPort(idx));
+      g_slot_request[idx] = on ? 1 : 2;   // applied from loop(), no reboot needed
+      snprintf(reply, reply_size, "OK - chat slot %d %s (app port %d)%s",
+               idx + 1, on ? "starting" : "stopping", multiChatSlotPort(idx),
+               on && !g_slot_started[idx] ? "" : "");
       return;
     }
     if (strcmp(command, "slots") == 0) {
@@ -334,7 +340,7 @@ public:
       for (int i = 0; i < MULTI_MAX_CHAT_SLOTS && o + 60 < reply_size; i++) {
         o += snprintf(reply + o, reply_size - o, "chat%d: %s%s (app port %d)\n", i + 1,
                       multiChatSlotEnabled(i) ? "enabled" : "disabled",
-                      multiChatSlotEnabled(i) != multiChatSlotRunning(i) ? " — reboot pending" : "",
+                      multiChatSlotRunning(i) ? " (running)" : "",
                       multiChatSlotPort(i));
       }
       return;
@@ -425,6 +431,47 @@ void multiGetRadioParams(float* freq, float* bw, uint8_t* sf, uint8_t* cr) {
 }
 
 void halt() { while (1); }
+
+// Hot enable/disable of chat identity slots. Requests are queued by the web or
+// serial task and applied HERE, from loop(), because starting a mesh allocates,
+// touches the filesystem and registers with the arbiter — all of which must not
+// race the mesh loop. Starting is complete (the slot goes on air immediately);
+// stopping silences the identity — its port stops consuming frames and its
+// loop() stops running — but the instance's memory is only reclaimed on reboot,
+// since the stock mesh classes aren't built to be destroyed.
+static void applySlotRequests() {
+  for (int i = 0; i < MULTI_MAX_CHAT_SLOTS; i++) {
+    uint8_t req = g_slot_request[i];
+    if (req == 0) continue;
+    g_slot_request[i] = 0;
+    IdentityModule* m = multiChatSlotModule(i);
+    if (req == 1) {
+      if (!g_slot_started[i]) {
+        fs_chat[i].begin(multiChatSlotFsDir(i));
+        m->setup(&fs_chat[i], &port_chat[i]);
+        g_slot_started[i] = true;
+        bool listed = false;
+        for (int k = 0; k < NUM_MODULES; k++) if (g_modules[k] == m) listed = true;
+        if (!listed && NUM_MODULES < (int)(sizeof(g_modules)/sizeof(g_modules[0]))) g_modules[NUM_MODULES++] = m;
+        // the stock mesh applies ITS OWN stored radio params during begin();
+        // the composition owns the shared radio, so put them back
+        applyRadioParams(g_radio);
+      }
+      g_core->setPortActive(g_slot_port_idx[i], true);
+      Serial.printf("[chat%d] started (no reboot)\n", i + 1);
+    } else {
+      g_core->setPortActive(g_slot_port_idx[i], false);
+      for (int k = 0; k < NUM_MODULES; k++) {          // stop calling its loop()
+        if (g_modules[k] == m) {
+          for (int j = k; j < NUM_MODULES - 1; j++) g_modules[j] = g_modules[j + 1];
+          NUM_MODULES--;
+          break;
+        }
+      }
+      Serial.printf("[chat%d] stopped (silenced; memory freed on next reboot)\n", i + 1);
+    }
+  }
+}
 
 // ---- SoftAP first-boot WiFi setup (no serial/BLE needed) --------------------
 static const char SETUP_HTML[] =
@@ -524,14 +571,18 @@ void setup() {
   g_core->setPortName(g_core->addPort(port_room), "room");
   g_core->setPortName(g_core->addPort(port_comp), "companion");
 
-  // optional chat identity slots (enabled from the panel, applied at boot)
+  // Optional chat identity slots. Every slot's port is registered up front —
+  // inactive unless enabled — so port indices never move and a slot can be
+  // switched on or off later without a reboot.
   multiChatSlotsInit();
   for (int i = 0; i < MULTI_MAX_CHAT_SLOTS; i++) {
-    if (!multiChatSlotEnabled(i)) continue;
-    fs_chat[i].begin(multiChatSlotFsDir(i));
     IdentityModule* m = multiChatSlotModule(i);
-    g_modules[NUM_MODULES++] = m;
-    g_core->setPortName(g_core->addPort(port_chat[i]), m->name);
+    g_slot_port_idx[i] = g_core->addPort(port_chat[i], multiChatSlotEnabled(i));
+    g_core->setPortName(g_slot_port_idx[i], m->name);
+    if (multiChatSlotEnabled(i)) {
+      fs_chat[i].begin(multiChatSlotFsDir(i));
+      g_modules[NUM_MODULES++] = m;
+    }
   }
 
   WebPanelServer::setExtRoutesRegistrar(&multiWebRegisterRoutes);   // unified panel + APIs
@@ -541,7 +592,7 @@ void setup() {
   room_module.setup(&fs_room, &port_room);
   companion_module.setup(&fs_comp, &port_comp);
   for (int i = 0; i < MULTI_MAX_CHAT_SLOTS; i++) {
-    if (multiChatSlotEnabled(i)) multiChatSlotModule(i)->setup(&fs_chat[i], &port_chat[i]);
+    if (multiChatSlotEnabled(i)) { multiChatSlotModule(i)->setup(&fs_chat[i], &port_chat[i]); g_slot_started[i] = true; }
   }
 
   // authoritative last: overrides whatever each identity's own begin() just
@@ -634,6 +685,7 @@ void loop() {
     network.loop(true);           // composition keeps WiFi up for the panel
     web.loop();
   }
+  applySlotRequests();            // hot enable/disable of chat identities
   multiWebTick();                 // stats history sampler (unified panel)
   serviceSerial();
 

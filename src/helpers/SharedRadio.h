@@ -110,12 +110,20 @@ public:
 
   void setTxPowerControl(TxPowerControl* ctl) { _pwr_ctl = ctl; }
 
-  int addPort(RadioPort& port) {         // returns port index
+  // Ports may be registered inactive and switched on/off at runtime, so an
+  // identity can be started or silenced without a reboot. Indices stay stable
+  // (the packet trace and TX-owner bookkeeping reference them), and inactive
+  // ports are excluded from the delivery mask so a frame is never held waiting
+  // for a port that isn't listening.
+  int addPort(RadioPort& port, bool active = true) {   // returns port index
     int idx = _num_ports;
     _ports[_num_ports++] = &port;
     port.attach(this);
+    setPortActive(idx, active);
     return idx;
   }
+  void setPortActive(int idx, bool active);
+  bool portActive(int idx) const;
 
   // Pump the real radio once: if the current frame is fully delivered, fetch
   // the next one. Call AFTER every mesh has had its loop() this cycle.
@@ -161,7 +169,7 @@ private:
     for (int i = 0; i < _num_ports; i++) if (_ports[i] == p) return i;
     return -1;
   }
-  uint32_t allPortsMask() const { return (_num_ports >= 32) ? 0xFFFFFFFFu : ((1u << _num_ports) - 1); }
+  uint32_t allPortsMask() const { return _active_mask; }   // only listening ports must consume a frame
 
   mesh::Radio* _real;
   RadioPort* _ports[MAX_PORTS];
@@ -188,6 +196,7 @@ private:
   LbFrame _lb[LB_SLOTS];
   uint8_t _lb_head = 0, _lb_count = 0;
   bool _loopback = true;
+  uint32_t _active_mask = 0;   // which ports are currently listening
   bool _tx_completed = false;   // did the current owner's send reach TX-done?
   PktLogEntry _pkt_log[PKT_LOG_SIZE];
   volatile uint32_t _pkt_seq = 0;   // total packets ever logged; ring index = seq % SIZE
