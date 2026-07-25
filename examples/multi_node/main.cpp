@@ -353,10 +353,14 @@ static void cfg(IdentityModule* m, const char* cmd) {
 // suppress location. (Coordinates are set by the user via the panel:
 // `repeater set lat <x>` / `repeater set lon <y>`.)
 static void applyAdvertPolicy() {
-  cfg(&repeater_module, "set name " ADVERT_NAME " Repeater");
-  cfg(&repeater_module, "gps advert prefs");     // share stored lat/lon
-  cfg(&room_module,     "set name " ADVERT_NAME " Room");
-  cfg(&room_module,     "gps advert none");       // location off
+  // Names are SEEDED only on an identity's first boot (no com_prefs yet):
+  // running 'set name' unconditionally clobbered operator-set names on every
+  // restart, since names persist via each identity's own prefs file.
+  if (!fs_rep.exists("/com_prefs"))  cfg(&repeater_module, "set name " ADVERT_NAME " Repeater");
+  if (!fs_room.exists("/com_prefs")) cfg(&room_module,     "set name " ADVERT_NAME " Room");
+  // location policy is a design constraint, applied every boot:
+  cfg(&repeater_module, "gps advert prefs");     // repeater shares stored lat/lon
+  cfg(&room_module,     "gps advert none");       // room never shares location
   // companion: BaseChatMesh, location off by default; name left at its default
 }
 
