@@ -308,9 +308,30 @@ public:
       if (multiIdImport(role, target, sp + 1)) {
         snprintf(reply, reply_size, "OK - %s identity restored; reboot to apply", role);
       } else {
-        snprintf(reply, reply_size, "Error - expected 192 hex chars (pub||prv)");
+        snprintf(reply, reply_size, "Error - expected a valid 128-hex private key (or 192-hex pub||prv)");
       }
       return;
+    }
+    if (strcmp(command, "identities source") == 0) {   // how each key was obtained this boot
+      multiIdSourceReport(reply, reply_size);
+      return;
+    }
+    // Route the stock per-identity rekey through the composition so the NVS
+    // mirror is updated too — otherwise the mirror would disagree on the next
+    // boot and (correctly) revert the change as corruption.
+    {
+      const char* pk = nullptr; const char* role = nullptr; fs::FS* target = nullptr;
+      if (strncmp(command, "set prv.key ", 12) == 0) { pk = command + 12; role = "repeater"; target = (fs::FS*)&fs_rep; }
+      else if (strncmp(command, "repeater set prv.key ", 21) == 0) { pk = command + 21; role = "repeater"; target = (fs::FS*)&fs_rep; }
+      else if (strncmp(command, "room set prv.key ", 17) == 0) { pk = command + 17; role = "room"; target = (fs::FS*)&fs_room; }
+      if (pk != nullptr) {
+        if (multiIdImport(role, target, pk)) {
+          snprintf(reply, reply_size, "OK - %s identity set (filesystem + mirror); reboot to apply", role);
+        } else {
+          snprintf(reply, reply_size, "Error - bad private key");
+        }
+        return;
+      }
     }
     if (strcmp(command, "identities full") == 0) {   // full 64-hex pubkeys (contact sharing/QR)
       size_t o = 0;
@@ -347,6 +368,21 @@ public:
   const char* getWebAdminPassword() const override { return g_admin_pwd; }
 };
 static MultiRunner g_runner;
+
+// identity provenance log (storage for identity_backup.h — one copy only)
+static char g_id_source[4][48];
+static int  g_id_source_n = 0;
+void multiIdNoteSource(const char* role, const char* how) {
+  if (g_id_source_n < 4) snprintf(g_id_source[g_id_source_n++], 48, "%s: %s", role, how);
+}
+int multiIdSourceReport(char* out, size_t cap) {
+  size_t o = 0;
+  for (int i = 0; i < g_id_source_n && o < cap; i++) {
+    o += snprintf(out + o, cap - o, "%s\n", g_id_source[i]);
+  }
+  if (o == 0 && cap) snprintf(out, cap, "(no identity events recorded)");
+  return (int)o;
+}
 
 // accessors for the unified web panel (web_multi.cpp)
 SharedRadioCore* multiCore() { return g_core; }

@@ -42,6 +42,13 @@ static mesh::LocalIdentity multiIdFromBlob(const uint8_t blob[MULTI_ID_BLOB]) {
 // Load `role`'s identity, preferring the filesystem, falling back to the NVS
 // mirror. Returns false only if neither source has one (caller then creates a
 // new identity). On success the mirror is refreshed.
+// Records how each identity was obtained this boot (see 'identities source').
+// Storage lives in ONE translation unit (main.cpp): this header is included by
+// every wrapper, so a `static` array here would give each wrapper its own
+// private copy and the composition would always read an empty log.
+void multiIdNoteSource(const char* role, const char* how);
+int  multiIdSourceReport(char* out, size_t cap);
+
 static bool multiIdLoad(const char* role, fs::FS* fs, mesh::LocalIdentity& id) {
   IdentityStore store(*fs, "/identity");
   store.begin();
@@ -49,23 +56,41 @@ static bool multiIdLoad(const char* role, fs::FS* fs, mesh::LocalIdentity& id) {
   Preferences nvs;
   nvs.begin("multiids", false);
 
+  uint8_t mirror[MULTI_ID_BLOB];
+  bool have_mirror = nvs.getBytes(role, mirror, sizeof(mirror)) == MULTI_ID_BLOB;
+
   if (store.load("_main", id)) {
     uint8_t blob[MULTI_ID_BLOB];
-    if (multiIdToBlob(id, blob)) nvs.putBytes(role, blob, MULTI_ID_BLOB);
+    bool ok = multiIdToBlob(id, blob);
+    // A readable file is NOT proof of a good file: this device saw the
+    // repeater's stored identity change underneath it (twice, to the same
+    // deterministic key), so a filesystem copy that disagrees with the mirror
+    // is treated as corruption and the mirror wins. Legitimate key changes go
+    // through multiIdImport(), which writes BOTH copies, so they never differ.
+    if (ok && have_mirror && memcmp(blob, mirror, MULTI_ID_BLOB) != 0) {
+      id = multiIdFromBlob(mirror);
+      store.save("_main", id);
+      nvs.end();
+      Serial.printf("[%s] identity MISMATCH — filesystem copy differed from the mirror; mirror restored\n", role);
+      multiIdNoteSource(role, "mirror (fs copy had changed!)");
+      return true;
+    }
+    if (ok && !have_mirror) nvs.putBytes(role, blob, MULTI_ID_BLOB);
     nvs.end();
+    multiIdNoteSource(role, "filesystem");
     return true;
   }
 
   // FS copy missing or unreadable — try the mirror before minting a new key
-  uint8_t blob[MULTI_ID_BLOB];
-  size_t got = nvs.getBytes(role, blob, sizeof(blob));
   nvs.end();
-  if (got == MULTI_ID_BLOB) {
-    id = multiIdFromBlob(blob);
+  if (have_mirror) {
+    id = multiIdFromBlob(mirror);
     store.save("_main", id);   // heal the filesystem copy
     Serial.printf("[%s] identity RESTORED from NVS mirror (filesystem copy was missing/corrupt)\n", role);
+    multiIdNoteSource(role, "mirror (fs copy unreadable)");
     return true;
   }
+  multiIdNoteSource(role, "NEW KEY CREATED");
   return false;
 }
 
