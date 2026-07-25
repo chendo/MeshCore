@@ -40,8 +40,10 @@ extern IdentityModule repeater_module;
 extern IdentityModule room_module;
 extern IdentityModule companion_module;
 
-static IdentityModule* g_modules[] = { &repeater_module, &room_module, &companion_module };
-static const int NUM_MODULES = sizeof(g_modules) / sizeof(g_modules[0]);
+extern IdentityModule room2_module;   // second room slot (wrap_room2.cpp), boot-time opt-in
+
+static IdentityModule* g_modules[4] = { &repeater_module, &room_module, &companion_module, nullptr };
+static int NUM_MODULES = 3;   // room2 inserted at boot when enabled (see setup)
 
 // ONE shared SPIFFS partition, exposed to each identity as a subdirectory view.
 // SPIFFS has a flat namespace, so a view just prefixes every path ("/identity"
@@ -55,9 +57,22 @@ public:
   void begin(const char* mountpoint) { _impl->mountpoint(mountpoint); }
 };
 static fs::SPIFFSFS   fs_shared;
-static SubdirFS       fs_rep, fs_room, fs_comp, fs_sys;
+static SubdirFS       fs_rep, fs_room, fs_comp, fs_sys, fs_room2;
+
+// room2 boot-time enable flag (radio ports must exist before the frame
+// fan-out starts, so enabling/disabling applies at the next reboot)
+static bool room2Enabled() {
+  Preferences p; p.begin("multisys", true);
+  bool en = p.getBool("room2", false);
+  p.end(); return en;
+}
+static void setRoom2Enabled(bool en) {
+  Preferences p; p.begin("multisys", false);
+  p.putBool("room2", en);
+  p.end();
+}
 static SharedRadioCore* g_core = nullptr;
-static RadioPort        port_rep, port_room, port_comp;
+static RadioPort        port_rep, port_room, port_comp, port_room2;
 
 static NetworkService   network;
 static WebService       web;
@@ -248,6 +263,18 @@ public:
                network.getWifiPowerSave());
       return;
     }
+    if (strncmp(command, "set room2.enabled ", 18) == 0) {
+      bool en = strcmp(command + 18, "on") == 0 || strcmp(command + 18, "1") == 0;
+      setRoom2Enabled(en);
+      snprintf(reply, reply_size, "OK - room2 %s; reboot to apply (radio ports are fixed at boot)",
+               en ? "enabled" : "disabled");
+      return;
+    }
+    if (strcmp(command, "get room2.enabled") == 0) {
+      snprintf(reply, reply_size, "> %s (running: %s)", room2Enabled() ? "on" : "off",
+               NUM_MODULES > 3 ? "yes" : "no");
+      return;
+    }
     if (strncmp(command, "set wifi.powersave ", 19) == 0) {
       if (network.setWifiPowerSave(command + 19)) {
         snprintf(reply, reply_size, "OK - wifi powersave=%s (applies live, persists)", network.getWifiPowerSave());
@@ -367,9 +394,11 @@ static void applyAdvertPolicy() {
   // restart, since names persist via each identity's own prefs file.
   if (!fs_rep.exists("/com_prefs"))  cfg(&repeater_module, "set name " ADVERT_NAME " Repeater");
   if (!fs_room.exists("/com_prefs")) cfg(&room_module,     "set name " ADVERT_NAME " Room");
+  if (room2Enabled() && !fs_room2.exists("/com_prefs")) cfg(&room2_module, "set name " ADVERT_NAME " Room2");
   // location policy is a design constraint, applied every boot:
   cfg(&repeater_module, "gps advert prefs");     // repeater shares stored lat/lon
   cfg(&room_module,     "gps advert none");       // room never shares location
+  if (room2Enabled()) cfg(&room2_module, "gps advert none");
   // companion: BaseChatMesh, location off by default; name left at its default
 }
 
@@ -387,12 +416,17 @@ void setup() {
   fs_room.begin("/fs/room");
   fs_comp.begin("/fs/comp");
   fs_sys.begin("/fs/sys");
+  fs_room2.begin("/fs/room2");
+
+  bool room2_on = room2Enabled();
+  if (room2_on) { g_modules[NUM_MODULES++] = &room2_module; }
 
   g_core = new SharedRadioCore(radio_driver);
   g_core->setTxPowerControl(&g_txpwr);
   g_core->setPortName(g_core->addPort(port_rep),  "repeater");
   g_core->setPortName(g_core->addPort(port_room), "room");
   g_core->setPortName(g_core->addPort(port_comp), "companion");
+  if (room2_on) { g_core->setPortName(g_core->addPort(port_room2), "room2"); }
 
   WebPanelServer::setExtRoutesRegistrar(&multiWebRegisterRoutes);   // unified panel + APIs
   WebPanelServer::setExtOwnsIndex(true);                            // panel served at "/" (stock SPA stays at /app)
@@ -400,6 +434,7 @@ void setup() {
   repeater_module.setup(&fs_rep, &port_rep);
   room_module.setup(&fs_room, &port_room);
   companion_module.setup(&fs_comp, &port_comp);
+  if (room2_on) room2_module.setup(&fs_room2, &port_room2);
 
   // authoritative last: overrides whatever each identity's own begin() just
   // applied to the shared radio_driver (see "shared-radio ownership" above)
