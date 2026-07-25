@@ -188,6 +188,74 @@ public:
 };
 static RealTxPower g_txpwr;
 
+// ---- scheduled GPS time sync ------------------------------------------------
+// The GPS receiver already disciplines the RTC whenever it is powered and has a
+// fix, but it draws 20-40mA continuously — far too much to leave on for a
+// fixed node. So run it on a duty cycle instead: wake it periodically, wait for
+// a fix, take the time, and power it down again. A cold fix costs ~1-2 minutes
+// of GPS current every SYNC_HOURS, which is negligible, and the node's clock
+// stays accurate enough to be useful to its peers (every advert it sends
+// carries this timestamp).
+static const uint32_t GPS_FIX_TIMEOUT_MS = 150000;   // give up on a cold fix
+static uint32_t g_gps_sync_hours = 12;               // 0 = never
+static uint32_t g_gps_next_ms = 60000;               // first attempt a minute after boot
+static uint32_t g_gps_deadline_ms = 0;               // non-zero while GPS is powered for a sync
+static uint32_t g_gps_last_sync_epoch = 0;
+static const char* g_gps_last_result = "not attempted yet";
+
+static void gpsPower(bool on) {
+  sensors.setSettingValue("gps", on ? "1" : "0");
+}
+
+// "YYYY-MM-DD HH:MM:SSZ" from a unix epoch (UTC), without pulling in RTClib
+static void formatEpochUtc(uint32_t epoch, char* out, size_t cap) {
+  time_t t = (time_t)epoch;
+  struct tm tmv;
+  gmtime_r(&t, &tmv);
+  snprintf(out, cap, "%04d-%02d-%02d %02d:%02d:%02dZ",
+           tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+           tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+}
+
+static void gpsSyncStart() {
+  gpsPower(true);
+  g_gps_deadline_ms = millis() + GPS_FIX_TIMEOUT_MS;
+  g_gps_last_result = "acquiring fix...";
+}
+
+static void gpsSyncTick() {
+  uint32_t now = millis();
+
+  if (g_gps_deadline_ms == 0) {                       // idle: is a sync due?
+    if (g_gps_sync_hours > 0 && now >= g_gps_next_ms) gpsSyncStart();
+    return;
+  }
+
+  LocationProvider* gps = sensors.getLocationProvider();
+  if (gps != nullptr && gps->isValid()) {
+    long ts = gps->getTimestamp();
+    if (ts > 1700000000L) {                           // sane epoch (past 2023)
+      rtc_clock.setCurrentTime((uint32_t)ts);
+      g_gps_last_sync_epoch = (uint32_t)ts;
+      g_gps_last_result = "synced from GPS";
+      Serial.printf("[gps] clock synced to %lu, powering GPS down\n", (unsigned long)ts);
+      gpsPower(false);
+      g_gps_deadline_ms = 0;
+      g_gps_next_ms = now + g_gps_sync_hours * 3600000UL;
+      return;
+    }
+  }
+
+  if (now >= g_gps_deadline_ms) {                     // no fix in time
+    g_gps_last_result = "no fix before timeout";
+    Serial.println("[gps] no fix before timeout, powering GPS down");
+    gpsPower(false);
+    g_gps_deadline_ms = 0;
+    g_gps_next_ms = now + (g_gps_sync_hours > 0 ? g_gps_sync_hours * 3600000UL : 3600000UL);
+  }
+}
+
+
 // ---- web command dispatcher: one console manages WiFi + all three identities
 // Address an identity by prefixing its name: "room advert", "comp ...", etc.
 // Bare commands go to the repeater (the public/primary node).
@@ -253,6 +321,42 @@ public:
                WiFi.localIP().toString().c_str(),
                WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0,
                network.getWifiPowerSave());
+      return;
+    }
+    // ---- clock / GPS time discipline ----
+    if (strcmp(command, "time") == 0 || strcmp(command, "clock") == 0) {
+      uint32_t now_epoch = rtc_clock.getCurrentTime();
+      LocationProvider* gps = sensors.getLocationProvider();
+      char now_s[24], sync_s[24];
+      formatEpochUtc(now_epoch, now_s, sizeof(now_s));
+      if (g_gps_last_sync_epoch) formatEpochUtc(g_gps_last_sync_epoch, sync_s, sizeof(sync_s));
+      else strncpy(sync_s, "never", sizeof(sync_s));
+      snprintf(reply, reply_size,
+               "epoch=%lu utc=%s source=%s last_gps_sync=%s gps=%s sats=%ld next_sync_in=%lus",
+               (unsigned long)now_epoch, now_s,
+               g_gps_last_sync_epoch ? "gps" : "manual/unset", sync_s,
+               g_gps_deadline_ms ? "on(acquiring)" : "off",
+               gps ? gps->satellitesCount() : 0,
+               (unsigned long)(g_gps_sync_hours == 0 ? 0 :
+                 (g_gps_next_ms > millis() ? (g_gps_next_ms - millis()) / 1000 : 0)));
+      return;
+    }
+    if (strcmp(command, "gps sync") == 0) {
+      if (g_gps_deadline_ms) { snprintf(reply, reply_size, "already acquiring a fix"); return; }
+      gpsSyncStart();
+      snprintf(reply, reply_size, "OK - GPS powered up, acquiring a fix (up to %lus)",
+               (unsigned long)(GPS_FIX_TIMEOUT_MS / 1000));
+      return;
+    }
+    if (strncmp(command, "set gps.sync ", 13) == 0) {
+      g_gps_sync_hours = (uint32_t)atoi(command + 13);
+      g_wifi_nvs.begin("multiwifi", false);
+      g_wifi_nvs.putUInt("gpssync", g_gps_sync_hours);
+      g_wifi_nvs.end();
+      if (g_gps_sync_hours) g_gps_next_ms = millis() + 5000;
+      snprintf(reply, reply_size, g_gps_sync_hours ? "OK - GPS clock sync every %lu h"
+                                                   : "OK - GPS clock sync disabled",
+               (unsigned long)g_gps_sync_hours);
       return;
     }
     if (strncmp(command, "set loopback ", 13) == 0) {
@@ -605,6 +709,10 @@ void setup() {
 
   loadAdminPwd();   // web/console admin password (persisted, defaults to ADMIN_PASSWORD)
 
+  g_wifi_nvs.begin("multiwifi", true);
+  g_gps_sync_hours = g_wifi_nvs.getUInt("gpssync", 12);   // GPS clock discipline interval
+  g_wifi_nvs.end();
+
   // composition owns WiFi + the single HTTPS web panel; credentials come from
   // our dedicated NVS store (authoritative), not NetworkService persistence.
   network.begin(&fs_sys, 0, "", "");
@@ -688,6 +796,7 @@ void loop() {
     web.loop();
   }
   applySlotRequests();            // hot enable/disable of chat identities
+  gpsSyncTick();                  // scheduled GPS clock discipline
   multiWebTick();                 // stats history sampler (unified panel)
   serviceSerial();
 

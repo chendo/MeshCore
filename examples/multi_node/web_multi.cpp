@@ -206,6 +206,7 @@ static esp_err_t handleDebug(httpd_req_t* req) {
       char buf[512]; int n = f.read((uint8_t*)buf, sizeof(buf) - 1); f.close();
       if (n > 0) { buf[n] = 0; jsonEscapeAppend(out, buf); }
     } }
+  out += "\",\"clock\":\"";     runConsoleInto(out, "time");
   out += "\",\"load\":";
   out += String(multiLoadPct());
   out += ",\"lps\":";
