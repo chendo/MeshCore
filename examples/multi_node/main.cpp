@@ -240,11 +240,20 @@ public:
       return;
     }
     if (strcmp(command, "get wifi.status") == 0 || strcmp(command, "wifi") == 0) {
-      snprintf(reply, reply_size, "ssid=%s connected=%s ip=%s rssi=%d",
+      snprintf(reply, reply_size, "ssid=%s connected=%s ip=%s rssi=%d powersave=%s",
                network.getWifiSSID()[0] ? network.getWifiSSID() : "-",
                WiFi.status() == WL_CONNECTED ? "yes" : "no",
                WiFi.localIP().toString().c_str(),
-               WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0);
+               WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0,
+               network.getWifiPowerSave());
+      return;
+    }
+    if (strncmp(command, "set wifi.powersave ", 19) == 0) {
+      if (network.setWifiPowerSave(command + 19)) {
+        snprintf(reply, reply_size, "OK - wifi powersave=%s (applies live, persists)", network.getWifiPowerSave());
+      } else {
+        snprintf(reply, reply_size, "Error - use: none | min | max");
+      }
       return;
     }
     // shared radio: composition-authoritative, applies live (see note above)
@@ -467,4 +476,9 @@ void loop() {
   }
   multiWebTick();                 // stats history sampler (unified panel)
   serviceSerial();
+
+  // Yield 1ms per pass so the FreeRTOS idle task runs (WFI clock-gates the
+  // core) instead of busy-spinning at 100% — LoRa symbols are milliseconds,
+  // so a 1ms poll interval costs nothing and saves tens of mA.
+  delay(1);
 }
