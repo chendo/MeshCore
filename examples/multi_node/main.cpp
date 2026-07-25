@@ -566,7 +566,9 @@ void setup() {
   g_core = new SharedRadioCore(radio_driver);
   g_core->setTxPowerControl(&g_txpwr);
   g_core->setRxErrorCounter([]() -> uint32_t { return radio_driver.getPacketsRecvErrors(); },
-                            []() -> int16_t { return radio_driver.getLastRecvError(); });
+                            []() -> int16_t { return radio_driver.getLastRecvError(); },
+                            []() -> const uint8_t* { return radio_driver.getLastRecvErrorPayload(); },
+                            []() -> uint8_t { return radio_driver.getLastRecvErrorLen(); });
   g_core->setPortName(g_core->addPort(port_rep),  "repeater");
   g_core->setPortName(g_core->addPort(port_room), "room");
   g_core->setPortName(g_core->addPort(port_comp), "companion");

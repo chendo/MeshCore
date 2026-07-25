@@ -39,9 +39,14 @@ void SharedRadioCore::pump() {
   if (_rx_err_fn != nullptr) {
     uint32_t errs = _rx_err_fn();
     int16_t code = _rx_err_code_fn ? _rx_err_code_fn() : 0;
+    // Log the DAMAGED bytes too: RadioLib fills the buffer before reporting a
+    // CRC mismatch, so a corrupt frame can still be decoded on a best-effort
+    // basis — handy when the same packet arrives intact later in a burst.
+    const uint8_t* bad = _rx_err_payload_fn ? _rx_err_payload_fn() : nullptr;
+    int bad_len = _rx_err_len_fn ? (int)_rx_err_len_fn() : 0;
     while (_rx_err_seen < errs) {
       _rx_err_seen++;
-      pktLogAdd(-1, nullptr, 0, (int8_t)(_real->getLastSNR() * 4), (int16_t)_real->getLastRSSI(),
+      pktLogAdd(-1, bad, bad_len, (int8_t)(_real->getLastSNR() * 4), (int16_t)_real->getLastRSSI(),
                 PKT_FLAG_RX_ERR, code);
     }
   }
@@ -114,7 +119,7 @@ void SharedRadioCore::pktLogAdd(int8_t dir, const uint8_t* bytes, int len, int8_
   e.t_ms = millis();
   e.dir = dir;
   e.flag = flag;
-  e.hdr = len > 0 ? bytes[0] : 0;
+  e.hdr = (len > 0 && bytes != nullptr) ? bytes[0] : 0;
   e.len = (uint8_t)(len > 255 ? 255 : len);
   e.snr4 = snr4; e.rssi = rssi; e.aux = aux;
   e.raw_len = (uint8_t)(len > PKT_RAW_CAP ? PKT_RAW_CAP : len);

@@ -268,6 +268,60 @@ TEST(SharedRadioTrace, OnlyReturnsEntriesNewerThanTheCallersCursor) {
 
 }  // namespace
 
+// --------------------------------------------- corrupt frames are preserved
+
+// The driver reports CRC failures only through a counter and drops the frame,
+// but it has already read the damaged bytes. Those bytes are worth keeping: the
+// same packet often arrives intact moments later in a burst, and comparing the
+// two shows how much was actually hit.
+namespace {
+const uint8_t* g_bad_payload = nullptr;
+uint8_t g_bad_len = 0;
+uint32_t g_err_count = 0;
+int16_t g_err_code = 0;
+}
+
+TEST(SharedRadioCorrupt, CrcFailureIsLoggedWithItsDamagedBytesAndErrorCode) {
+  Fixture f;
+  static const uint8_t damaged[] = {0x11, 0xDE, 0xAD, 0xBE, 0xEF};
+  g_bad_payload = damaged; g_bad_len = sizeof(damaged);
+  g_err_count = 0; g_err_code = -7;      // RADIOLIB_ERR_CRC_MISMATCH
+  f.core.setRxErrorCounter([]() -> uint32_t { return g_err_count; },
+                           []() -> int16_t { return g_err_code; },
+                           []() -> const uint8_t* { return g_bad_payload; },
+                           []() -> uint8_t { return g_bad_len; });
+
+  g_err_count = 1;                        // the driver saw a CRC failure
+  f.core.pump();
+
+  PktLogEntry entries[SharedRadioCore::PKT_LOG_SIZE];
+  int n = f.core.pktLogCopy(entries, SharedRadioCore::PKT_LOG_SIZE, 0);
+  ASSERT_EQ(1, n);
+  EXPECT_EQ(PKT_FLAG_RX_ERR, entries[0].flag);
+  EXPECT_EQ(-7, entries[0].aux) << "the cause (CRC vs header damage) must survive";
+  ASSERT_EQ(sizeof(damaged), entries[0].raw_len) << "damaged bytes must be kept for decoding";
+  EXPECT_EQ(0, memcmp(damaged, entries[0].raw, sizeof(damaged)));
+  EXPECT_EQ(0x11, entries[0].hdr);
+  EXPECT_EQ(0u, f.core.rxTotal()) << "a corrupt frame is not a received packet";
+}
+
+TEST(SharedRadioCorrupt, ErrorWithNoRecoverableBytesStillLogsTheEvent) {
+  Fixture f;
+  g_bad_payload = nullptr; g_bad_len = 0;
+  g_err_count = 0; g_err_code = -16;      // header damaged: nothing readable
+  f.core.setRxErrorCounter([]() -> uint32_t { return g_err_count; },
+                           []() -> int16_t { return g_err_code; },
+                           []() -> const uint8_t* { return g_bad_payload; },
+                           []() -> uint8_t { return g_bad_len; });
+  g_err_count = 1;
+  f.core.pump();
+
+  PktLogEntry entries[SharedRadioCore::PKT_LOG_SIZE];
+  ASSERT_EQ(1, f.core.pktLogCopy(entries, SharedRadioCore::PKT_LOG_SIZE, 0));
+  EXPECT_EQ(PKT_FLAG_RX_ERR, entries[0].flag);
+  EXPECT_EQ(0, entries[0].raw_len);
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

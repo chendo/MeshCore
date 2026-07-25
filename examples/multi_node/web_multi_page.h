@@ -621,12 +621,20 @@ async function pollPkts(){
       const when=wd.toTimeString().slice(0,8)+"."+String(wd.getMilliseconds()).padStart(3,"0");
       const rx=p.d==="rx";
       if(p.e===1){          // RX failure, labelled by RadioLib error code
-        const why=p.x===-7?"CRC mismatch — payload corrupted (collision or weak signal)":
-          p.x===-16?"LoRa header damaged — decode failure":
-          p.x===-6?"RX timeout":"receive error (code "+p.x+")";
-        tr.innerHTML="<td>"+when+"</td><td style='color:#e08a4d'>"+(p.x===-7?"RX-CRC":"RX-ERR")+
-          "</td><td colspan=4 class=mut>"+esc(why)+"</td><td>?</td><td>"+
+        const why=p.x===-7?"CRC mismatch":p.x===-16?"LoRa header damaged":
+          p.x===-6?"RX timeout":"receive error ("+p.x+")";
+        // decode the damaged bytes anyway — fields may be wrong, but a corrupt
+        // copy is still evidence (often the same packet arrives clean later)
+        let a={src:"",infoHtml:""};
+        try{ if(p.raw) a=annot(p); }catch(e){}
+        const rt=p.raw?ROUTES[p.h&3]:"?", ty=p.raw?PTYPES[(p.h>>2)&15]:"?";
+        tr.innerHTML="<td>"+when+"</td><td style='color:#e08a4d' title='"+esc(why)+"'>"+
+          (p.x===-7?"RX-CRC":"RX-ERR")+"</td><td class=mut>"+rt+"?</td><td class=mut>"+ty+"?</td><td class=mut>"+
+          esc(a.src)+"</td><td class=mut>"+esc(why)+(p.raw?" · best-effort decode: ":" · no bytes recovered")+
+          a.infoHtml+"</td><td>"+(p.l||"?")+"</td><td>"+
           (p.snr?snrSpan(p.snr):"")+"</td><td>"+(p.rssi?rssiSpan(p.rssi):"")+"</td>";
+        if(p.raw){ tr.style.cursor="pointer"; tr.title="click to decode (corrupt)";
+          tr.onclick=()=>openPktModal(p,when,why); }
       } else if(p.e===2){   // TX never completed
         tr.innerHTML="<td>"+when+"</td><td style='color:#e05d5d'>TX-FAIL:"+esc(p.d)+"</td><td colspan=4 class=mut>"+
           "send timed out before TX-done (radio contention?)</td><td>-</td><td></td><td></td>";
@@ -876,9 +884,14 @@ function renderMeshSvg(nodes,edges){
 }
 
 // ---- packet decode modal ----
-function openPktModal(p,when){
+function openPktModal(p,when,corruptWhy){
   const q=parsePkt(p);
   let h="<h3 style='margin:0 0 8px'>Packet @ "+when+" <button class=sec style='float:right;padding:2px 10px' onclick=\"$('pkt-modal').style.display='none'\">close</button></h3>";
+  if(corruptWhy){
+    h+="<div class=warn style='margin-bottom:8px'><b>Corrupt frame — "+esc(corruptWhy)+".</b> "+
+       "Everything below is a best-effort decode of damaged bytes: any field may be wrong, and the length itself is "+
+       "suspect. Compare it with a clean copy of the same packet later in the burst to see how much was hit.</div>";
+  }
   const rx=p.d==="rx";
   h+="<div class=mut style='font-size:12px;margin-bottom:8px'>"+(rx?"received":"sent by "+esc(p.d))+
     " · "+ROUTES[p.h&3]+" · "+PTYPES[(p.h>>2)&15]+" · "+p.l+" bytes on air"+

@@ -151,8 +151,11 @@ public:
   // lets pump() notice RX decode/CRC failures inside the real driver (which
   // reports them only via a counter) and log them as trace events; the code
   // accessor supplies the RadioLib error code (CRC mismatch vs header damage)
-  void setRxErrorCounter(uint32_t (*fn)(), int16_t (*code_fn)() = nullptr) {
-    _rx_err_fn = fn; _rx_err_code_fn = code_fn; _rx_err_seen = fn ? fn() : 0;
+  void setRxErrorCounter(uint32_t (*fn)(), int16_t (*code_fn)() = nullptr,
+                         const uint8_t* (*payload_fn)() = nullptr, uint8_t (*len_fn)() = nullptr) {
+    _rx_err_fn = fn; _rx_err_code_fn = code_fn;
+    _rx_err_payload_fn = payload_fn; _rx_err_len_fn = len_fn;
+    _rx_err_seen = fn ? fn() : 0;
   }
 
   // TX loopback: identities on this board share one antenna and the radio is
@@ -188,6 +191,8 @@ private:
   void pktLogAdd(int8_t dir, const uint8_t* bytes, int len, int8_t snr4, int16_t rssi, uint8_t flag = 0, int16_t aux = 0);
   uint32_t (*_rx_err_fn)() = nullptr;
   int16_t (*_rx_err_code_fn)() = nullptr;
+  const uint8_t* (*_rx_err_payload_fn)() = nullptr;
+  uint8_t (*_rx_err_len_fn)() = nullptr;
   uint32_t _rx_err_seen = 0;
 
   // loopback queue (frames sent by one port, pending delivery to the others)

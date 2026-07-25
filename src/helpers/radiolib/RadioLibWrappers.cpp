@@ -129,6 +129,9 @@ int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
       int err = _radio->readData(bytes, len);
       if (err != RADIOLIB_ERR_NONE) {
         MESH_DEBUG_PRINTLN("RadioLibWrapper: error: readData(%d)", err);
+        // keep the damaged bytes before discarding the frame (see header)
+        last_err_len = (uint8_t)(len > (int)sizeof(last_err_payload) ? sizeof(last_err_payload) : len);
+        memcpy(last_err_payload, bytes, last_err_len);
         len = 0;
         n_recv_errors++;
         last_recv_error = (int16_t)err;   // e.g. CRC mismatch vs header damaged

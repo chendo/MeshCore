@@ -12,6 +12,12 @@ protected:
   bool _cad_enabled;
   uint16_t _num_floor_samples;
   int16_t  last_recv_error = 0;
+  // RadioLib fills the receive buffer BEFORE it reports a CRC mismatch, so the
+  // damaged frame is recoverable — keep a copy for diagnostics even though the
+  // mesh (correctly) discards it. A corrupt copy of a packet that arrives
+  // cleanly moments later in a burst is useful evidence.
+  uint8_t  last_err_payload[MAX_TRANS_UNIT];
+  uint8_t  last_err_len = 0;
   int32_t _floor_sample_sum;
   uint8_t _preamble_sf;
 
@@ -60,6 +66,8 @@ public:
   uint32_t getPacketsRecv() const { return n_recv; }
   uint32_t getPacketsRecvErrors() const { return n_recv_errors; }
   int16_t  getLastRecvError() const { return last_recv_error; }   // RadioLib error code of most recent RX failure
+  const uint8_t* getLastRecvErrorPayload() const { return last_err_payload; }
+  uint8_t  getLastRecvErrorLen() const { return last_err_len; }
   uint32_t getPacketsSent() const { return n_sent; }
   void resetStats() { n_recv = n_sent = n_recv_errors = 0; }
 
