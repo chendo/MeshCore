@@ -22,3 +22,7 @@ platformio.local.ini
 src/helpers/mqtt/generated/
 site/
 debug/
+
+# multi-identity: seeded SPIFFS tree for `pio run -t buildfs` — contains the
+# device identity PRIVATE KEYS extracted during the OTA migration. Never commit.
+data/
