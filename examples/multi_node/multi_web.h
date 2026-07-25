@@ -22,6 +22,10 @@ fs::FS* multiSysFS();   // composition prefs area of the shared partition
 uint8_t  multiLoadPct();      // main-task duty cycle %, 1s window
 uint32_t multiLoopsPerSec();  // super-loop iterations/sec
 
+// ---- provided by wrap_room.cpp ----
+// stored room posts as a JSON array [{t,a,x}...]; returns bytes written
+int roomGetPostsJson(char* out, size_t cap);
+
 // ---- provided by wrap_companion.cpp ----
 // Inject one app-protocol frame into the companion mesh and collect its
 // response frames. out receives [u16 len LE][frame bytes]... concatenated.

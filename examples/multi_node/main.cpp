@@ -279,6 +279,16 @@ public:
       snprintf(reply, reply_size, "OK - shared radio updated live for all 3 identities, no reboot needed");
       return;
     }
+    if (strcmp(command, "identities full") == 0) {   // full 64-hex pubkeys (contact sharing/QR)
+      size_t o = 0;
+      for (int i = 0; i < NUM_MODULES && o + 80 < reply_size; i++) {
+        uint8_t pk[32]; g_modules[i]->get_pubkey(pk);
+        o += snprintf(reply + o, reply_size - o, "%s=", g_modules[i]->name);
+        for (int b = 0; b < 32 && o + 3 < reply_size; b++) o += snprintf(reply + o, reply_size - o, "%02x", pk[b]);
+        o += snprintf(reply + o, reply_size - o, "\n");
+      }
+      return;
+    }
     if (strcmp(command, "identities") == 0) {
       size_t o = 0;
       for (int i = 0; i < NUM_MODULES; i++) {

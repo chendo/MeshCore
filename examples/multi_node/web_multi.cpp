@@ -327,6 +327,20 @@ static esp_err_t handleStatsSeries(httpd_req_t* req) {
   return httpd_resp_send(req, out.c_str(), HTTPD_RESP_USE_STRLEN);
 }
 
+// ---------- /api/multi/room/posts ----------
+
+static esp_err_t handleRoomPosts(httpd_req_t* req) {
+  if (!authOk(req)) return deny(req);
+  char* buf = (char*)malloc(8192);
+  if (buf == nullptr) return httpd_resp_send_500(req);
+  roomGetPostsJson(buf, 8192);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  esp_err_t rc = httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);
+  free(buf);
+  return rc;
+}
+
 // ---------- /api/multi/comp/frame ----------
 
 static esp_err_t handleCompFrame(httpd_req_t* req) {
@@ -431,6 +445,7 @@ void multiWebRegisterRoutes(httpd_handle_t server, WebPanelServer* panel) {
   static const httpd_uri_t stats_uri = {.uri = "/api/multi/stats", .method = HTTP_GET, .handler = &handleStatsSeries, .user_ctx = nullptr};
   static const httpd_uri_t comp_uri  = {.uri = "/api/multi/comp/frame", .method = HTTP_POST, .handler = &handleCompFrame, .user_ctx = nullptr};
   static const httpd_uri_t arch_uri  = {.uri = "/api/multi/comp/archive", .method = HTTP_GET, .handler = &handleCompArchive, .user_ctx = nullptr};
+  static const httpd_uri_t posts_uri = {.uri = "/api/multi/room/posts", .method = HTTP_GET, .handler = &handleRoomPosts, .user_ctx = nullptr};
   httpd_register_uri_handler(server, &root_uri);
   httpd_register_uri_handler(server, &old_uri);
   httpd_register_uri_handler(server, &debug_uri);
@@ -438,4 +453,5 @@ void multiWebRegisterRoutes(httpd_handle_t server, WebPanelServer* panel) {
   httpd_register_uri_handler(server, &stats_uri);
   httpd_register_uri_handler(server, &comp_uri);
   httpd_register_uri_handler(server, &arch_uri);
+  httpd_register_uri_handler(server, &posts_uri);
 }
