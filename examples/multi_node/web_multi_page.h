@@ -9,12 +9,23 @@ static const char MULTI_PAGE[] = R"MWPG(<!DOCTYPE html>
 <style>
 :root{--bg:#101418;--card:#1a2027;--line:#2a323c;--tx:#dbe4ee;--mut:#8b98a8;--acc:#4da3ff;--ok:#39c07a;--err:#e05d5d}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.45 system-ui,sans-serif}
-header{display:flex;align-items:center;gap:14px;padding:10px 16px;border-bottom:1px solid var(--line)}
-header b{font-size:16px}header a{color:var(--mut);text-decoration:none;font-size:12px}
-nav{display:flex;gap:4px;margin-left:auto}
-nav button{background:none;border:1px solid var(--line);color:var(--mut);padding:6px 14px;border-radius:6px;cursor:pointer}
-nav button.on{color:var(--tx);border-color:var(--acc)}
-main{padding:14px 16px;max-width:1080px;margin:0 auto}
+#shell{display:grid;grid-template-columns:216px 1fr;min-height:100vh}
+aside{border-right:1px solid var(--line);padding:12px 10px;display:flex;flex-direction:column;gap:10px;
+  position:sticky;top:0;height:100vh;overflow-y:auto;box-sizing:border-box}
+aside .brand{font-weight:700;font-size:15px;padding:2px 6px}
+.role{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px}
+.role .rname{font-weight:600;display:flex;align-items:center;gap:6px}
+.role .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:none}
+.role .dot.off{background:#5c6875}
+.role .rkey{font-family:ui-monospace,monospace;font-size:10px;color:var(--mut);cursor:pointer;word-break:break-all}
+.role .rstat{color:var(--mut);margin-top:2px}
+nav{display:flex;flex-direction:column;gap:2px;margin-top:4px}
+nav button{background:none;border:0;color:var(--mut);padding:7px 10px;border-radius:6px;cursor:pointer;
+  text-align:left;font-size:13px}
+nav button.on{color:var(--tx);background:#1e2731}
+main{padding:14px 16px;max-width:1120px;box-sizing:border-box;min-width:0}
+@media (max-width:760px){#shell{grid-template-columns:1fr}aside{position:static;height:auto;flex-direction:row;
+  flex-wrap:wrap;align-items:center}nav{flex-direction:row;flex-wrap:wrap}aside .roles{display:flex;gap:6px;flex-wrap:wrap}}
 .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:12px}
 .card h3{margin:0 0 8px;font-size:13px;color:var(--mut);text-transform:uppercase;letter-spacing:.06em}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -43,19 +54,22 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
 .tile .lbl{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em}
 .tile .sub{font-size:11px;color:var(--mut)}
 </style></head><body>
-<header><b id="panel-title">MeshCore Multi</b>
-<nav>
-<button data-t="dash" class="on">Dashboard</button>
-<button data-t="mesh">Mesh</button>
-<button data-t="msgs">Messages</button>
-<button data-t="chans">Channels</button>
-<button data-t="room">Room</button>
-<button data-t="rep">Repeater</button>
-<button data-t="radio">Radio</button>
-<button data-t="stats">Stats</button>
-<button data-t="debug">Debug</button>
-<button data-t="set">Settings</button>
-</nav></header>
+<div id="shell">
+<aside>
+  <div class="brand" id="panel-title">MeshCore Multi</div>
+  <div class="roles" id="rail-roles"></div>
+  <nav>
+    <button data-t="dash" class="on">System</button>
+    <button data-t="mesh">Mesh</button>
+    <button data-t="msgs">Messages</button>
+    <button data-t="chans">Channels</button>
+    <button data-t="room">Room</button>
+    <button data-t="rep">Repeater</button>
+    <button data-t="radio">Radio</button>
+    <button data-t="debug">Debug</button>
+    <button data-t="set">Settings</button>
+  </nav>
+</aside>
 <main>
 
 <div id="tab-dash" class="tabpane on">
@@ -85,6 +99,15 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
       <button class="sec" style="padding:2px 8px" onclick="copyText($('dash-pubkey').textContent)">copy</button></div>
     <div class="row"><span class="mut" style="width:110px">Radio</span><span id="dash-radio">-</span></div>
   </div>
+  <div class="card"><h3>Nodes nearby <span class="mut" id="nearby-count" style="font-weight:400;font-size:11px"></span></h3>
+    <div style="overflow-x:auto"><table><thead><tr><th>name</th><th>kind</th><th>key</th><th>heard</th><th>last advert</th><th>dist</th></tr></thead>
+    <tbody id="dash-nearby"><tr><td colspan=6 class=mut>listening for adverts...</td></tr></tbody></table></div>
+  </div>
+  <div class="card"><h3>Live <button class="sec" style="float:right;padding:2px 8px" onclick="loadStatsTab()">&#8635;</button></h3>
+  <div style="overflow-x:auto"><table><thead><tr><th></th><th>recv</th><th>sent</th><th>flood tx</th><th>direct tx</th><th>flood rx</th><th>direct rx</th><th>rx errors</th><th>queue</th><th>err flags</th></tr></thead>
+  <tbody id="stats-live"></tbody></table></div>
+  <pre id="stats-node" class="mut" style="margin-top:8px"></pre></div>
+  <div class="card"><h3>History (24h, 1-min samples)</h3><div id="stats-charts"></div></div>
 </div>
 
 <div id="tab-rep" class="tabpane">
@@ -159,13 +182,6 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
   </div>
 </div>
 
-<div id="tab-stats" class="tabpane">
-  <div class="card"><h3>Live <button class="sec" style="float:right;padding:2px 8px" onclick="loadStatsTab()">&#8635;</button></h3>
-  <div style="overflow-x:auto"><table><thead><tr><th></th><th>recv</th><th>sent</th><th>flood tx</th><th>direct tx</th><th>flood rx</th><th>direct rx</th><th>rx errors</th><th>queue</th><th>err flags</th></tr></thead>
-  <tbody id="stats-live"></tbody></table></div>
-  <pre id="stats-node" class="mut" style="margin-top:8px"></pre></div>
-  <div class="card"><h3>History (24h, 1-min samples)</h3><div id="stats-charts"></div></div>
-</div>
 
 <div id="tab-set" class="tabpane">
   <div class="card"><h3>Firmware update (OTA)</h3>
@@ -262,6 +278,10 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
     <div class="card" style="width:270px">
       <h3>Contacts <button class="sec" style="float:right;padding:2px 8px" onclick="loadContacts()">&#8635;</button></h3>
       <div id="contacts" class="list mut">not loaded</div>
+      <div class="row" style="margin-top:10px"><input id="chat-name" class="grow" placeholder="rename chat client"
+        onkeydown="if(event.key=='Enter')renameChat()">
+      <button class="sec" onclick="renameChat()">Rename</button></div>
+      <div id="chat-name-status" class="mut" style="font-size:11px"></div>
     </div>
     <div class="card grow">
       <h3>Messages <span id="self-name" class="mut"></span>
@@ -298,6 +318,7 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
 </div>
 
 </main>
+</div>
 <div id="login" style="display:none"><div class="card">
 <h3>Unlock</h3><div class="row"><input id="pwd" type="password" class="grow" placeholder="admin password" autocomplete="off" data-1p-ignore
 onkeydown="if(event.key=='Enter')doLogin()"></div>
@@ -335,12 +356,35 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{
   b.classList.add("on"); $("tab-"+b.dataset.t).classList.add("on");
   if(b.dataset.t==="msgs" && !compReady) initComp();
   if(b.dataset.t==="chans" && !chansLoaded) loadChannels();
-  if(b.dataset.t==="mesh") buildMesh();
-  if(b.dataset.t==="dash") loadDash();
+  if(b.dataset.t==="mesh"){ buildMesh(); }
+  if(b.dataset.t==="dash"){ loadDash(); loadStatsTab(); }
   if(b.dataset.t==="rep") loadRepTab();
   if(b.dataset.t==="radio") loadRadioTab();
-  if(b.dataset.t==="stats") loadStatsTab();
 });
+
+// ---- rail role cards ----
+let railNames={};   // role -> display name
+async function loadRailNames(){
+  try{ railNames.repeater=stripReply(await cmd("get name")); }catch(e){}
+  try{ railNames.room=stripReply(await cmd("room get name")); }catch(e){}
+  renderRail();
+}
+function renderRail(){
+  if(!lastDebug) return;
+  const rp=lastDebug.stats.repeater.packets||{};
+  const kinds=[["repeater","REPEATER",(rp.flood_tx||0)+(rp.direct_tx||0)+" fwd · "+(rp.recv_errors||0)+" err"],
+    ["room","ROOM","serving"],
+    ["companion","CHAT",contacts.length+" contacts · app "+(lastDebug.companion.client?"connected":"—")]];
+  let h="";
+  for(const [role,label,stat] of kinds){
+    const pk=selfIds[role];
+    h+="<div class=role><div class=rname><span class=dot"+(pk?"":" off")+"></span>"+label+"</div>"+
+      "<div>"+esc(railNames[role]||(role==="companion"?($("self-name").textContent||"").replace(/[()]/g,""):""))+"</div>"+
+      (pk?"<div class=rkey title='click to copy prefix' onclick=\"copyText('"+pk+"')\">"+pk+"</div>":"")+
+      "<div class=rstat>"+esc(stat)+"</div></div>";
+  }
+  $("rail-roles").innerHTML=h;
+}
 const stripReply=t=>t.replace(/^>\s*/,"").trim();
 function copyText(t){ navigator.clipboard&&navigator.clipboard.writeText(t); }
 function logout(){ localStorage.removeItem("mp_token"); localStorage.removeItem("repeater-token");
@@ -378,6 +422,7 @@ async function pollDebug(){
     $("dbg-info").textContent=info;
     $("dash-info").textContent=info;
     try{ renderDashTiles(d); }catch(e){}
+    try{ renderRail(); }catch(e){}
     $("dbg-stats").innerHTML=statRow("repeater",d.stats.repeater.packets,d.stats.repeater.core)+
       statRow("room",d.stats.room.packets,d.stats.room.core);
     $("dbg-nbrs").textContent=d.neighbors||"(none heard yet)";
@@ -392,6 +437,15 @@ function neighbours(){                      // [{prefix8, secsAgo, snr}]
     const p=l.split(":"); return {prefix:p[0]||"",secsAgo:+p[1]||0,snr:(+p[2]||0)/4};
   }).filter(n=>/^[0-9a-f]{8}$/i.test(n.prefix));
 }
+
+// ---- signal colouring: green = strong, orange = weak ----
+function snrCol(v){ return v>=0?"#39c07a":v>=-10?"#e0b34d":"#e08a4d"; }
+function rssiCol(v){ return v>=-90?"#39c07a":v>=-110?"#e0b34d":"#e08a4d"; }
+const snrSpan=v=>"<span style='color:"+snrCol(v)+"'>"+v+"</span>";
+const rssiSpan=v=>"<span style='color:"+rssiCol(v)+"'>"+v+"</span>";
+
+// hop-depth per node, mined from advert packets seen in the trace
+let advHops={};   // pk (full hex) -> smallest hop count seen
 
 // ---- packet annotation (parses captured raw bytes) ----
 const hx1=n=>(n??0).toString(16).padStart(2,"0");
@@ -438,6 +492,7 @@ function annot(p){
   let src="",info="";
   if(type===4&&pay.length>=100){                  // ADVERT: pk32 ts4 sig64 appdata
     const pk=hexa(pay.slice(0,32));
+    if(!(pk in advHops)||hops<advHops[pk]) advHops[pk]=hops;   // hop depth for the mesh view
     const c=contacts.find(c=>c.pk===pk);
     const self=Object.entries(selfIds).find(([n,pf])=>pk.startsWith(pf));
     const ad=pay.slice(100);
@@ -477,7 +532,7 @@ async function pollPkts(){
       const a=annot(p);
       tr.innerHTML="<td>"+when+"</td><td class="+(rx?"ok":"err")+">"+(rx?"RX":"TX:"+p.d)+"</td><td>"+
         ROUTES[p.h&3]+"</td><td>"+PTYPES[(p.h>>2)&15]+"</td><td>"+esc(a.src)+"</td><td class=mut>"+a.infoHtml+
-        "</td><td>"+p.l+"</td><td>"+(rx?p.snr:"")+"</td><td>"+(rx?p.rssi:"")+"</td>";
+        "</td><td>"+p.l+"</td><td>"+(rx?snrSpan(p.snr):"")+"</td><td>"+(rx?rssiSpan(p.rssi):"")+"</td>";
       const tb=$("pkt-rows"); tb.insertBefore(tr,tb.firstChild);
       while(tb.children.length>120) tb.removeChild(tb.lastChild);
     }
@@ -497,8 +552,9 @@ async function buildMesh(){
   // ---- table ----
   let rows="";
   contacts.forEach((c,ci)=>{
-    const route=c.outPathLen===255?"flood (no route)":c.outPathLen===0?"direct":
-      c.outPathLen+" hop"+(c.outPathLen>1?"s":"")+" "+hopsHtml(c.outPath);
+    const heard=(c.pk in advHops)?(advHops[c.pk]===0?"direct RF":"heard "+advHops[c.pk]+" hop"+(advHops[c.pk]>1?"s":"")+" away"):"";
+    const route=(c.outPathLen===255?"flood (no route)":c.outPathLen===0?"direct":
+      c.outPathLen+" hop"+(c.outPathLen>1?"s":"")+" "+hopsHtml(c.outPath))+(heard?" · "+heard:"");
     const hasLoc=(c.lat||c.lon);
     const traceable=c.outPathLen>0&&c.outPathLen<=64;
     rows+="<tr><td>"+esc(c.name||"?")+"</td><td class=mut>"+c.prefix.slice(0,8)+"</td><td>"+(KINDS[c.type]||c.type)+
@@ -509,7 +565,7 @@ async function buildMesh(){
   for(const n of nbrs){
     if(contacts.some(c=>c.pk.startsWith(n.prefix.toLowerCase()))) continue;   // already listed
     rows+="<tr><td class=mut>(neighbour)</td><td class=mut>"+n.prefix.toLowerCase()+"</td><td>repeater?</td>"+
-      "<td>direct (heard)</td><td>"+age(n.secsAgo)+"</td><td>-</td><td>-</td><td>"+n.snr.toFixed(1)+"</td><td></td></tr>";
+      "<td>direct (heard)</td><td>"+age(n.secsAgo)+"</td><td>-</td><td>-</td><td>"+snrSpan(n.snr.toFixed(1))+"</td><td></td></tr>";
   }
   // remembered neighbours (persisted snapshot; survive reboot/OTA)
   if(lastDebug&&lastDebug.saved_nbrs){
@@ -573,7 +629,12 @@ async function buildMesh(){
   }
   meshCtx={nodes,edges,nbrs};
   renderMeshSvg(nodes,edges);
+  if(!meshViewChosen){                      // default to geo when we have coordinates
+    meshViewChosen=true;
+    if(contacts.some(c=>c.lat||c.lon)) meshView("geo");
+  }
 }
+let meshViewChosen=false;
 let meshCtx=null, traceChain=null;
 function hopIdG(h){
   const m=contacts.filter(c=>parseInt(c.pk.slice(0,2),16)===h);
@@ -658,8 +719,9 @@ async function geoRender(){
     if(!(c.lat||c.lon)) continue;
     const p=[c.lat,c.lon]; pts.push(p);
     const route=c.outPathLen===255?"no route (flood)":c.outPathLen===0?"direct":c.outPathLen+" hops";
-    L.circleMarker(p,{radius:7,color:"#39c07a",weight:2})
-      .bindPopup("<b>"+esc(c.name||c.prefix.slice(0,8))+"</b><br>"+(KINDS[c.type]||"?")+" · "+route+
+    const heard=(c.pk in advHops)?("<br>heard "+(advHops[c.pk]===0?"directly":advHops[c.pk]+" hops away")):"";
+    L.circleMarker(p,{radius:7,color:c.outPathLen===0?"#4da3ff":"#39c07a",weight:2})
+      .bindPopup("<b>"+esc(c.name||c.prefix.slice(0,8))+"</b><br>"+(KINDS[c.type]||"?")+" · "+route+heard+
         (haveSelf?"<br>~"+distKm(selfLoc,p)+" km":"")).addTo(g);
     if(haveSelf) L.polyline([selfLoc,p],{color:"#5c6875",weight:1.2,
       dashArray:c.outPathLen===255?"4,6":null}).addTo(g);
@@ -784,6 +846,17 @@ function renderMsgs(){
   el.scrollTop=el.scrollHeight;
 }
 function contactName(prefix){ const c=contacts.find(c=>c.prefix.startsWith(prefix)); return c?c.name:null; }
+async function renameChat(){
+  const name=v("chat-name"); if(!name) return;
+  if(!compReady) await initComp();
+  const fs=await frames([8,...Array.from(new TextEncoder().encode(name))]);   // CMD_SET_ADVERT_NAME
+  if(fs.some(f=>f[0]===0)){
+    $("chat-name-status").textContent="renamed — adverts will announce '"+name+"'";
+    $("self-name").textContent="("+name+")";
+    $("chat-name").value="";
+    renderRail();
+  } else $("chat-name-status").textContent="rename failed ("+fs.map(f=>f[0]).join(",")+")";
+}
 async function sendMsg(){
   if(!selContact){ $("msg-status").textContent="select a contact first"; return; }
   const text=v("msg-text"); if(!text) return;
@@ -938,7 +1011,27 @@ function renderDashTiles(d){
     tile("Forwarded",(rp.flood_tx||0)+(rp.direct_tx||0),"rx errors "+((rp.recv_errors||0)+(ro.recv_errors||0)))+
     tile("Phone app",d.companion.client?"connected":(d.companion.tcp?"waiting":"down"),"tcp/5000");
 }
+// nodes nearby (System page): contacts ranked by how "close" they are —
+// direct first, then by advert hop depth, then by advert recency
+function renderNearby(){
+  if(!contacts.length){ return; }
+  const nowS=Math.floor(Date.now()/1000);
+  const rank=c=>(c.outPathLen===0?0:(c.pk in advHops?1+advHops[c.pk]:50))*1e10+(nowS-c.lastAdvert);
+  const sorted=[...contacts].sort((a,b)=>rank(a)-rank(b));
+  const shown=sorted.slice(0,12);
+  $("dash-nearby").innerHTML=shown.map(c=>{
+    const heard=c.outPathLen===0?"<span class=ok>direct</span>":
+      (c.pk in advHops)?(advHops[c.pk]===0?"<span class=ok>direct RF</span>":advHops[c.pk]+" hops"):
+      "<span class=mut>via mesh</span>";
+    const hasLoc=(c.lat||c.lon);
+    return "<tr><td>"+esc(c.name||"?")+"</td><td>"+(KINDS[c.type]||c.type)+"</td><td class=mut>"+
+      c.prefix.slice(0,8)+"</td><td>"+heard+"</td><td>"+age(nowS-c.lastAdvert)+"</td><td>"+
+      (hasLoc&&selfLoc&&(selfLoc[0]||selfLoc[1])?distKm(selfLoc,[c.lat,c.lon])+" km":"-")+"</td></tr>";
+  }).join("");
+  $("nearby-count").textContent="("+shown.length+" of "+contacts.length+" known — full list in Mesh)";
+}
 async function loadDash(){
+  renderNearby();
   try{
     $("dash-ver").textContent=stripReply(await cmd("ver"));
     $("dash-pubkey").textContent=stripReply(await cmd("get public.key"));
@@ -1182,11 +1275,12 @@ function cliKey(e){
 
 // ---- boot ----
 async function boot(){
-  pollDebug(); pollPkts(); loadDash();
+  pollDebug(); pollPkts(); loadDash(); loadStatsTab(); loadRailNames();
   setInterval(pollDebug,5000);
   setInterval(pollPkts,2500);
   setInterval(pollArchive,4000);
-  initComp().then(pollArchive).catch(()=>{});   // contacts + self loc power the packet annotator
+  setInterval(renderNearby,10000);
+  initComp().then(()=>{ pollArchive(); renderNearby(); renderRail(); }).catch(()=>{});
 }
 (async()=>{
   try{ const r=await fetch("/api/session",{headers:{"X-Auth-Token":TOKEN}}); if(r.status===401) return needLogin(); }
