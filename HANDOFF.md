@@ -359,3 +359,17 @@ trace instead). Chat client renameable from Messages (CMD_SET_ADVERT_NAME).
 SNR/RSSI colour-coded everywhere. Multi-room support was built then
 REVERTED at the operator's request (commits 2b0951e + revert 15a9e7d keep
 the design on record if wanted later).
+
+## Identity durability + sessions (2026-07-26, OTA #12-13)
+
+- **Identity loss incident**: the repeater's key silently changed
+  (3cd0b10e -> 30703070). Cause: the stock `if (!load()) { new; save(); }`
+  pattern destroys the only copy on ANY read failure. Identities are now
+  mirrored to NVS and restored from there on a failed FS read; new keys are
+  only minted when both sources are empty. Recovery command:
+  `set identity.<role> <192 hex>` (pub||prv). The original repeater key was
+  restored from the migration backup in the session scratchpad.
+- **Sessions**: 4 concurrent tokens, persisted across reboots (an OTA no
+  longer logs the browser out). Web/serial command buffers 192 -> 512.
+- **Room**: privacy mode (no adverts) + QR/meshcore:// join link + stored
+  posts view; see the Room section.
