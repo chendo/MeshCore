@@ -94,13 +94,45 @@ static bool multiIdLoad(const char* role, fs::FS* fs, mesh::LocalIdentity& id) {
   return false;
 }
 
-// Save a freshly-created identity into the NVS mirror.
+// Save an identity into the NVS mirror, but NEVER over an existing entry.
+//
+// This is the safety catch that was missing: when a load failed for a
+// transient reason (NVS pressure, a busy filesystem) the caller minted a new
+// identity and called this, overwriting the good backup with the freshly
+// invented key — making the loss permanent. A mirror is only ever written here
+// when there is nothing to lose. Deliberate rekeys go through multiIdImport(),
+// which is allowed to overwrite.
+// Deliberate rekey / restore: this MUST replace whatever is stored, otherwise
+// a bad mirror would keep winning the mismatch check and undo the operator's
+// change on the next boot.
+static void multiIdSaveMirrorForce(const char* role, mesh::LocalIdentity& id) {
+  uint8_t blob[MULTI_ID_BLOB];
+  if (!multiIdToBlob(id, blob)) return;
+  Preferences nvs;
+  if (!nvs.begin("multiids", false)) {
+    Serial.printf("[%s] WARNING: identity mirror unavailable (NVS full?)\n", role);
+    return;
+  }
+  nvs.putBytes(role, blob, MULTI_ID_BLOB);
+  nvs.end();
+}
+
 static void multiIdImportSaveMirror(const char* role, mesh::LocalIdentity& id) {
   uint8_t blob[MULTI_ID_BLOB];
   if (!multiIdToBlob(id, blob)) return;
   Preferences nvs;
-  nvs.begin("multiids", false);
-  nvs.putBytes(role, blob, MULTI_ID_BLOB);
+  if (!nvs.begin("multiids", false)) {
+    Serial.printf("[%s] WARNING: identity mirror unavailable (NVS full?)\n", role);
+    return;
+  }
+  uint8_t existing[MULTI_ID_BLOB];
+  bool have = nvs.getBytes(role, existing, sizeof(existing)) == MULTI_ID_BLOB;
+  if (have && memcmp(existing, blob, MULTI_ID_BLOB) != 0) {
+    nvs.end();
+    Serial.printf("[%s] REFUSING to overwrite the saved identity with a different key\n", role);
+    return;
+  }
+  if (!have) nvs.putBytes(role, blob, MULTI_ID_BLOB);
   nvs.end();
 }
 
@@ -132,6 +164,6 @@ static bool multiIdImport(const char* role, fs::FS* fs, const char* hex) {
   store.begin();
   if (!store.save("_main", id)) return false;
 
-  multiIdImportSaveMirror(role, id);   // keep the NVS mirror in step
+  multiIdSaveMirrorForce(role, id);   // deliberate change: the mirror must follow
   return true;
 }

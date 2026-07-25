@@ -84,6 +84,14 @@ int SharedRadioCore::takeFrame(RadioPort* p, uint8_t* dst, int sz) {
 
 bool SharedRadioCore::tryStartSend(RadioPort* p, const uint8_t* bytes, int len) {
   if (_tx_owner != nullptr) {
+    // A sibling identity holds the transmitter. The dispatcher just backs off
+    // and retries, so this used to be completely invisible — count it (overall
+    // and per identity) and log a trace event so contention between the roles
+    // on this board can actually be seen.
+    _tx_contention = _tx_contention + 1;
+    int idx = portIndex(p);
+    if (idx >= 0 && idx < MAX_PORTS) _tx_contention_port[idx] = _tx_contention_port[idx] + 1;
+    pktLogAdd((int8_t)idx, nullptr, 0, 0, 0, PKT_FLAG_TX_BUSY, (int16_t)portIndex(_tx_owner));
     return false;   // transmitter busy -> caller (Dispatcher) will drop & retry
   }
   // apply this persona's TX power before keying up

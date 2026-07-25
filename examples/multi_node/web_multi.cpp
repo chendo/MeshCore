@@ -15,6 +15,7 @@
 #include <WiFi.h>
 #include <FS.h>
 #include <esp_heap_caps.h>
+#include <nvs.h>                           // NVS health (identity mirror lives here)
 #include <target.h>                        // board (battery millivolts), rtc_clock
 #include <helpers/SharedRadio.h>
 #include <helpers/BaseSerialInterface.h>   // MAX_FRAME_SIZE
@@ -199,7 +200,16 @@ static esp_err_t handleDebug(httpd_req_t* req) {
   out += "},\"radio\":{\"noise\":";
   { SharedRadioCore* c = multiCore(); out += String(c ? c->real()->getNoiseFloor() : 0);
     out += ",\"rx\":"; out += String(c ? c->rxTotal() : 0);
-    out += ",\"tx\":"; out += String(c ? c->txTotal() : 0); }
+    out += ",\"tx\":"; out += String(c ? c->txTotal() : 0);
+    out += ",\"busy\":"; out += String(c ? c->txContention() : 0); }
+  out += "},\"nvs\":{";
+  { nvs_stats_t st;
+    if (nvs_get_stats(nullptr, &st) == ESP_OK) {
+      out += "\"used\":"; out += String(st.used_entries);
+      out += ",\"free\":"; out += String(st.free_entries);
+      out += ",\"total\":"; out += String(st.total_entries);
+    } else out += "\"used\":0,\"free\":0,\"total\":0";
+  }
   out += "},\"saved_nbrs\":\"";
   { File f = multiSysFS()->open("/neighbours.csv", "r");
     if (f) {

@@ -85,6 +85,7 @@ public:
 #define PKT_FLAG_OK      0
 #define PKT_FLAG_RX_ERR  1
 #define PKT_FLAG_TX_FAIL 2
+#define PKT_FLAG_TX_BUSY 3   // send deferred: a sibling identity held the radio
 struct PktLogEntry {
   uint32_t seq;
   uint32_t t_ms;
@@ -144,6 +145,13 @@ public:
   uint32_t pktLogSeq() const { return _pkt_seq; }
   uint32_t rxTotal() const { return _rx_total; }
   uint32_t txTotal() const { return _tx_total; }
+  // sends refused because a sibling identity held the transmitter — the cost
+  // of sharing one radio, invisible until now because the dispatcher just
+  // silently backs off and retries
+  uint32_t txContention() const { return _tx_contention; }
+  uint32_t txContentionFor(int idx) const {
+    return (idx >= 0 && idx < MAX_PORTS) ? _tx_contention_port[idx] : 0;
+  }
   // copy entries with seq > after_seq into out (oldest first); returns count
   int pktLogCopy(PktLogEntry* out, int max_entries, uint32_t after_seq);
   const char* portName(int idx) const { return (idx >= 0 && idx < _num_ports) ? _port_names[idx] : "?"; }
@@ -206,5 +214,7 @@ private:
   PktLogEntry _pkt_log[PKT_LOG_SIZE];
   volatile uint32_t _pkt_seq = 0;   // total packets ever logged; ring index = seq % SIZE
   volatile uint32_t _rx_total = 0, _tx_total = 0;
+  volatile uint32_t _tx_contention = 0;
+  volatile uint32_t _tx_contention_port[MAX_PORTS] = {0};
   const char* _port_names[MAX_PORTS] = { "?", "?", "?", "?", "?", "?", "?", "?" };
 };

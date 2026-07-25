@@ -3749,13 +3749,28 @@ bool WebPanelServer::isAuthorized(httpd_req_t* req) const {
 
 // ---- session table (persisted so reboots/OTA don't log everyone out) ----
 
+// Sessions live in RTC slow memory, NOT NVS. They only need to survive a
+// software restart (an OTA update, a 'reboot'), which RTC memory does — and
+// unlike NVS it costs no flash writes. Persisting them in NVS wrote a blob on
+// every single login, and that churn is capable of exhausting a small NVS
+// partition, at which point unrelated NVS reads start failing. On this device
+// that cascaded into identity loss.
+#define WEB_SESSION_MAGIC 0x57534553u   // 'WSES'
+#define WEB_SESSION_SLOTS 4     // must match WebPanelServer::MAX_SESSIONS
+RTC_NOINIT_ATTR static uint32_t s_sess_magic;
+RTC_NOINIT_ATTR static char     s_sess_tokens[WEB_SESSION_SLOTS][33];
+RTC_NOINIT_ATTR static uint8_t  s_sess_next_slot;
+
 void WebPanelServer::loadSessions() {
-  Preferences nvs;
-  if (!nvs.begin("webpanel", true)) return;
-  size_t n = nvs.getBytes("sess", _tokens, sizeof(_tokens));
-  _next_slot = nvs.getUChar("slot", 0) % MAX_SESSIONS;
-  nvs.end();
-  if (n != sizeof(_tokens)) { memset(_tokens, 0, sizeof(_tokens)); _next_slot = 0; }
+  static_assert(WEB_SESSION_SLOTS == WebPanelServer::MAX_SESSIONS,
+                "RTC session table must match MAX_SESSIONS");
+  if (s_sess_magic != WEB_SESSION_MAGIC) {        // cold boot: RTC RAM is garbage
+    memset(s_sess_tokens, 0, sizeof(s_sess_tokens));
+    s_sess_next_slot = 0;
+    s_sess_magic = WEB_SESSION_MAGIC;
+  }
+  memcpy(_tokens, s_sess_tokens, sizeof(_tokens));
+  _next_slot = s_sess_next_slot % MAX_SESSIONS;
   for (int i = 0; i < MAX_SESSIONS; i++) {
     _tokens[i][sizeof(_tokens[i]) - 1] = 0;
     if (_tokens[i][0] != 0) { strncpy(_token, _tokens[i], sizeof(_token) - 1); _token[sizeof(_token)-1] = 0; }
@@ -3763,11 +3778,9 @@ void WebPanelServer::loadSessions() {
 }
 
 void WebPanelServer::saveSessions() {
-  Preferences nvs;
-  if (!nvs.begin("webpanel", false)) return;
-  nvs.putBytes("sess", _tokens, sizeof(_tokens));
-  nvs.putUChar("slot", _next_slot);
-  nvs.end();
+  memcpy(s_sess_tokens, _tokens, sizeof(s_sess_tokens));
+  s_sess_next_slot = _next_slot;
+  s_sess_magic = WEB_SESSION_MAGIC;
 }
 
 bool WebPanelServer::addSession(const char* tok) {

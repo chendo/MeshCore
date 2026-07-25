@@ -627,14 +627,19 @@ async function pollPkts(){
         // copy is still evidence (often the same packet arrives clean later)
         let a={src:"",infoHtml:""};
         try{ if(p.raw) a=annot(p); }catch(e){}
-        const rt=p.raw?ROUTES[p.h&3]:"?", ty=p.raw?PTYPES[(p.h>>2)&15]:"?";
+        // rendered in the same columns as a good packet — the RX-CRC label and
+        // the modal's banner carry the "this may be wrong" warning
+        const rt=p.raw?ROUTES[p.h&3]:"-", ty=p.raw?PTYPES[(p.h>>2)&15]:"-";
         tr.innerHTML="<td>"+when+"</td><td style='color:#e08a4d' title='"+esc(why)+"'>"+
-          (p.x===-7?"RX-CRC":"RX-ERR")+"</td><td class=mut>"+rt+"?</td><td class=mut>"+ty+"?</td><td class=mut>"+
-          esc(a.src)+"</td><td class=mut>"+esc(why)+(p.raw?" · best-effort decode: ":" · no bytes recovered")+
-          a.infoHtml+"</td><td>"+(p.l||"?")+"</td><td>"+
+          (p.x===-7?"RX-CRC":"RX-ERR")+"</td><td>"+rt+"</td><td>"+ty+"</td><td>"+
+          esc(a.src)+"</td><td class=mut>"+(p.raw?a.infoHtml:esc(why))+"</td><td>"+(p.l||"-")+"</td><td>"+
           (p.snr?snrSpan(p.snr):"")+"</td><td>"+(p.rssi?rssiSpan(p.rssi):"")+"</td>";
         if(p.raw){ tr.style.cursor="pointer"; tr.title="click to decode (corrupt)";
           tr.onclick=()=>openPktModal(p,when,why); }
+      } else if(p.e===3){   // send deferred: a sibling identity held the radio
+        const owner=(p.x>=0&&lastDebug)?(["repeater","room","companion","chat1","chat2","chat3","chat4","chat5"][p.x]||("port "+p.x)):"another identity";
+        tr.innerHTML="<td>"+when+"</td><td style='color:#e0b34d'>TX-BUSY:"+esc(p.d)+"</td><td colspan=4 class=mut>"+
+          "send deferred — "+esc(owner)+" was transmitting (will retry)</td><td>-</td><td></td><td></td>";
       } else if(p.e===2){   // TX never completed
         tr.innerHTML="<td>"+when+"</td><td style='color:#e05d5d'>TX-FAIL:"+esc(p.d)+"</td><td colspan=4 class=mut>"+
           "send timed out before TX-done (radio contention?)</td><td>-</td><td></td><td></td>";
@@ -1326,7 +1331,10 @@ function renderDashTiles(d){
   $("dash-tiles").innerHTML=
     tile("Battery",core.battery_mv?(core.battery_mv/1000).toFixed(2)+" V":"-","")+
     tile("Uptime",upStr,"")+
-    tile("Radio RX / TX",(d.radio?d.radio.rx:"-")+" / "+(d.radio?d.radio.tx:"-"),"packets since boot")+
+    tile("Radio RX / TX",(d.radio?d.radio.rx:"-")+" / "+(d.radio?d.radio.tx:"-"),
+      "packets · "+(d.radio&&d.radio.busy?d.radio.busy+" deferred (contention)":"no contention"))+
+    tile("NVS",(d.nvs&&d.nvs.total?Math.round(100*d.nvs.used/d.nvs.total)+" % used":"-"),
+      d.nvs?(d.nvs.free+" entries free"):"identity mirror store")+
     tile("Noise floor",(d.radio&&d.radio.noise?d.radio.noise+" dBm":"-"),"")+
     tile("WiFi",wifiRssi?wifiRssi+" dBm":"offline","")+
     tile("CPU load",(d.load!==undefined?d.load+" %":"-"),(d.lps?d.lps+" loops/s":"main task duty"))+
