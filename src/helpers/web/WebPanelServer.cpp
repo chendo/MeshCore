@@ -3317,7 +3317,11 @@ bool WebPanelServer::start() {
   noteActivity();
 
   httpd_ssl_config_t config = HTTPD_SSL_CONFIG_DEFAULT();
-  config.httpd.max_open_sockets = 2;
+  // 2 sockets starves every other client once a browser holds keep-alive
+  // connections (the polling panel does); LRU purge closes the least recently
+  // used connection instead of silently ignoring new ones.
+  config.httpd.max_open_sockets = 3;
+  config.httpd.lru_purge_enable = true;
   config.httpd.max_uri_handlers = _ext_routes_fn ? 18 : 9;   // headroom for extension routes
   config.httpd.max_resp_headers = 4;
   config.httpd.backlog_conn = 2;
