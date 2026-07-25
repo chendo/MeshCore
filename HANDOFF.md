@@ -345,3 +345,17 @@ commits from now on.
   RTC); Mesh tab shows "(remembered)" rows after restart.
 - **Dashboard**: tile grid (battery/uptime/radio totals/noise/wifi/heap/
   contacts/forwarded/app state) + battery & packet-rate sparklines.
+
+## V2 sidebar console (2026-07-26, OTA #8)
+
+The panel is now a sidebar console: persistent left rail with live role
+cards (repeater/room/chat — name, pubkey prefix click-to-copy, state,
+headline stat) + vertical nav. Dashboard+Stats merged into "System" (tiles,
+trends, per-identity tables, and a "Nodes nearby" table showing each heard
+node's name/kind/key/heard-path/last-advert/distance). Mesh defaults to the
+geo view (the logical hop graph is inherently sparse — passively heard
+nodes carry no learned route; advert hop depth is mined from the packet
+trace instead). Chat client renameable from Messages (CMD_SET_ADVERT_NAME).
+SNR/RSSI colour-coded everywhere. Multi-room support was built then
+REVERTED at the operator's request (commits 2b0951e + revert 15a9e7d keep
+the design on record if wanted later).
