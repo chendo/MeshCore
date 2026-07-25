@@ -402,7 +402,25 @@ static void applyAdvertPolicy() {
   // running 'set name' unconditionally clobbered operator-set names on every
   // restart, since names persist via each identity's own prefs file.
   if (!fs_rep.exists("/com_prefs"))  cfg(&repeater_module, "set name " ADVERT_NAME " Repeater");
-  if (!fs_room.exists("/com_prefs")) cfg(&room_module,     "set name " ADVERT_NAME " Room");
+  if (!fs_room.exists("/com_prefs")) {
+    // ROOMS ARE PRIVATE BY DEFAULT: a brand-new room neither announces itself
+    // nor accepts the compile-time password everyone knows. It is discoverable
+    // only via the panel's QR/meshcore:// share link, and joinable only with
+    // the random password minted here. Operator changes always win afterwards
+    // (this whole block is first-boot only).
+    cfg(&room_module, "set name " ADVERT_NAME " Room");
+    cfg(&room_module, "set advert.interval 0");
+    cfg(&room_module, "set flood.advert.interval 0");
+
+    static const char* ALPHABET = "abcdefghijkmnopqrstuvwxyz23456789";   // no look-alikes
+    char pw[13];
+    for (int i = 0; i < 12; i++) pw[i] = ALPHABET[esp_random() % 33];
+    pw[12] = 0;
+    char c[48];
+    snprintf(c, sizeof(c), "set guest.password %s", pw);
+    cfg(&room_module, c);
+    Serial.printf("[room] private by default — adverts off, join password: %s\n", pw);
+  }
   // location policy is a design constraint, applied every boot:
   cfg(&repeater_module, "gps advert prefs");     // repeater shares stored lat/lon
   cfg(&room_module,     "gps advert none");       // room never shares location

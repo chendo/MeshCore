@@ -257,9 +257,10 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
       <button class="sec" onclick="roomCmd('set name '+v('room-name')).then(loadRoomTab)">Save</button></div>
     <div class="row"><span class="mut" style="width:130px">join password</span>
       <input id="room-pwd" class="grow" placeholder="room join (guest) password" autocomplete="off" data-1p-ignore>
-      <button class="sec" onclick="roomCmd('set guest.password '+v('room-pwd'))">Save</button></div>
-    <div class="mut" style="font-size:11px;margin:-4px 0 8px 138px">members join with this password — the compile-time
-      default is the widely-known "hello"; CHANGE IT for a private room</div>
+      <button class="sec" onclick="roomCmd('set guest.password '+v('room-pwd')).then(loadRoomTab)">Save</button>
+      <button class="sec" onclick="genRoomPwd()">Generate</button></div>
+    <div class="mut" style="font-size:11px;margin:-4px 0 8px 138px">share this with members — new rooms get a random one
+      (never a published default). Existing members already in the ACL keep access if you change it.</div>
     <div class="row"><span class="mut" style="width:130px">admin password</span>
       <input id="room-apwd" class="grow" placeholder="room admin password" autocomplete="off" data-1p-ignore>
       <button class="sec" onclick="roomCmd('password '+v('room-apwd'))">Save</button></div>
@@ -271,9 +272,9 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
       <button class="sec" onclick="roomCmd('clock')">Clock</button></div>
   </div>
   <div class="card"><h3>Privacy</h3>
-    <div class="mut" style="font-size:12px;margin-bottom:8px">A room is private when it (1) never announces itself and
-    (2) has a strong join password. In private mode the room sends no adverts, so it's invisible to passers-by — share
-    it with the QR/link below instead. Anyone who already has the key AND the join password can still use it.</div>
+    <div class="mut" style="font-size:12px;margin-bottom:8px">Rooms are <b>private by default</b>: a new room never
+    advertises and gets a random join password, so it can only be found via the share link below and only entered with
+    that password. Turning private mode off makes the room announce itself to the whole mesh.</div>
     <div class="row"><label><input type="checkbox" id="room-private" onchange="roomPrivacy(this.checked)"> private mode
       (never advertise)</label>
       <span id="room-priv-state" class="mut" style="font-size:12px"></span></div>
@@ -934,6 +935,7 @@ async function loadRoomTab(){
     const name=stripReply(await roomCmd("get name"));
     $("room-name").value=name; $("room-title").textContent="— "+name;
     railNames.room=name;
+    $("room-pwd").value=stripReply(await cmd("room get guest.password"));
     $("room-lat").value=stripReply(await cmd("room get lat"));
     $("room-lon").value=stripReply(await cmd("room get lon"));
     const adv=parseInt(stripReply(await cmd("room get advert.interval")))||0;
@@ -945,6 +947,12 @@ async function loadRoomTab(){
     buildRoomShare(name);
   }catch(e){}
   loadRoomPosts();
+}
+function genRoomPwd(){
+  const ab="abcdefghijkmnopqrstuvwxyz23456789";
+  const r=crypto.getRandomValues(new Uint8Array(12));
+  $("room-pwd").value=Array.from(r,b=>ab[b%33]).join("");
+  $("room-priv-state").textContent="generated — press Save to apply, then share it with members";
 }
 async function roomPrivacy(on){
   if(on){
