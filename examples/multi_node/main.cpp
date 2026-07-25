@@ -249,6 +249,17 @@ public:
                network.getWifiPowerSave());
       return;
     }
+    if (strncmp(command, "set loopback ", 13) == 0) {
+      bool on = strcmp(command + 13, "on") == 0 || strcmp(command + 13, "1") == 0;
+      if (g_core) g_core->setLoopback(on);
+      snprintf(reply, reply_size, "OK - on-board loopback %s (identities %s hear each other)",
+               on ? "on" : "off", on ? "can" : "cannot");
+      return;
+    }
+    if (strcmp(command, "get loopback") == 0) {
+      snprintf(reply, reply_size, "> %s", (g_core && g_core->loopback()) ? "on" : "off");
+      return;
+    }
     if (strncmp(command, "set wifi.powersave ", 19) == 0) {
       if (network.setWifiPowerSave(command + 19)) {
         // authoritative copy in OUR store: the repeater's inert stock

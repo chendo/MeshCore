@@ -18,6 +18,20 @@ void SharedRadioCore::pump() {
     return;   // still delivering the buffered frame this cycle
   }
 
+  // Deliver a locally-transmitted frame to the sibling identities before
+  // pulling the next one off the air (see setLoopback()).
+  if (_lb_count > 0) {
+    LbFrame& f = _lb[_lb_head];
+    memcpy(_rx_buf, f.buf, f.len);
+    _rx_len = f.len;
+    _rx_snr = 12.0f;      // synthetic: same board, effectively perfect link
+    _rx_rssi = -20.0f;
+    _consumed_mask = (f.from >= 0) ? (1u << f.from) : 0;   // sender doesn't hear itself
+    _lb_head = (_lb_head + 1) % LB_SLOTS;
+    _lb_count--;
+    return;
+  }
+
   uint8_t tmp[MAX_TRANS_UNIT];
   int len = _real->recvRaw(tmp, sizeof(tmp));   // also re-arms real RX
 
@@ -76,6 +90,14 @@ bool SharedRadioCore::tryStartSend(RadioPort* p, const uint8_t* bytes, int len) 
     _tx_owner = p;
     _tx_completed = false;
     pktLogAdd((int8_t)portIndex(p), bytes, len, 0, 0);
+
+    if (_loopback && _num_ports > 1 && len > 0 && len <= MAX_TRANS_UNIT && _lb_count < LB_SLOTS) {
+      LbFrame& f = _lb[(_lb_head + _lb_count) % LB_SLOTS];
+      memcpy(f.buf, bytes, len);
+      f.len = (uint8_t)len;
+      f.from = (int8_t)portIndex(p);
+      _lb_count++;
+    }
   }
   return ok;
 }

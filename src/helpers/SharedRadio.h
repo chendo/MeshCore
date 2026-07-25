@@ -147,6 +147,15 @@ public:
     _rx_err_fn = fn; _rx_err_code_fn = code_fn; _rx_err_seen = fn ? fn() : 0;
   }
 
+  // TX loopback: identities on this board share one antenna and the radio is
+  // half-duplex, so nothing any of them transmits is ever heard by the others
+  // — the companion cannot see its own room, the repeater cannot relay for
+  // them, etc. With loopback on, every transmitted frame is also delivered to
+  // the sibling ports (not the sender) as if received, which is what a second
+  // physical node in the same room would experience.
+  void setLoopback(bool on) { _loopback = on; }
+  bool loopback() const { return _loopback; }
+
 private:
   int portIndex(RadioPort* p) const {
     for (int i = 0; i < _num_ports; i++) if (_ports[i] == p) return i;
@@ -172,6 +181,13 @@ private:
   uint32_t (*_rx_err_fn)() = nullptr;
   int16_t (*_rx_err_code_fn)() = nullptr;
   uint32_t _rx_err_seen = 0;
+
+  // loopback queue (frames sent by one port, pending delivery to the others)
+  static const int LB_SLOTS = 4;
+  struct LbFrame { uint8_t buf[MAX_TRANS_UNIT]; uint8_t len; int8_t from; };
+  LbFrame _lb[LB_SLOTS];
+  uint8_t _lb_head = 0, _lb_count = 0;
+  bool _loopback = true;
   bool _tx_completed = false;   // did the current owner's send reach TX-done?
   PktLogEntry _pkt_log[PKT_LOG_SIZE];
   volatile uint32_t _pkt_seq = 0;   // total packets ever logged; ring index = seq % SIZE

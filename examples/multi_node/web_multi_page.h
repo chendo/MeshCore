@@ -269,7 +269,9 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
       <button class="sec" onclick="roomCmd('set lat '+v('room-lat')).then(()=>roomCmd('set lon '+v('room-lon')))">Save</button>
       <span class="mut" style="font-size:11px">(never advertised — room policy)</span></div>
     <div class="row"><button class="sec" onclick="roomCmd('get acl')">List members (ACL)</button>
-      <button class="sec" onclick="roomCmd('clock')">Clock</button></div>
+      <button class="sec" onclick="roomCmd('clock')">Clock</button>
+      <button class="sec" onclick="joinOwnRoom()">Join from this node's chat client</button></div>
+    <div id="room-join-state" class="mut" style="font-size:12px"></div>
   </div>
   <div class="card"><h3>Privacy</h3>
     <div class="mut" style="font-size:12px;margin-bottom:8px">Rooms are <b>private by default</b>: a new room never
@@ -947,6 +949,42 @@ async function loadRoomTab(){
     buildRoomShare(name);
   }catch(e){}
   loadRoomPosts();
+}
+// Log this box's own chat client into this box's room. Works because the
+// shared-radio arbiter loops locally-transmitted frames back to the sibling
+// identities (they share one antenna and can't otherwise hear each other).
+async function joinOwnRoom(){
+  const st=$("room-join-state");
+  st.textContent="joining...";
+  if(!compReady) await initComp();
+  await loadFullKeys();
+  const pk=fullKeys.room, pw=v("room-pwd");
+  if(!pk){ st.textContent="room pubkey unavailable"; return; }
+  if(!pw){ st.textContent="load or set the join password first"; return; }
+  await loadContacts();
+  if(!contacts.some(c=>c.pk===pk)){
+    st.textContent="the chat client hasn't heard the room yet — press 'Announce once now', wait a few seconds, retry";
+    return;
+  }
+  const seen=archSeq;
+  const body=[26,...pk.match(/../g).map(h=>parseInt(h,16)),...Array.from(new TextEncoder().encode(pw))];
+  const fs=await frames(body,6000,600);
+  if(!fs.some(f=>f[0]===6)){ st.textContent="login not sent ("+fs.map(f=>f[0]).join(",")+")"; return; }
+  st.textContent="login sent, waiting for the room to answer...";
+  for(let i=0;i<12;i++){
+    await new Promise(r=>setTimeout(r,1500));
+    try{
+      const r=await api("/api/multi/comp/archive?after="+seen);
+      const buf=new Uint8Array(await r.arrayBuffer());
+      let o=4;
+      while(o+6<=buf.length){
+        const l=buf[o+4]|(buf[o+5]<<8), f=buf.slice(o+6,o+6+l); o+=6+l;
+        if(f[0]===0x85){ st.innerHTML="<span class=ok>joined — the chat client is now a member</span>"; return; }
+        if(f[0]===0x86){ st.innerHTML="<span class=err>rejected — wrong join password</span>"; return; }
+      }
+    }catch(e){}
+  }
+  st.textContent="no answer yet (the room may still be busy) — check the ACL";
 }
 function genRoomPwd(){
   const ab="abcdefghijkmnopqrstuvwxyz23456789";

@@ -82,8 +82,12 @@ public:
     // into the archive, so the web UI can show history without consuming
     // anything from the companion's offline queue. Trace results (0x89) are
     // mirrored too so the web traceroute can pick them up.
+    // messages, plus EVERY async push (0x80..0x8F: login result, path update,
+    // send confirmation, trace, new advert...). Pushes are written only to the
+    // phone's TCP socket, so without mirroring the web UI can never observe
+    // the outcome of anything it initiates (e.g. a room login).
     if (len > 0 && (src[0] == 7 || src[0] == 8 || src[0] == 16 || src[0] == 17 || src[0] == 27 ||
-                    src[0] == 0x89)) {
+                    (src[0] >= 0x80 && src[0] <= 0x8F))) {
       archiveAdd(src, len);
     }
     if (len > 0 && src[0] >= 0x80) {   // async push -> phone app
