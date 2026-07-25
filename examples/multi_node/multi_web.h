@@ -1,0 +1,39 @@
+#pragma once
+
+// Glue between the composition root (main.cpp), the companion wrapper
+// (wrap_companion.cpp) and the /multi web page + JSON endpoints
+// (web_multi.cpp).
+
+#include <stddef.h>
+#include <stdint.h>
+#include <esp_http_server.h>
+
+class SharedRadioCore;
+class WebPanelServer;
+
+// ---- provided by main.cpp ----
+SharedRadioCore* multiCore();
+// run a console command (same dispatcher as serial console / web /api/command:
+// supports repeater/room/companion prefixes plus composition intercepts)
+void multiRunConsole(const char* cmd, char* reply, size_t reply_size);
+void multiGetRadioParams(float* freq, float* bw, uint8_t* sf, uint8_t* cr);
+
+// ---- provided by wrap_companion.cpp ----
+// Inject one app-protocol frame into the companion mesh and collect its
+// response frames. out receives [u16 len LE][frame bytes]... concatenated.
+// Returns total bytes written to out, 0 if no response before timeout,
+// -1 if the companion isn't up or another exchange is in progress.
+int  compWebFrameExchange(const uint8_t* frame, size_t len,
+                          uint8_t* out, size_t out_cap,
+                          uint32_t total_ms, uint32_t idle_ms);
+bool compTcpStarted();
+bool compTcpClientConnected();
+// read-only mirror of synced message frames (does NOT consume the queue)
+uint32_t compArchiveSeq();
+int  compArchiveCopy(uint32_t after_seq, uint8_t* out, size_t cap);
+
+// ---- provided by web_multi.cpp ----
+// registered via WebPanelServer::setExtRoutesRegistrar()
+void multiWebRegisterRoutes(httpd_handle_t server, WebPanelServer* panel);
+// called from the main loop: samples stats history for the panel's Stats tab
+void multiWebTick();

@@ -1,0 +1,334 @@
+// The unified web panel ("/") + JSON/binary endpoints, registered on the stock
+// web server via WebPanelServer::setExtRoutesRegistrar() with index takeover.
+// Reuses the panel's /login session token for auth. Stock SPA remains at /app.
+//
+// Endpoints:
+//   GET  /                          the unified panel (web_multi_page.h)
+//   GET  /multi                     redirect to / (legacy bookmark)
+//   GET  /api/multi/debug           JSON: identities, wifi, stats, neighbors, companion state
+//   GET  /api/multi/packets?after=N JSON: radio packet trace from SharedRadioCore
+//   GET  /api/multi/stats?series=X  JSON: sampled history (battery/heap/wifi_rssi/noise/packets)
+//   POST /api/multi/comp/frame      binary app-protocol frame in -> [u16 len][frame]... out
+//   GET  /api/multi/comp/archive    read-only mirror of synced message frames
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <esp_heap_caps.h>
+#include <target.h>                        // board (battery millivolts)
+#include <helpers/SharedRadio.h>
+#include <helpers/BaseSerialInterface.h>   // MAX_FRAME_SIZE
+#include <helpers/web/WebPanelServer.h>
+#include "multi_web.h"
+
+// ---------- stats history sampler ----------
+// One sample per minute into a PSRAM ring; 1440 samples = 24h of history.
+
+struct StatSample {
+  uint32_t t_s;        // uptime seconds at sample time
+  uint16_t batt_mv;
+  int16_t  wifi_rssi;
+  int16_t  noise;      // radio noise floor dBm
+  uint16_t heap_kb;
+  uint32_t rx_total, tx_total;
+};
+static const int STAT_SLOTS = 1440;
+static StatSample* s_stats = nullptr;
+static volatile uint32_t s_stat_seq = 0;
+static uint32_t s_next_sample_ms = 0;
+
+void multiWebTick() {
+  uint32_t now = millis();
+  if (now < s_next_sample_ms) return;
+  s_next_sample_ms = now + 60000;
+  if (s_stats == nullptr) {
+    s_stats = (StatSample*)heap_caps_malloc(sizeof(StatSample) * STAT_SLOTS,
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_stats == nullptr) return;
+  }
+  StatSample& s = s_stats[s_stat_seq % STAT_SLOTS];
+  s.t_s = now / 1000;
+  s.batt_mv = (uint16_t)board.getBattMilliVolts();
+  s.wifi_rssi = (WiFi.status() == WL_CONNECTED) ? (int16_t)WiFi.RSSI() : 0;
+  SharedRadioCore* core = multiCore();
+  s.noise = core ? (int16_t)core->real()->getNoiseFloor() : 0;
+  s.heap_kb = (uint16_t)(ESP.getFreeHeap() / 1024);
+  s.rx_total = core ? core->rxTotal() : 0;
+  s.tx_total = core ? core->txTotal() : 0;
+  s_stat_seq = s_stat_seq + 1;
+}
+
+static WebPanelServer* s_panel = nullptr;
+
+// ---------- helpers ----------
+
+static bool authOk(httpd_req_t* req) {
+  return s_panel != nullptr && s_panel->extAuthorize(req);
+}
+
+static esp_err_t deny(httpd_req_t* req) {
+  return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+}
+
+// append src to dst as a JSON string body (escapes quotes/backslash/control)
+static void jsonEscapeAppend(String& dst, const char* src) {
+  for (const char* p = src; *p; p++) {
+    char c = *p;
+    if (c == '"' || c == '\\') { dst += '\\'; dst += c; }
+    else if (c == '\n') dst += "\\n";
+    else if (c == '\r') { }
+    else if ((uint8_t)c < 0x20) dst += ' ';
+    else dst += c;
+  }
+}
+
+static void runConsoleInto(String& dst, const char* cmd) {
+  char reply[1024];
+  reply[0] = 0;
+  multiRunConsole(cmd, reply, sizeof(reply));
+  jsonEscapeAppend(dst, reply);
+}
+
+// ---------- /api/multi/debug ----------
+
+static esp_err_t handleDebug(httpd_req_t* req) {
+  if (!authOk(req)) return deny(req);
+
+  String out;
+  out.reserve(3072);
+  out += "{\"identities\":\"";  runConsoleInto(out, "identities");
+  out += "\",\"wifi\":\"";      runConsoleInto(out, "wifi");
+  out += "\",\"neighbors\":\""; runConsoleInto(out, "neighbors");
+  out += "\",\"stats\":{\"repeater\":{\"packets\":";
+  { char r[1024]; r[0]=0; multiRunConsole("repeater stats-packets", r, sizeof(r)); out += (r[0]=='{') ? r : "null"; }
+  out += ",\"core\":";
+  { char r[1024]; r[0]=0; multiRunConsole("repeater stats-core", r, sizeof(r)); out += (r[0]=='{') ? r : "null"; }
+  out += "},\"room\":{\"packets\":";
+  { char r[1024]; r[0]=0; multiRunConsole("room stats-packets", r, sizeof(r)); out += (r[0]=='{') ? r : "null"; }
+  out += ",\"core\":";
+  { char r[1024]; r[0]=0; multiRunConsole("room stats-core", r, sizeof(r)); out += (r[0]=='{') ? r : "null"; }
+  out += "}},\"companion\":{\"tcp\":";
+  out += compTcpStarted() ? "true" : "false";
+  out += ",\"client\":";
+  out += compTcpClientConnected() ? "true" : "false";
+  out += "},\"uptime_s\":";
+  out += String(millis() / 1000);
+  out += ",\"heap\":";
+  out += String((unsigned)ESP.getFreeHeap());
+  out += ",\"psram\":";
+  out += String((unsigned)ESP.getFreePsram());
+  out += "}";
+
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  return httpd_resp_send(req, out.c_str(), HTTPD_RESP_USE_STRLEN);
+}
+
+// ---------- /api/multi/packets ----------
+
+static esp_err_t handlePackets(httpd_req_t* req) {
+  if (!authOk(req)) return deny(req);
+  SharedRadioCore* core = multiCore();
+  if (core == nullptr) return httpd_resp_send_500(req);
+
+  uint32_t after = 0;
+  char query[64];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+    char val[16];
+    if (httpd_query_key_value(query, "after", val, sizeof(val)) == ESP_OK) {
+      after = strtoul(val, nullptr, 10);
+    }
+  }
+
+  PktLogEntry* entries = (PktLogEntry*)malloc(sizeof(PktLogEntry) * SharedRadioCore::PKT_LOG_SIZE);
+  if (entries == nullptr) return httpd_resp_send_500(req);
+  int n = core->pktLogCopy(entries, SharedRadioCore::PKT_LOG_SIZE, after);
+
+  String out;
+  out.reserve(256 + n * (96 + PKT_RAW_CAP * 2));
+  out += "{\"now\":";
+  out += String(millis());
+  out += ",\"pkts\":[";
+  for (int i = 0; i < n; i++) {
+    PktLogEntry& e = entries[i];
+    if (i) out += ',';
+    out += "{\"s\":"; out += String(e.seq);
+    out += ",\"t\":"; out += String(e.t_ms);
+    out += ",\"d\":";
+    if (e.dir < 0) out += "\"rx\"";
+    else { out += '"'; out += core->portName(e.dir); out += '"'; }
+    out += ",\"h\":"; out += String(e.hdr);
+    out += ",\"l\":"; out += String(e.len);
+    out += ",\"snr\":"; out += String(e.snr4 / 4.0f, 1);
+    out += ",\"rssi\":"; out += String(e.rssi);
+    out += ",\"raw\":\"";
+    static const char* hx = "0123456789abcdef";
+    for (int b = 0; b < e.raw_len; b++) {
+      out += hx[e.raw[b] >> 4]; out += hx[e.raw[b] & 15];
+    }
+    out += "\"}";
+  }
+  out += "]}";
+  free(entries);
+
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  return httpd_resp_send(req, out.c_str(), HTTPD_RESP_USE_STRLEN);
+}
+
+// ---------- /api/multi/stats ----------
+// ?series=battery|heap|wifi_rssi|noise|packets -> {"points":[[uptime_s,value],...]}
+// packets returns the per-minute delta of rx+tx.
+
+static esp_err_t handleStatsSeries(httpd_req_t* req) {
+  if (!authOk(req)) return deny(req);
+
+  char query[48], series[20] = {0};
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+    httpd_query_key_value(query, "series", series, sizeof(series));
+  }
+
+  String out;
+  out.reserve(16 * 1024);
+  out += "{\"series\":\""; out += series; out += "\",\"points\":[";
+  if (s_stats != nullptr) {
+    uint32_t newest = s_stat_seq;
+    uint32_t oldest = newest > STAT_SLOTS ? newest - STAT_SLOTS : 0;
+    bool first = true;
+    StatSample prev; bool have_prev = false;
+    for (uint32_t i = oldest; i < newest; i++) {
+      StatSample s = s_stats[i % STAT_SLOTS];
+      long v; bool ok = true;
+      if      (strcmp(series, "battery") == 0)   v = s.batt_mv;
+      else if (strcmp(series, "heap") == 0)      v = s.heap_kb;
+      else if (strcmp(series, "wifi_rssi") == 0) v = s.wifi_rssi;
+      else if (strcmp(series, "noise") == 0)     v = s.noise;
+      else if (strcmp(series, "packets") == 0) {
+        if (have_prev) v = (long)((s.rx_total + s.tx_total) - (prev.rx_total + prev.tx_total));
+        else ok = false;
+      } else ok = false;
+      prev = s; have_prev = true;
+      if (!ok) continue;
+      if (!first) out += ',';
+      first = false;
+      out += "["; out += String(s.t_s); out += ","; out += String(v); out += "]";
+    }
+  }
+  out += "]}";
+
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  return httpd_resp_send(req, out.c_str(), HTTPD_RESP_USE_STRLEN);
+}
+
+// ---------- /api/multi/comp/frame ----------
+
+static esp_err_t handleCompFrame(httpd_req_t* req) {
+  if (!authOk(req)) return deny(req);
+
+  // optional tuning: ?t=<total_ms>&i=<idle_ms>
+  uint32_t total_ms = 2500, idle_ms = 300;
+  char query[48];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+    char val[12];
+    if (httpd_query_key_value(query, "t", val, sizeof(val)) == ESP_OK) total_ms = strtoul(val, nullptr, 10);
+    if (httpd_query_key_value(query, "i", val, sizeof(val)) == ESP_OK) idle_ms = strtoul(val, nullptr, 10);
+  }
+  if (total_ms > 8000) total_ms = 8000;
+  if (idle_ms > 2000) idle_ms = 2000;
+
+  uint8_t frame[MAX_FRAME_SIZE];
+  int len = req->content_len;
+  if (len <= 0 || len > (int)sizeof(frame)) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad frame size");
+  }
+  int got = 0;
+  while (got < len) {
+    int r = httpd_req_recv(req, (char*)frame + got, len - got);
+    if (r <= 0) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body read failed");
+    got += r;
+  }
+
+  const size_t out_cap = 40 * 1024;
+  uint8_t* out = (uint8_t*)heap_caps_malloc(out_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (out == nullptr) out = (uint8_t*)malloc(8192);
+  if (out == nullptr) return httpd_resp_send_500(req);
+
+  int n = compWebFrameExchange(frame, len, out, out_cap, total_ms, idle_ms);
+  if (n < 0) {
+    free(out);
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Companion busy");
+  }
+
+  httpd_resp_set_type(req, "application/octet-stream");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  esp_err_t rc = httpd_resp_send(req, (const char*)out, n);
+  free(out);
+  return rc;
+}
+
+// ---------- /api/multi/comp/archive ----------
+// Read-only mirror of message frames (fed by whoever syncs — phone or web).
+// Response: [u32 latest_seq LE] then per entry [u32 seq][u16 len][frame]...
+
+static esp_err_t handleCompArchive(httpd_req_t* req) {
+  if (!authOk(req)) return deny(req);
+
+  uint32_t after = 0;
+  char query[48];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+    char val[16];
+    if (httpd_query_key_value(query, "after", val, sizeof(val)) == ESP_OK) {
+      after = strtoul(val, nullptr, 10);
+    }
+  }
+
+  const size_t cap = 32 * 1024;
+  uint8_t* out = (uint8_t*)heap_caps_malloc(cap + 4, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (out == nullptr) out = (uint8_t*)malloc(8192 + 4);
+  if (out == nullptr) return httpd_resp_send_500(req);
+
+  uint32_t latest = compArchiveSeq();
+  memcpy(out, &latest, 4);
+  int n = compArchiveCopy(after, out + 4, cap);
+
+  httpd_resp_set_type(req, "application/octet-stream");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  esp_err_t rc = httpd_resp_send(req, (const char*)out, 4 + n);
+  free(out);
+  return rc;
+}
+
+// ---------- /multi page ----------
+
+#include "web_multi_page.h"
+
+static esp_err_t handlePage(httpd_req_t* req) {
+  httpd_resp_set_type(req, "text/html; charset=utf-8");
+  return httpd_resp_send(req, MULTI_PAGE, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t handleLegacyMultiRedirect(httpd_req_t* req) {
+  httpd_resp_set_status(req, "302 Found");
+  httpd_resp_set_hdr(req, "Location", "/");
+  return httpd_resp_send(req, nullptr, 0);
+}
+
+// ---------- registration ----------
+
+void multiWebRegisterRoutes(httpd_handle_t server, WebPanelServer* panel) {
+  s_panel = panel;
+  static const httpd_uri_t root_uri  = {.uri = "/", .method = HTTP_GET, .handler = &handlePage, .user_ctx = nullptr};
+  static const httpd_uri_t old_uri   = {.uri = "/multi", .method = HTTP_GET, .handler = &handleLegacyMultiRedirect, .user_ctx = nullptr};
+  static const httpd_uri_t debug_uri = {.uri = "/api/multi/debug", .method = HTTP_GET, .handler = &handleDebug, .user_ctx = nullptr};
+  static const httpd_uri_t pkts_uri  = {.uri = "/api/multi/packets", .method = HTTP_GET, .handler = &handlePackets, .user_ctx = nullptr};
+  static const httpd_uri_t stats_uri = {.uri = "/api/multi/stats", .method = HTTP_GET, .handler = &handleStatsSeries, .user_ctx = nullptr};
+  static const httpd_uri_t comp_uri  = {.uri = "/api/multi/comp/frame", .method = HTTP_POST, .handler = &handleCompFrame, .user_ctx = nullptr};
+  static const httpd_uri_t arch_uri  = {.uri = "/api/multi/comp/archive", .method = HTTP_GET, .handler = &handleCompArchive, .user_ctx = nullptr};
+  httpd_register_uri_handler(server, &root_uri);
+  httpd_register_uri_handler(server, &old_uri);
+  httpd_register_uri_handler(server, &debug_uri);
+  httpd_register_uri_handler(server, &pkts_uri);
+  httpd_register_uri_handler(server, &stats_uri);
+  httpd_register_uri_handler(server, &comp_uri);
+  httpd_register_uri_handler(server, &arch_uri);
+}
