@@ -1,0 +1,14 @@
+# ThinkNode M5 multi-identity WITH OTA: dual app slots + ONE shared SPIFFS
+# partition. The four per-identity stores are now subdirectory views over the
+# shared partition (SubdirFS in examples/multi_node/main.cpp) — SPIFFS has a
+# flat namespace, so "/rep/identity" etc. are just prefixed object names.
+# This also stays under ESP-IDF's 3-mounted-SPIFFS-partition limit (we mount
+# only one), which the old 4-partition layout exceeded ('sys' never mounted).
+# 4 MB flash. Firmware ~1.6 MB fits the 1.875 MB slots with ~15% headroom.
+#
+# Name,   Type, SubType,  Offset,    Size,     Flags
+nvs,      data, nvs,      0x9000,    0x5000,
+otadata,  data, ota,      0xe000,    0x2000,
+app0,     app,  ota_0,    0x10000,   0x1E0000,
+app1,     app,  ota_1,    0x1F0000,  0x1E0000,
+fs,       data, spiffs,   0x3D0000,  0x30000,

@@ -1,0 +1,14 @@
+# ThinkNode M5 multi-identity: single app slot + one LittleFS partition per
+# identity (isolated stock storage paths) + a 'sys' partition for the
+# composition's WiFi/web/admin prefs (kept separate so the repeater's inert
+# stock NetworkService never picks up the composition's WiFi credentials).
+# 4 MB flash. No OTA backup slot (flash over USB).
+#
+# Name,   Type, SubType,  Offset,    Size,     Flags
+nvs,      data, nvs,      0x9000,    0x5000,
+otadata,  data, ota,      0xe000,    0x2000,
+app0,     app,  ota_0,    0x10000,   0x240000,
+rep,      data, spiffs,   0x250000,  0x58000,
+room,     data, spiffs,   0x2A8000,  0x58000,
+comp,     data, spiffs,   0x300000,  0x58000,
+sys,      data, spiffs,   0x358000,  0xA8000,
