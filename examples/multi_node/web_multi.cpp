@@ -258,6 +258,7 @@ static esp_err_t handlePackets(httpd_req_t* req) {
     out += "{\"s\":"; out += String(e.seq);
     out += ",\"t\":"; out += String(e.t_ms);
     out += ",\"e\":"; out += String(e.flag);
+    out += ",\"x\":"; out += String(e.aux);
     out += ",\"d\":";
     if (e.dir < 0) out += "\"rx\"";
     else { out += '"'; out += core->portName(e.dir); out += '"'; }

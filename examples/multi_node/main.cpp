@@ -250,6 +250,10 @@ public:
     }
     if (strncmp(command, "set wifi.powersave ", 19) == 0) {
       if (network.setWifiPowerSave(command + 19)) {
+        // authoritative copy in OUR store: the repeater's inert stock
+        // NetworkService clobbers the shared eastmesh-net NVS namespace at
+        // boot (same reason WiFi creds live in 'multiwifi')
+        wifiStoreSet("ps", command + 19);
         snprintf(reply, reply_size, "OK - wifi powersave=%s (applies live, persists)", network.getWifiPowerSave());
       } else {
         snprintf(reply, reply_size, "Error - use: none | min | max");
@@ -390,7 +394,8 @@ void setup() {
 
   g_core = new SharedRadioCore(radio_driver);
   g_core->setTxPowerControl(&g_txpwr);
-  g_core->setRxErrorCounter([]() -> uint32_t { return radio_driver.getPacketsRecvErrors(); });
+  g_core->setRxErrorCounter([]() -> uint32_t { return radio_driver.getPacketsRecvErrors(); },
+                            []() -> int16_t { return radio_driver.getLastRecvError(); });
   g_core->setPortName(g_core->addPort(port_rep),  "repeater");
   g_core->setPortName(g_core->addPort(port_room), "room");
   g_core->setPortName(g_core->addPort(port_comp), "companion");
@@ -422,6 +427,12 @@ void setup() {
   } else {
     network.setWifiSSID(ss.c_str());
     network.setWifiPassword(pw.c_str());
+    // powersave from OUR store (eastmesh-net NVS gets clobbered by the inert
+    // stock NetworkService); default to modem sleep 'min' for power savings.
+    {
+      String ps = wifiStoreGet("ps");
+      network.setWifiPowerSave(ps.length() ? ps.c_str() : "min");
+    }
     web.setCommandRunner(&g_runner);
     web.setNetworkStateProvider(&network);
     web.begin(&fs_sys);

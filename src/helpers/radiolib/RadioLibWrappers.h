@@ -11,6 +11,7 @@ protected:
   int16_t _noise_floor, _threshold;
   bool _cad_enabled;
   uint16_t _num_floor_samples;
+  int16_t  last_recv_error = 0;
   int32_t _floor_sample_sum;
   uint8_t _preamble_sf;
 
@@ -58,6 +59,7 @@ public:
 
   uint32_t getPacketsRecv() const { return n_recv; }
   uint32_t getPacketsRecvErrors() const { return n_recv_errors; }
+  int16_t  getLastRecvError() const { return last_recv_error; }   // RadioLib error code of most recent RX failure
   uint32_t getPacketsSent() const { return n_sent; }
   void resetStats() { n_recv = n_sent = n_recv_errors = 0; }
 

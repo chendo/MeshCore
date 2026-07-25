@@ -24,9 +24,11 @@ void SharedRadioCore::pump() {
   // surface RX decode/CRC failures (driver only counts them) as trace events
   if (_rx_err_fn != nullptr) {
     uint32_t errs = _rx_err_fn();
+    int16_t code = _rx_err_code_fn ? _rx_err_code_fn() : 0;
     while (_rx_err_seen < errs) {
       _rx_err_seen++;
-      pktLogAdd(-1, nullptr, 0, (int8_t)(_real->getLastSNR() * 4), (int16_t)_real->getLastRSSI(), PKT_FLAG_RX_ERR);
+      pktLogAdd(-1, nullptr, 0, (int8_t)(_real->getLastSNR() * 4), (int16_t)_real->getLastRSSI(),
+                PKT_FLAG_RX_ERR, code);
     }
   }
 
@@ -78,7 +80,7 @@ bool SharedRadioCore::tryStartSend(RadioPort* p, const uint8_t* bytes, int len) 
   return ok;
 }
 
-void SharedRadioCore::pktLogAdd(int8_t dir, const uint8_t* bytes, int len, int8_t snr4, int16_t rssi, uint8_t flag) {
+void SharedRadioCore::pktLogAdd(int8_t dir, const uint8_t* bytes, int len, int8_t snr4, int16_t rssi, uint8_t flag, int16_t aux) {
   if (flag == PKT_FLAG_OK) {
     if (dir < 0) _rx_total = _rx_total + 1; else _tx_total = _tx_total + 1;
   }
@@ -88,7 +90,7 @@ void SharedRadioCore::pktLogAdd(int8_t dir, const uint8_t* bytes, int len, int8_
   e.flag = flag;
   e.hdr = len > 0 ? bytes[0] : 0;
   e.len = (uint8_t)(len > 255 ? 255 : len);
-  e.snr4 = snr4; e.rssi = rssi;
+  e.snr4 = snr4; e.rssi = rssi; e.aux = aux;
   e.raw_len = (uint8_t)(len > PKT_RAW_CAP ? PKT_RAW_CAP : len);
   if (e.raw_len > 0 && bytes != nullptr) memcpy(e.raw, bytes, e.raw_len); else e.raw_len = 0;
   e.seq = _pkt_seq + 1;   // written last; readers treat seq==0 / stale seq as invalid

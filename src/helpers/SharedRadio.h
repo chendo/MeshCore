@@ -94,6 +94,7 @@ struct PktLogEntry {
   uint8_t  len;      // full over-the-air length
   int8_t   snr4;     // SNR * 4 (RX only)
   int16_t  rssi;     // RX only
+  int16_t  aux;      // flag-specific: RX_ERR -> RadioLib error code
   uint8_t  raw_len;  // bytes captured in raw[] (<= len, capped at PKT_RAW_CAP)
   uint8_t  raw[PKT_RAW_CAP];
 };
@@ -140,8 +141,11 @@ public:
   const char* portName(int idx) const { return (idx >= 0 && idx < _num_ports) ? _port_names[idx] : "?"; }
   void setPortName(int idx, const char* name) { if (idx >= 0 && idx < MAX_PORTS) _port_names[idx] = name; }
   // lets pump() notice RX decode/CRC failures inside the real driver (which
-  // reports them only via a counter) and log them as trace events
-  void setRxErrorCounter(uint32_t (*fn)()) { _rx_err_fn = fn; _rx_err_seen = fn ? fn() : 0; }
+  // reports them only via a counter) and log them as trace events; the code
+  // accessor supplies the RadioLib error code (CRC mismatch vs header damage)
+  void setRxErrorCounter(uint32_t (*fn)(), int16_t (*code_fn)() = nullptr) {
+    _rx_err_fn = fn; _rx_err_code_fn = code_fn; _rx_err_seen = fn ? fn() : 0;
+  }
 
 private:
   int portIndex(RadioPort* p) const {
@@ -164,8 +168,9 @@ private:
   int8_t   _applied_pwr;     // last power applied to the real radio (avoid redundant writes)
   bool     _real_begun = false;   // real driver's begin() must run exactly once
 
-  void pktLogAdd(int8_t dir, const uint8_t* bytes, int len, int8_t snr4, int16_t rssi, uint8_t flag = 0);
+  void pktLogAdd(int8_t dir, const uint8_t* bytes, int len, int8_t snr4, int16_t rssi, uint8_t flag = 0, int16_t aux = 0);
   uint32_t (*_rx_err_fn)() = nullptr;
+  int16_t (*_rx_err_code_fn)() = nullptr;
   uint32_t _rx_err_seen = 0;
   bool _tx_completed = false;   // did the current owner's send reach TX-done?
   PktLogEntry _pkt_log[PKT_LOG_SIZE];

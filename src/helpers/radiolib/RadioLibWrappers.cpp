@@ -131,6 +131,7 @@ int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
         MESH_DEBUG_PRINTLN("RadioLibWrapper: error: readData(%d)", err);
         len = 0;
         n_recv_errors++;
+        last_recv_error = (int16_t)err;   // e.g. CRC mismatch vs header damaged
       } else {
       //  Serial.print("  readData() -> "); Serial.println(len);
         n_recv++;
