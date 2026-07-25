@@ -17,6 +17,8 @@ SharedRadioCore* multiCore();
 // supports repeater/room/companion prefixes plus composition intercepts)
 void multiRunConsole(const char* cmd, char* reply, size_t reply_size);
 void multiGetRadioParams(float* freq, float* bw, uint8_t* sf, uint8_t* cr);
+namespace fs { class FS; }
+fs::FS* multiSysFS();   // composition prefs area of the shared partition
 
 // ---- provided by wrap_companion.cpp ----
 // Inject one app-protocol frame into the companion mesh and collect its

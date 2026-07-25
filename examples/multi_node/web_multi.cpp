@@ -13,8 +13,9 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <FS.h>
 #include <esp_heap_caps.h>
-#include <target.h>                        // board (battery millivolts)
+#include <target.h>                        // board (battery millivolts), rtc_clock
 #include <helpers/SharedRadio.h>
 #include <helpers/BaseSerialInterface.h>   // MAX_FRAME_SIZE
 #include <helpers/web/WebPanelServer.h>
@@ -36,8 +37,66 @@ static StatSample* s_stats = nullptr;
 static volatile uint32_t s_stat_seq = 0;
 static uint32_t s_next_sample_ms = 0;
 
+// ---- neighbours snapshot ----
+// The repeater's neighbour table is RAM-only (its stock snapshot path needs an
+// SD card). The composition remembers heard nodes across reboots/OTAs by
+// periodically writing "prefix8,last_heard_epoch,snr4\n" lines to the shared
+// FS, keyed by pubkey prefix, merged with live data by the web UI.
+
+static uint32_t s_next_nbr_save_ms = 120000;   // let RTC/WiFi settle first
+
+static void saveNeighboursSnapshot() {
+  char reply[1024];
+  reply[0] = 0;
+  multiRunConsole("neighbors", reply, sizeof(reply));
+  if (reply[0] == 0 || strncmp(reply, "-none-", 6) == 0 || strncmp(reply, "Err", 3) == 0) return;
+
+  // merge current lines into the saved set (keep nodes no longer in RAM)
+  String merged;
+  uint32_t now_epoch = rtc_clock.getCurrentTime();
+  // existing entries first (skip ones we're about to refresh)
+  String fresh_prefixes;
+  {
+    char* save = nullptr;
+    for (char* line = strtok_r(reply, "\n", &save); line; line = strtok_r(nullptr, "\n", &save)) {
+      char* c1 = strchr(line, ':'); if (!c1) continue;
+      fresh_prefixes += String(line).substring(0, c1 - line) + ",";
+    }
+  }
+  File old_f = multiSysFS()->open("/neighbours.csv", "r");
+  if (old_f) {
+    while (old_f.available()) {
+      String l = old_f.readStringUntil('\n');
+      int c = l.indexOf(',');
+      if (c > 0 && fresh_prefixes.indexOf(l.substring(0, c) + ",") < 0) { merged += l; merged += '\n'; }
+    }
+    old_f.close();
+  }
+  // refreshed entries (neighbors reply was consumed by strtok; re-run)
+  reply[0] = 0;
+  multiRunConsole("neighbors", reply, sizeof(reply));
+  {
+    char* save = nullptr;
+    for (char* line = strtok_r(reply, "\n", &save); line; line = strtok_r(nullptr, "\n", &save)) {
+      char* c1 = strchr(line, ':'); if (!c1) continue;
+      char* c2 = strchr(c1 + 1, ':'); if (!c2) continue;
+      *c1 = 0; *c2 = 0;
+      long secs_ago = atol(c1 + 1);
+      merged += line; merged += ',';
+      merged += String(now_epoch - (uint32_t)secs_ago); merged += ',';
+      merged += (c2 + 1); merged += '\n';
+    }
+  }
+  File f = multiSysFS()->open("/neighbours.csv", "w", true);
+  if (f) { f.print(merged); f.close(); }
+}
+
 void multiWebTick() {
   uint32_t now = millis();
+  if (now >= s_next_nbr_save_ms) {
+    s_next_nbr_save_ms = now + 5 * 60000;
+    saveNeighboursSnapshot();
+  }
   if (now < s_next_sample_ms) return;
   s_next_sample_ms = now + 60000;
   if (s_stats == nullptr) {
@@ -110,7 +169,19 @@ static esp_err_t handleDebug(httpd_req_t* req) {
   out += compTcpStarted() ? "true" : "false";
   out += ",\"client\":";
   out += compTcpClientConnected() ? "true" : "false";
-  out += "},\"uptime_s\":";
+  out += "},\"radio\":{\"noise\":";
+  { SharedRadioCore* c = multiCore(); out += String(c ? c->real()->getNoiseFloor() : 0);
+    out += ",\"rx\":"; out += String(c ? c->rxTotal() : 0);
+    out += ",\"tx\":"; out += String(c ? c->txTotal() : 0); }
+  out += "},\"saved_nbrs\":\"";
+  { File f = multiSysFS()->open("/neighbours.csv", "r");
+    if (f) {
+      char buf[512]; int n = f.read((uint8_t*)buf, sizeof(buf) - 1); f.close();
+      if (n > 0) { buf[n] = 0; jsonEscapeAppend(out, buf); }
+    } }
+  out += "\",\"epoch\":";
+  out += String((unsigned long)rtc_clock.getCurrentTime());
+  out += ",\"uptime_s\":";
   out += String(millis() / 1000);
   out += ",\"heap\":";
   out += String((unsigned)ESP.getFreeHeap());

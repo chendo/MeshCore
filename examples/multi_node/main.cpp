@@ -297,6 +297,7 @@ SharedRadioCore* multiCore() { return g_core; }
 void multiRunConsole(const char* cmd, char* reply, size_t reply_size) {
   g_runner.runWebCommand(cmd, reply, reply_size);
 }
+fs::FS* multiSysFS() { return &fs_sys; }
 void multiGetRadioParams(float* freq, float* bw, uint8_t* sf, uint8_t* cr) {
   if (freq) *freq = g_radio.freq;
   if (bw)   *bw = g_radio.bw;
