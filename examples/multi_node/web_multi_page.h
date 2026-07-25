@@ -319,6 +319,11 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
 
 </main>
 </div>
+<div id="pkt-modal" style="display:none;position:fixed;inset:0;background:rgba(6,9,12,.85);z-index:50;
+  align-items:flex-start;justify-content:center;overflow-y:auto;padding:30px 10px"
+  onclick="if(event.target===this)this.style.display='none'">
+  <div class="card" style="width:680px;max-width:96vw" id="pkt-modal-body"></div>
+</div>
 <div id="login" style="display:none"><div class="card">
 <h3>Unlock</h3><div class="row"><input id="pwd" type="password" class="grow" placeholder="admin password" autocomplete="off" data-1p-ignore
 onkeydown="if(event.key=='Enter')doLogin()"></div>
@@ -462,33 +467,58 @@ function hashName(h){
   for(const [n,p] of Object.entries(selfIds)) if(parseInt(p.slice(0,2),16)===h) c.push("self:"+n);
   return c.join("/");
 }
-function hopCands(h){
+// candidates for a hop hash group (1-3 bytes): match by pubkey prefix against
+// contacts, our own identities and heard neighbours — the known-nodes database
+const gHex=g=>Array.isArray(g)?hexa(g):hx1(g);
+function hopCands(g){
+  const hex=gHex(g).toLowerCase();
   const c=[];
-  for(const x of contacts) if(parseInt(x.pk.slice(0,2),16)===h) c.push((x.name||"?")+" ("+x.prefix.slice(0,8)+")");
-  for(const [n,p] of Object.entries(selfIds)) if(parseInt(p.slice(0,2),16)===h) c.push("self:"+n+" ("+p+")");
-  for(const nb of neighbours()) if(parseInt(nb.prefix.slice(0,2),16)===h){
+  for(const x of contacts) if(x.pk.startsWith(hex)) c.push((x.name||"?")+" ("+x.prefix.slice(0,8)+")");
+  for(const [n,p] of Object.entries(selfIds)) if(p.startsWith(hex)) c.push("self:"+n+" ("+p+")");
+  for(const nb of neighbours()){
     const pfx=nb.prefix.toLowerCase();
-    if(!c.some(s=>s.includes(pfx.slice(0,8)))) c.push("neighbour "+pfx);
+    if(pfx.startsWith(hex)&&!c.some(s=>s.includes(pfx.slice(0,8)))) c.push("neighbour "+pfx);
   }
   return c;
 }
-// colon-separated hop bytes; hover a segment for likely candidate nodes
-function hopsHtml(path){
-  return path.map(h=>{
-    const cands=hopCands(h);
-    const tip=cands.length?("could be: "+cands.join(", ")):"no known node matches hash "+hx1(h);
-    return "<span class=hop title=\""+esc(tip)+"\">"+hx1(h)+"</span>";
+// rich candidate objects (for the packet modal): name, distance, last heard
+function hopCandObjs(g){
+  const hex=gHex(g).toLowerCase();
+  const out=[];
+  const nowS=Math.floor(Date.now()/1000);
+  for(const x of contacts) if(x.pk.startsWith(hex)){
+    out.push({name:x.name||x.prefix.slice(0,8),kind:KINDS[x.type]||"?",
+      dist:(x.lat||x.lon)&&selfLoc&&(selfLoc[0]||selfLoc[1])?distKm(selfLoc,[x.lat,x.lon]):null,
+      last:age(nowS-x.lastAdvert)});
+  }
+  for(const [n,p] of Object.entries(selfIds)) if(p.startsWith(hex)) out.push({name:"self:"+n,kind:"self",dist:0,last:"now"});
+  return out;
+}
+// colon-separated hop groups; hover a segment for likely candidate nodes
+function hopsHtml(groups){
+  return groups.map(g=>{
+    const cands=hopCands(g);
+    const tip=cands.length?("could be: "+cands.join(", ")):"no known node matches hash "+gHex(g);
+    return "<span class=hop title=\""+esc(tip)+"\">"+gHex(g)+"</span>";
   }).join(":");
 }
-function annot(p){
-  if(!p.raw) return {src:"",info:""};
+// full packet parse with multi-byte path-hash support (hash size = mode+1, 1..3 bytes)
+function parsePkt(p){
+  if(!p.raw) return null;
   const b=p.raw.match(/../g).map(h=>parseInt(h,16));
   const route=p.h&3, type=(p.h>>2)&15;
-  let o=1; if(route===0||route===3) o+=4;         // transport codes
-  if(o>=b.length) return {src:"",info:""};
-  const pl=b[o++], mode=pl>>6, hops=pl&63, hsz=(mode===0)?1:2;
-  const path=b.slice(o,Math.min(o+hops*hsz,b.length)); o+=hops*hsz;
-  const pay=b.slice(o);
+  let o=1, tc=null;
+  if(route===0||route===3){ tc=b.slice(o,o+4); o+=4; }   // transport codes
+  if(o>=b.length) return null;
+  const pl=b[o++], mode=pl>>6, hops=pl&63, hsz=mode+1;
+  const groups=[];
+  for(let i=0;i<hops&&o+hsz<=b.length;i++){ groups.push(b.slice(o,o+hsz)); o+=hsz; }
+  return {route,type,hops,hsz,groups,pay:b.slice(o),tc,bytes:b};
+}
+function annot(p){
+  const q=parsePkt(p);
+  if(!q) return {src:"",infoHtml:""};
+  const {type,hops,groups,pay}=q;
   let src="",info="";
   if(type===4&&pay.length>=100){                  // ADVERT: pk32 ts4 sig64 appdata
     const pk=hexa(pay.slice(0,32));
@@ -516,7 +546,7 @@ function annot(p){
     info="src "+hx1(pay[1])+" → dest "+hx1(pay[0])+(dn?" ("+dn+")":"");
   }
   let infoHtml=esc(info);
-  if(hops) infoHtml+=(infoHtml?"  |  ":"")+hops+" hop"+(hops>1?"s":"")+" "+hopsHtml(path);
+  if(hops) infoHtml+=(infoHtml?"  |  ":"")+hops+" hop"+(hops>1?"s":"")+" "+hopsHtml(groups);
   return {src,infoHtml};
 }
 
@@ -530,9 +560,12 @@ async function pollPkts(){
       const wd=new Date(Date.now()-(devNow-p.t));
       const when=wd.toTimeString().slice(0,8)+"."+String(wd.getMilliseconds()).padStart(3,"0");
       const rx=p.d==="rx";
-      if(p.e===1){          // RX decode/CRC failure
-        tr.innerHTML="<td>"+when+"</td><td style='color:#e08a4d'>RX-ERR</td><td colspan=4 class=mut>"+
-          "decode/CRC failure — collision or weak signal</td><td>?</td><td>"+
+      if(p.e===1){          // RX failure, labelled by RadioLib error code
+        const why=p.x===-7?"CRC mismatch — payload corrupted (collision or weak signal)":
+          p.x===-16?"LoRa header damaged — decode failure":
+          p.x===-6?"RX timeout":"receive error (code "+p.x+")";
+        tr.innerHTML="<td>"+when+"</td><td style='color:#e08a4d'>"+(p.x===-7?"RX-CRC":"RX-ERR")+
+          "</td><td colspan=4 class=mut>"+esc(why)+"</td><td>?</td><td>"+
           (p.snr?snrSpan(p.snr):"")+"</td><td>"+(p.rssi?rssiSpan(p.rssi):"")+"</td>";
       } else if(p.e===2){   // TX never completed
         tr.innerHTML="<td>"+when+"</td><td style='color:#e05d5d'>TX-FAIL:"+esc(p.d)+"</td><td colspan=4 class=mut>"+
@@ -542,6 +575,9 @@ async function pollPkts(){
         tr.innerHTML="<td>"+when+"</td><td class="+(rx?"ok":"err")+">"+(rx?"RX":"TX:"+p.d)+"</td><td>"+
           ROUTES[p.h&3]+"</td><td>"+PTYPES[(p.h>>2)&15]+"</td><td>"+esc(a.src)+"</td><td class=mut>"+a.infoHtml+
           "</td><td>"+p.l+"</td><td>"+(rx?snrSpan(p.snr):"")+"</td><td>"+(rx?rssiSpan(p.rssi):"")+"</td>";
+        tr.style.cursor="pointer";
+        tr.title="click to decode";
+        tr.onclick=()=>openPktModal(p,when);
       }
       const tb=$("pkt-rows"); tb.insertBefore(tr,tb.firstChild);
       while(tb.children.length>120) tb.removeChild(tb.lastChild);
@@ -561,7 +597,8 @@ async function buildMesh(){
 
   // ---- table ----
   let rows="";
-  contacts.forEach((c,ci)=>{
+  [...contacts].sort((a,b)=>b.lastAdvert-a.lastAdvert).forEach(c=>{
+    const ci=contacts.indexOf(c);
     const heard=(c.pk in advHops)?(advHops[c.pk]===0?"direct RF":"heard "+advHops[c.pk]+" hop"+(advHops[c.pk]>1?"s":"")+" away"):"";
     const route=(c.outPathLen===255?"flood (no route)":c.outPathLen===0?"direct":
       c.outPathLen+" hop"+(c.outPathLen>1?"s":"")+" "+hopsHtml(c.outPath))+(heard?" · "+heard:"");
@@ -777,6 +814,74 @@ function renderMeshSvg(nodes,edges){
   }
   $("mesh-svg").innerHTML=s;
 }
+
+// ---- packet decode modal ----
+function openPktModal(p,when){
+  const q=parsePkt(p);
+  let h="<h3 style='margin:0 0 8px'>Packet @ "+when+" <button class=sec style='float:right;padding:2px 10px' onclick=\"$('pkt-modal').style.display='none'\">close</button></h3>";
+  const rx=p.d==="rx";
+  h+="<div class=mut style='font-size:12px;margin-bottom:8px'>"+(rx?"received":"sent by "+esc(p.d))+
+    " · "+ROUTES[p.h&3]+" · "+PTYPES[(p.h>>2)&15]+" · "+p.l+" bytes on air"+
+    (rx?" · SNR "+snrSpan(p.snr)+" dB · RSSI "+rssiSpan(p.rssi)+" dBm":"")+"</div>";
+  if(q){
+    h+="<div style='font-size:13px'>";
+    h+="<div><span class=mut>header</span> 0x"+hx1(p.h)+" — route "+ROUTES[q.route]+", type "+PTYPES[q.type]+", ver "+((p.h>>6)&3)+"</div>";
+    if(q.tc) h+="<div><span class=mut>transport codes</span> "+hexa(q.tc.slice(0,2))+" / "+hexa(q.tc.slice(2,4))+"</div>";
+    if(q.hops) h+="<div><span class=mut>path</span> "+q.hops+" hop"+(q.hops>1?"s":"")+" ("+q.hsz+"-byte hashes): "+hopsHtml(q.groups)+"</div>";
+    // per-type decode
+    const pay=q.pay;
+    if(q.type===4&&pay.length>=100){
+      const pk=hexa(pay.slice(0,32));
+      const ts=rdU32a(pay,32);
+      const ad=pay.slice(100);
+      let name="",lat=null,lon=null;
+      if(ad.length){ const fl=ad[0]; let i=1;
+        if(fl&0x10){ lat=rdI32a(ad,i)/1e6; lon=rdI32a(ad,i+4)/1e6; i+=8; }
+        if(fl&0x20)i+=2; if(fl&0x40)i+=2;
+        if(fl&0x80) name=new TextDecoder().decode(new Uint8Array(ad.slice(i))).replace(/\0.*$/,"");
+      }
+      const c=contacts.find(c=>c.pk===pk);
+      h+="<div style='margin-top:6px'><b>Advert</b> from "+esc(name||(c&&c.name)||pk.slice(0,12))+"</div>";
+      h+="<div><span class=mut>pubkey</span> <span style='font-family:monospace;font-size:11px;word-break:break-all'>"+pk+"</span></div>";
+      h+="<div><span class=mut>advert time</span> "+new Date(ts*1000).toLocaleString()+"</div>";
+      if(lat!==null){
+        h+="<div><span class=mut>origin location</span> "+lat.toFixed(5)+", "+lon.toFixed(5)+
+          (selfLoc&&(selfLoc[0]||selfLoc[1])?" — <b>"+distKm(selfLoc,[lat,lon])+" km from here</b>":"")+"</div>";
+      }
+    } else if(q.type===3){
+      h+="<div style='margin-top:6px'><b>ACK</b> code "+hexa(pay.slice(0,4))+"</div>";
+    } else if(pay.length>=2&&q.type!==5&&q.type!==6){
+      h+="<div style='margin-top:6px'><span class=mut>dest hash</span> "+hx1(pay[0])+
+        (hashName(pay[0])?" — likely "+esc(hashName(pay[0])):"")+
+        " &nbsp; <span class=mut>src hash</span> "+hx1(pay[1])+
+        (hashName(pay[1])?" — likely "+esc(hashName(pay[1])):"")+"</div>";
+    }
+    // likely transmitter: last hop for flooded packets, origin when zero-hop RX
+    if(rx){
+      h+="<div style='margin-top:10px'><b>Likely transmitted by</b></div>";
+      let cands=[];
+      if(q.hops>0) cands=hopCandObjs(q.groups[q.groups.length-1]);
+      else if(q.type===4&&pay.length>=32){ cands=hopCandObjs(Array.from(pay.slice(0,4))); if(!cands.length) cands=[{name:"the advert origin (heard directly)",kind:"",dist:null,last:""}]; }
+      if(cands.length){
+        h+=cands.map(c=>"<div style='font-size:12px'>· "+esc(c.name)+(c.kind?" <span class=mut>("+c.kind+")</span>":"")+
+          (c.dist!==null&&c.dist!==0?" — ~"+c.dist+" km away":"")+(c.last&&c.last!=="now"?" <span class=mut>last advert "+c.last+" ago</span>":"")+"</div>").join("");
+      } else {
+        h+="<div class=mut style='font-size:12px'>no match in the known-nodes database"+
+          (q.hops?" for hash "+gHex(q.groups[q.groups.length-1]):"")+"</div>";
+      }
+    }
+    h+="</div>";
+    // hex dump
+    h+="<div class=mut style='margin-top:10px;font-size:11px'>raw ("+q.bytes.length+" bytes captured)</div><pre style='font-size:11px'>";
+    for(let i=0;i<q.bytes.length;i+=16){
+      h+=String(i).padStart(4,"0")+"  "+q.bytes.slice(i,i+16).map(hx1).join(" ")+"\n";
+    }
+    h+="</pre>";
+  } else h+="<div class=mut>no captured bytes to decode</div>";
+  $("pkt-modal-body").innerHTML=h;
+  $("pkt-modal").style.display="flex";
+}
+function rdU32a(b,o){ return (b[o]|(b[o+1]<<8)|(b[o+2]<<16)|((b[o+3]<<24)>>>0))>>>0; }
 
 // ---- room tab ----
 async function roomCmd(c){
@@ -1026,8 +1131,7 @@ function renderDashTiles(d){
 function renderNearby(){
   if(!contacts.length){ return; }
   const nowS=Math.floor(Date.now()/1000);
-  const rank=c=>(c.outPathLen===0?0:(c.pk in advHops?1+advHops[c.pk]:50))*1e10+(nowS-c.lastAdvert);
-  const sorted=[...contacts].sort((a,b)=>rank(a)-rank(b));
+  const sorted=[...contacts].sort((a,b)=>b.lastAdvert-a.lastAdvert);   // most recently heard first
   const shown=sorted.slice(0,12);
   $("dash-nearby").innerHTML=shown.map(c=>{
     const heard=c.outPathLen===0?"<span class=ok>direct</span>":
@@ -1317,6 +1421,7 @@ async function boot(){
   document.addEventListener("visibilitychange",()=>{
     if(!document.hidden){ for(const j of jobs) j.due=0; pumpJobs(); }
   });
+  document.addEventListener("keydown",e=>{ if(e.key==="Escape") $("pkt-modal").style.display="none"; });
   initComp().then(()=>{ pollArchive(); renderNearby(); renderRail(); }).catch(()=>{});
 }
 (async()=>{
