@@ -1,0 +1,164 @@
+#pragma once
+
+// SharedRadio: lets several mesh::Mesh instances (separate identities) share a
+// single physical LoRa radio on one board.
+//
+// The real radio driver owns one RX/TX state machine, so two Dispatchers can't
+// both drive it. Instead the SharedRadioCore owns the real driver, and each
+// mesh is handed its own RadioPort (a mesh::Radio) that funnels through the
+// core:
+//
+//   * RX fan-out: the core pumps the real radio once per super-loop, buffers
+//     each received frame with an SNR/RSSI snapshot, and delivers that same
+//     frame to every port exactly once. So both identities see all traffic and
+//     each decides independently whether it's addressed to them / should be
+//     forwarded.
+//
+//   * TX serialization: only one port may transmit at a time. The first to
+//     start a send becomes the owner; while it holds the transmitter, other
+//     ports' startSendRaw() returns false (their Dispatcher drops+retries) AND
+//     their isReceiving() returns true, so the existing CAD/back-off logic
+//     defers them cleanly. Just before a send the core applies that port's
+//     TX power (per-persona power offset / jitter).
+//
+// Everything is cooperative and single-threaded, driven from the main loop;
+// there are no interrupts mutating shared state, so no locking is needed.
+//
+// Super-loop order MUST be:  meshA.loop(); meshB.loop(); shared_core.pump();
+// so both ports consume the current frame before the next one is fetched.
+
+#include <Mesh.h>
+#include <MeshCore.h>
+
+class SharedRadioCore;
+
+class RadioPort : public mesh::Radio {
+public:
+  RadioPort() : _core(nullptr), _last_snr(0), _last_rssi(0), _tx_power_dbm(0) {}
+  void attach(SharedRadioCore* core) { _core = core; }
+
+  // per-persona TX power applied by the core right before this port transmits
+  void setPortTxPower(int8_t dbm) { _tx_power_dbm = dbm; }
+  int8_t portTxPower() const { return _tx_power_dbm; }
+
+  // mesh::Radio interface
+  void begin() override;   // forwards to the real driver's begin() (once) — attaches the DIO1 ISR
+  int recvRaw(uint8_t* bytes, int sz) override;
+  bool startSendRaw(const uint8_t* bytes, int len) override;
+  bool isSendComplete() override;
+  void onSendFinished() override;
+  bool isInRecvMode() const override { return true; }   // logically always listening
+  bool isReceiving() override;
+
+  uint32_t getEstAirtimeFor(int len_bytes) override;
+  float packetScore(float snr, int packet_len) override;
+  int getNoiseFloor() const override;
+  void triggerNoiseFloorCalibrate(int threshold) override;
+  void setCADEnabled(bool enable) override;
+  void resetAGC() override;
+  void loop() override {}   // real radio is pumped centrally via SharedRadioCore::pump()
+
+  float getLastRSSI() const override { return _last_rssi; }
+  float getLastSNR() const override { return _last_snr; }
+
+  // called by the core when delivering a buffered frame to this port
+  void setLastMetadata(float snr, float rssi) { _last_snr = snr; _last_rssi = rssi; }
+
+private:
+  SharedRadioCore* _core;
+  float _last_snr, _last_rssi;
+  int8_t _tx_power_dbm;
+};
+
+// Optional: something that can set the real radio's TX power (RadioLibWrapper
+// implements setTxPower). Kept as a tiny interface so SharedRadio doesn't have
+// to depend on the concrete wrapper type.
+class TxPowerControl {
+public:
+  virtual void applyTxPower(int8_t dbm) = 0;
+};
+
+// One row of the radio packet trace kept by SharedRadioCore (for diagnostics /
+// the web debug panel). dir: -1 = received, >= 0 = transmitted by that port.
+#define PKT_RAW_CAP 200
+struct PktLogEntry {
+  uint32_t seq;
+  uint32_t t_ms;
+  int8_t   dir;
+  uint8_t  hdr;      // raw packet header byte (route/type bits)
+  uint8_t  len;      // full over-the-air length
+  int8_t   snr4;     // SNR * 4 (RX only)
+  int16_t  rssi;     // RX only
+  uint8_t  raw_len;  // bytes captured in raw[] (<= len, capped at PKT_RAW_CAP)
+  uint8_t  raw[PKT_RAW_CAP];
+};
+
+class SharedRadioCore {
+public:
+  static const int MAX_PORTS = 4;
+  static const int PKT_LOG_SIZE = 48;
+
+  explicit SharedRadioCore(mesh::Radio& real) : _real(&real), _num_ports(0),
+      _rx_len(0), _rx_snr(0), _rx_rssi(0), _consumed_mask(0),
+      _tx_owner(nullptr), _pwr_ctl(nullptr), _applied_pwr(0x7F) {}
+
+  void setTxPowerControl(TxPowerControl* ctl) { _pwr_ctl = ctl; }
+
+  int addPort(RadioPort& port) {         // returns port index
+    int idx = _num_ports;
+    _ports[_num_ports++] = &port;
+    port.attach(this);
+    return idx;
+  }
+
+  // Pump the real radio once: if the current frame is fully delivered, fetch
+  // the next one. Call AFTER every mesh has had its loop() this cycle.
+  void pump();
+
+  // --- called by RadioPort ---
+  void beginRealOnce();
+  int  takeFrame(RadioPort* p, uint8_t* dst, int sz);
+  bool tryStartSend(RadioPort* p, const uint8_t* bytes, int len);
+  bool isSendCompleteFor(RadioPort* p);
+  void onSendFinishedFor(RadioPort* p);
+  bool txBusyForOthers(RadioPort* p) const { return _tx_owner != nullptr && _tx_owner != p; }
+  bool txInFlight() const { return _tx_owner != nullptr; }
+
+  mesh::Radio* real() { return _real; }
+
+  // --- packet trace (thread-safe copy for the web debug panel) ---
+  uint32_t pktLogSeq() const { return _pkt_seq; }
+  uint32_t rxTotal() const { return _rx_total; }
+  uint32_t txTotal() const { return _tx_total; }
+  // copy entries with seq > after_seq into out (oldest first); returns count
+  int pktLogCopy(PktLogEntry* out, int max_entries, uint32_t after_seq);
+  const char* portName(int idx) const { return (idx >= 0 && idx < _num_ports) ? _port_names[idx] : "?"; }
+  void setPortName(int idx, const char* name) { if (idx >= 0 && idx < MAX_PORTS) _port_names[idx] = name; }
+
+private:
+  int portIndex(RadioPort* p) const {
+    for (int i = 0; i < _num_ports; i++) if (_ports[i] == p) return i;
+    return -1;
+  }
+  uint32_t allPortsMask() const { return (_num_ports >= 32) ? 0xFFFFFFFFu : ((1u << _num_ports) - 1); }
+
+  mesh::Radio* _real;
+  RadioPort* _ports[MAX_PORTS];
+  int _num_ports;
+
+  uint8_t  _rx_buf[MAX_TRANS_UNIT];
+  int      _rx_len;
+  float    _rx_snr, _rx_rssi;
+  uint32_t _consumed_mask;   // bit i set once port i has taken the current frame
+
+  RadioPort* _tx_owner;
+  TxPowerControl* _pwr_ctl;
+  int8_t   _applied_pwr;     // last power applied to the real radio (avoid redundant writes)
+  bool     _real_begun = false;   // real driver's begin() must run exactly once
+
+  void pktLogAdd(int8_t dir, const uint8_t* bytes, int len, int8_t snr4, int16_t rssi);
+  PktLogEntry _pkt_log[PKT_LOG_SIZE];
+  volatile uint32_t _pkt_seq = 0;   // total packets ever logged; ring index = seq % SIZE
+  volatile uint32_t _rx_total = 0, _tx_total = 0;
+  const char* _port_names[MAX_PORTS] = { "?", "?", "?", "?" };
+};
