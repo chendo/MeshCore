@@ -264,6 +264,13 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
     <div class="row"><span class="mut" style="width:130px">admin password</span>
       <input id="room-apwd" class="grow" placeholder="room admin password" autocomplete="off" data-1p-ignore>
       <button class="sec" onclick="roomCmd('password '+v('room-apwd'))">Save</button></div>
+    <div class="row"><span class="mut" style="width:130px">private key</span>
+      <input id="room-prv" class="grow" type="password" placeholder="128 hex (room identity)" autocomplete="off" data-1p-ignore>
+      <button class="sec" onclick="roomCmd('get prv.key').then(r=>$('room-prv').value=stripReply(r))">Reveal</button>
+      <button class="sec" onclick="copyText(v('room-prv'))">Copy</button>
+      <button class="sec" onclick="setRoleKey('room','room-prv','room-key-state')">Set</button></div>
+    <div id="room-key-state" class="mut" style="font-size:11px;margin:-4px 0 8px 138px">changing this replaces the
+      room's identity — members must re-add it (reboot required)</div>
     <div class="row"><span class="mut" style="width:130px">location</span>
       <input id="room-lat" placeholder="lat" style="width:110px"><input id="room-lon" placeholder="lon" style="width:110px">
       <button class="sec" onclick="roomCmd('set lat '+v('room-lat')).then(()=>roomCmd('set lon '+v('room-lon')))">Save</button>
@@ -316,6 +323,12 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
         onkeydown="if(event.key=='Enter')renameChat()">
       <button class="sec" onclick="renameChat()">Rename</button></div>
       <div id="chat-name-status" class="mut" style="font-size:11px"></div>
+      <div class="row" style="margin-top:8px"><input id="chat-prv" class="grow" type="password"
+        placeholder="private key: 128 hex" autocomplete="off" data-1p-ignore>
+      <button class="sec" onclick="exportChatKey()">Reveal</button>
+      <button class="sec" onclick="setRoleKey('companion','chat-prv','chat-key-status')">Set</button></div>
+      <div id="chat-key-status" class="mut" style="font-size:11px">changing this replaces the chat identity —
+        contacts must re-add you (reboot required)</div>
     </div>
     <div class="card grow">
       <h3>Messages <span id="self-name" class="mut"></span>
@@ -1109,6 +1122,29 @@ function renderMsgs(){
   el.scrollTop=el.scrollHeight;
 }
 function contactName(prefix){ const c=contacts.find(c=>c.prefix.startsWith(prefix)); return c?c.name:null; }
+// Set any identity's private key (128 hex). Goes through the composition so
+// the filesystem copy AND the NVS mirror are both written; takes effect on
+// reboot. For the repeater/room the stock 'set prv.key' would also work, but
+// it wouldn't update the mirror — which would then restore the OLD key.
+async function setRoleKey(role,inputId,statusId){
+  const k=v(inputId).replace(/\s+/g,"");
+  const st=$(statusId);
+  if(!/^[0-9a-fA-F]{128}$/.test(k)&&!/^[0-9a-fA-F]{192}$/.test(k)){
+    st.textContent="expected 128 hex characters (private key)"; return;
+  }
+  if(!confirm("Replace the "+role+" identity? Its current key is lost unless you have a copy, and peers must re-add it."))return;
+  const r=stripReply(await cmd("set identity."+role+" "+k));
+  st.textContent=r;
+  if(/^OK/.test(r)&&confirm("Reboot now to apply?")) cmd("reboot");
+}
+async function exportChatKey(){
+  if(!compReady) await initComp();
+  const fs=await frames([23]);                       // CMD_EXPORT_PRIVATE_KEY
+  const f=fs.find(f=>f[0]===14);                     // RESP_CODE_PRIVATE_KEY
+  if(!f){ $("chat-key-status").textContent="export unavailable"; return; }
+  $("chat-prv").value=hex(f,1,f.length-1);
+  $("chat-key-status").textContent="private key shown — keep it secret";
+}
 async function renameChat(){
   const name=v("chat-name"); if(!name) return;
   if(!compReady) await initComp();

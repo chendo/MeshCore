@@ -81,20 +81,32 @@ static void multiIdImportSaveMirror(const char* role, mesh::LocalIdentity& id) {
 
 // Import an identity from a 192-hex-char blob (pub||prv), writing both the
 // filesystem copy and the mirror. Used by the console recovery command.
-static bool multiIdImport(const char* role, fs::FS* fs, const char* hex192) {
-  if (hex192 == nullptr || strlen(hex192) != MULTI_ID_BLOB * 2) return false;
-  uint8_t blob[MULTI_ID_BLOB];
-  if (!mesh::Utils::fromHex(blob, MULTI_ID_BLOB, hex192)) return false;
+// Accepts EITHER a 128-hex private key (the format the stock 'set prv.key'
+// and the phone app use — the public key is derived from it) or the 192-hex
+// pub||prv blob written by the mirror.
+static bool multiIdImport(const char* role, fs::FS* fs, const char* hex) {
+  if (hex == nullptr) return false;
+  size_t n = strlen(hex);
+  mesh::LocalIdentity id;
 
-  mesh::LocalIdentity id = multiIdFromBlob(blob);
+  if (n == PRV_KEY_SIZE * 2) {                 // 128 hex: private key only
+    uint8_t prv[PRV_KEY_SIZE];
+    if (!mesh::Utils::fromHex(prv, PRV_KEY_SIZE, hex)) return false;
+    if (!mesh::LocalIdentity::validatePrivateKey(prv)) return false;
+    id.readFrom(prv, PRV_KEY_SIZE);            // derives the public key
+  } else if (n == MULTI_ID_BLOB * 2) {         // 192 hex: pub||prv blob
+    uint8_t blob[MULTI_ID_BLOB];
+    if (!mesh::Utils::fromHex(blob, MULTI_ID_BLOB, hex)) return false;
+    if (!mesh::LocalIdentity::validatePrivateKey(blob + PUB_KEY_SIZE)) return false;
+    id = multiIdFromBlob(blob);
+  } else {
+    return false;
+  }
 
   IdentityStore store(*fs, "/identity");
   store.begin();
   if (!store.save("_main", id)) return false;
 
-  Preferences nvs;
-  nvs.begin("multiids", false);
-  nvs.putBytes(role, blob, MULTI_ID_BLOB);
-  nvs.end();
+  multiIdImportSaveMirror(role, id);   // keep the NVS mirror in step
   return true;
 }
