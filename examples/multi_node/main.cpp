@@ -197,11 +197,53 @@ static RealTxPower g_txpwr;
 // stays accurate enough to be useful to its peers (every advert it sends
 // carries this timestamp).
 static const uint32_t GPS_FIX_TIMEOUT_MS = 150000;   // give up on a cold fix
-static uint32_t g_gps_sync_hours = 12;               // 0 = never
+static const uint16_t GPS_MIN_BATT_MV = 4000;        // don't spend charge on a sync when low
+static const uint32_t GPS_BATT_RETRY_MS = 1800000;   // re-check battery in 30 min
+static uint32_t g_gps_sync_hours = 4;                // 0 = never
 static uint32_t g_gps_next_ms = 60000;               // first attempt a minute after boot
 static uint32_t g_gps_deadline_ms = 0;               // non-zero while GPS is powered for a sync
 static uint32_t g_gps_last_sync_epoch = 0;
+static uint32_t g_gps_skips_low_batt = 0;
 static const char* g_gps_last_result = "not attempted yet";
+
+// ---- clock drift history ----------------------------------------------------
+// Every GPS sync measures how far the RTC had wandered since the previous one.
+// Kept in RTC slow memory: it survives OTA/software reboots (NOT a power cycle)
+// and, unlike NVS, costs no flash writes — this is diagnostics, not state
+// worth wearing flash for.
+struct ClockDriftSample {
+  uint32_t epoch;      // GPS time at the sync
+  int32_t  offset_s;   // gps - rtc  (positive => the RTC was running slow)
+  uint32_t elapsed_s;  // since the previous sync (0 if this was the first)
+};
+#define DRIFT_MAGIC 0x44524654u   // 'DRFT'
+#define DRIFT_SLOTS 24
+RTC_NOINIT_ATTR static uint32_t g_drift_magic;
+RTC_NOINIT_ATTR static ClockDriftSample g_drift[DRIFT_SLOTS];
+RTC_NOINIT_ATTR static uint32_t g_drift_count;    // total ever recorded
+
+static void driftInit() {
+  if (g_drift_magic != DRIFT_MAGIC) {
+    memset(g_drift, 0, sizeof(g_drift));
+    g_drift_count = 0;
+    g_drift_magic = DRIFT_MAGIC;
+  }
+}
+
+static void driftRecord(uint32_t gps_epoch, int32_t offset_s, uint32_t elapsed_s) {
+  driftInit();
+  g_drift[g_drift_count % DRIFT_SLOTS] = { gps_epoch, offset_s, elapsed_s };
+  g_drift_count++;
+}
+
+// parts-per-million from the most recent measured interval (0 if unknown)
+static float driftPpm() {
+  driftInit();
+  if (g_drift_count == 0) return 0;
+  const ClockDriftSample& s = g_drift[(g_drift_count - 1) % DRIFT_SLOTS];
+  if (s.elapsed_s == 0) return 0;
+  return (float)s.offset_s * 1000000.0f / (float)s.elapsed_s;
+}
 
 static void gpsPower(bool on) {
   sensors.setSettingValue("gps", on ? "1" : "0");
@@ -227,7 +269,18 @@ static void gpsSyncTick() {
   uint32_t now = millis();
 
   if (g_gps_deadline_ms == 0) {                       // idle: is a sync due?
-    if (g_gps_sync_hours > 0 && now >= g_gps_next_ms) gpsSyncStart();
+    if (g_gps_sync_hours > 0 && now >= g_gps_next_ms) {
+      uint16_t mv = board.getBattMilliVolts();
+      if (mv > 0 && mv < GPS_MIN_BATT_MV) {
+        // acquiring a fix costs a minute or two of GPS current; skip it while
+        // the pack is low and look again shortly
+        g_gps_skips_low_batt++;
+        g_gps_last_result = "skipped: battery below threshold";
+        g_gps_next_ms = now + GPS_BATT_RETRY_MS;
+        return;
+      }
+      gpsSyncStart();
+    }
     return;
   }
 
@@ -235,10 +288,24 @@ static void gpsSyncTick() {
   if (gps != nullptr && gps->isValid()) {
     long ts = gps->getTimestamp();
     if (ts > 1700000000L) {                           // sane epoch (past 2023)
+      // measure the RTC's error BEFORE correcting it — that difference, over
+      // the interval since the last sync, is the crystal's real drift rate
+      uint32_t before = rtc_clock.getCurrentTime();
+      int32_t offset = (int32_t)((uint32_t)ts - before);
+      uint32_t elapsed = g_gps_last_sync_epoch ? ((uint32_t)ts - g_gps_last_sync_epoch) : 0;
+      driftRecord((uint32_t)ts, offset, elapsed);
+
       rtc_clock.setCurrentTime((uint32_t)ts);
       g_gps_last_sync_epoch = (uint32_t)ts;
       g_gps_last_result = "synced from GPS";
-      Serial.printf("[gps] clock synced to %lu, powering GPS down\n", (unsigned long)ts);
+      if (elapsed) {
+        Serial.printf("[gps] clock synced to %lu (RTC was %+ld s over %lu s = %.1f ppm)\n",
+                      (unsigned long)ts, (long)offset, (unsigned long)elapsed,
+                      (double)offset * 1000000.0 / (double)elapsed);
+      } else {
+        Serial.printf("[gps] clock synced to %lu (first sync, RTC was %+ld s out)\n",
+                      (unsigned long)ts, (long)offset);
+      }
       gpsPower(false);
       g_gps_deadline_ms = 0;
       g_gps_next_ms = now + g_gps_sync_hours * 3600000UL;
@@ -331,14 +398,44 @@ public:
       formatEpochUtc(now_epoch, now_s, sizeof(now_s));
       if (g_gps_last_sync_epoch) formatEpochUtc(g_gps_last_sync_epoch, sync_s, sizeof(sync_s));
       else strncpy(sync_s, "never", sizeof(sync_s));
+      float ppm = driftPpm();
       snprintf(reply, reply_size,
-               "epoch=%lu utc=%s source=%s last_gps_sync=%s gps=%s sats=%ld next_sync_in=%lus",
+               "epoch=%lu utc=%s source=%s last_gps_sync=%s gps=%s sats=%ld "
+               "next_sync_in=%lus every=%luh batt=%umV drift=%.1fppm(%.1fs/day) syncs=%lu skipped_low_batt=%lu",
                (unsigned long)now_epoch, now_s,
                g_gps_last_sync_epoch ? "gps" : "manual/unset", sync_s,
                g_gps_deadline_ms ? "on(acquiring)" : "off",
                gps ? gps->satellitesCount() : 0,
                (unsigned long)(g_gps_sync_hours == 0 ? 0 :
-                 (g_gps_next_ms > millis() ? (g_gps_next_ms - millis()) / 1000 : 0)));
+                 (g_gps_next_ms > millis() ? (g_gps_next_ms - millis()) / 1000 : 0)),
+               (unsigned long)g_gps_sync_hours, (unsigned)board.getBattMilliVolts(),
+               (double)ppm, (double)ppm * 86400.0 / 1000000.0,
+               (unsigned long)g_drift_count, (unsigned long)g_gps_skips_low_batt);
+      return;
+    }
+    if (strcmp(command, "clock drift") == 0) {
+      driftInit();
+      if (g_drift_count == 0) {
+        snprintf(reply, reply_size, "no GPS syncs recorded yet (history clears on power loss)");
+        return;
+      }
+      size_t o = 0;
+      uint32_t shown = g_drift_count < DRIFT_SLOTS ? g_drift_count : DRIFT_SLOTS;
+      uint32_t start = g_drift_count - shown;
+      o += snprintf(reply + o, reply_size - o, "utc                  rtc_error  interval   rate\n");
+      for (uint32_t i = start; i < g_drift_count && o + 64 < reply_size; i++) {
+        const ClockDriftSample& s = g_drift[i % DRIFT_SLOTS];
+        char ts[24];
+        formatEpochUtc(s.epoch, ts, sizeof(ts));
+        if (s.elapsed_s) {
+          o += snprintf(reply + o, reply_size - o, "%s %+7lds %7luh  %+.1f ppm\n",
+                        ts, (long)s.offset_s, (unsigned long)(s.elapsed_s / 3600),
+                        (double)s.offset_s * 1000000.0 / (double)s.elapsed_s);
+        } else {
+          o += snprintf(reply + o, reply_size - o, "%s %+7lds       -   (first)\n",
+                        ts, (long)s.offset_s);
+        }
+      }
       return;
     }
     if (strcmp(command, "gps sync") == 0) {
@@ -710,8 +807,9 @@ void setup() {
   loadAdminPwd();   // web/console admin password (persisted, defaults to ADMIN_PASSWORD)
 
   g_wifi_nvs.begin("multiwifi", true);
-  g_gps_sync_hours = g_wifi_nvs.getUInt("gpssync", 12);   // GPS clock discipline interval
+  g_gps_sync_hours = g_wifi_nvs.getUInt("gpssync", 4);   // GPS clock discipline interval
   g_wifi_nvs.end();
+  driftInit();
 
   // composition owns WiFi + the single HTTPS web panel; credentials come from
   // our dedicated NVS store (authoritative), not NetworkService persistence.

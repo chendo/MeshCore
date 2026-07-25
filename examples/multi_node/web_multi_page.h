@@ -1340,7 +1340,10 @@ function renderDashTiles(d){
     tile("CPU load",(d.load!==undefined?d.load+" %":"-"),(d.lps?d.lps+" loops/s":"main task duty"))+
     tile("Clock",(((d.clock||"").match(/utc=(\S+)/)||[])[1]||"-").replace("Z","")+" UTC",
       "source: "+(((d.clock||"").match(/source=(\S+)/)||[])[1]||"?")+
-      ((d.clock||"").includes("gps=on")?" · GPS acquiring":""))+
+      ((d.clock||"").includes("gps=on")?" · GPS acquiring":"")+
+      ((((d.clock||"").match(/drift=\S+\(([-\d.]+)s\/day\)/)||[])[1]!==undefined&&
+        +(((d.clock||"").match(/drift=\S+\(([-\d.]+)s\/day\)/)||[])[1])!==0)
+        ? " · drift "+((d.clock||"").match(/drift=\S+\(([-\d.]+)s\/day\)/)||[])[1]+" s/day" : ""))+
     tile("Free heap",Math.round(d.heap/1024)+" k","psram "+Math.round(d.psram/1024)+" k")+
     tile("Contacts",contacts.length||"-","known nodes")+
     tile("Forwarded",(rp.flood_tx||0)+(rp.direct_tx||0),"rx errors "+((rp.recv_errors||0)+(ro.recv_errors||0)))+
