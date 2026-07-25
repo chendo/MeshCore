@@ -22,6 +22,21 @@ fs::FS* multiSysFS();   // composition prefs area of the shared partition
 uint8_t  multiLoadPct();      // main-task duty cycle %, 1s window
 uint32_t multiLoopsPerSec();  // super-loop iterations/sec
 
+// ---- provided by wrap_slots.cpp (optional chat identity slots) ----
+struct IdentityModule;
+void multiChatSlotsInit();
+bool multiChatSlotEnabled(int i);
+void multiChatSlotSetEnabled(int i, bool en);
+int  multiChatSlotPort(int i);
+IdentityModule* multiChatSlotModule(int i);
+const char* multiChatSlotFsDir(int i);
+bool multiChatSlotRunning(int i);
+bool multiChatSlotClient(int i);
+int  multiChatSlotFrameExchange(int i, const uint8_t* frame, size_t len, uint8_t* out, size_t out_cap,
+                                uint32_t total_ms, uint32_t idle_ms);
+uint32_t multiChatSlotArchiveSeq(int i);
+int  multiChatSlotArchiveCopy(int i, uint32_t after, uint8_t* out, size_t cap);
+
 // ---- provided by wrap_room.cpp ----
 // stored room posts as a JSON array [{t,a,x}...]; returns bytes written
 int roomGetPostsJson(char* out, size_t cap);

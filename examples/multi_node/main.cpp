@@ -41,8 +41,8 @@ extern IdentityModule repeater_module;
 extern IdentityModule room_module;
 extern IdentityModule companion_module;
 
-static IdentityModule* g_modules[] = { &repeater_module, &room_module, &companion_module };
-static const int NUM_MODULES = sizeof(g_modules) / sizeof(g_modules[0]);
+static IdentityModule* g_modules[3 + MULTI_MAX_CHAT_SLOTS] = { &repeater_module, &room_module, &companion_module };
+static int NUM_MODULES = 3;   // optional chat slots appended at boot (see setup)
 
 // ONE shared SPIFFS partition, exposed to each identity as a subdirectory view.
 // SPIFFS has a flat namespace, so a view just prefixes every path ("/identity"
@@ -57,8 +57,10 @@ public:
 };
 static fs::SPIFFSFS   fs_shared;
 static SubdirFS       fs_rep, fs_room, fs_comp, fs_sys;
+static SubdirFS       fs_chat[MULTI_MAX_CHAT_SLOTS];
 static SharedRadioCore* g_core = nullptr;
 static RadioPort        port_rep, port_room, port_comp;
+static RadioPort        port_chat[MULTI_MAX_CHAT_SLOTS];
 
 static NetworkService   network;
 static WebService       web;
@@ -312,6 +314,31 @@ public:
       }
       return;
     }
+    // optional chat identity slots: "set slot.chat2 on|off", "slots"
+    if (strncmp(command, "set slot.chat", 13) == 0) {
+      int idx = atoi(command + 13) - 1;
+      const char* arg = strchr(command + 13, ' ');
+      if (idx < 0 || idx >= MULTI_MAX_CHAT_SLOTS || arg == nullptr) {
+        snprintf(reply, reply_size, "Error - usage: set slot.chat<1-%d> on|off", MULTI_MAX_CHAT_SLOTS);
+        return;
+      }
+      bool on = strcmp(arg + 1, "on") == 0 || strcmp(arg + 1, "1") == 0;
+      multiChatSlotSetEnabled(idx, on);
+      snprintf(reply, reply_size, "OK - chat slot %d %s; reboot to apply (app port %d)",
+               idx + 1, on ? "enabled" : "disabled", multiChatSlotPort(idx));
+      return;
+    }
+    if (strcmp(command, "slots") == 0) {
+      size_t o = 0;
+      o += snprintf(reply + o, reply_size - o, "fixed: repeater, room, companion (app port %d)\n", 5000);
+      for (int i = 0; i < MULTI_MAX_CHAT_SLOTS && o + 60 < reply_size; i++) {
+        o += snprintf(reply + o, reply_size - o, "chat%d: %s%s (app port %d)\n", i + 1,
+                      multiChatSlotEnabled(i) ? "enabled" : "disabled",
+                      multiChatSlotEnabled(i) != multiChatSlotRunning(i) ? " — reboot pending" : "",
+                      multiChatSlotPort(i));
+      }
+      return;
+    }
     if (strcmp(command, "identities source") == 0) {   // how each key was obtained this boot
       multiIdSourceReport(reply, reply_size);
       return;
@@ -497,12 +524,25 @@ void setup() {
   g_core->setPortName(g_core->addPort(port_room), "room");
   g_core->setPortName(g_core->addPort(port_comp), "companion");
 
+  // optional chat identity slots (enabled from the panel, applied at boot)
+  multiChatSlotsInit();
+  for (int i = 0; i < MULTI_MAX_CHAT_SLOTS; i++) {
+    if (!multiChatSlotEnabled(i)) continue;
+    fs_chat[i].begin(multiChatSlotFsDir(i));
+    IdentityModule* m = multiChatSlotModule(i);
+    g_modules[NUM_MODULES++] = m;
+    g_core->setPortName(g_core->addPort(port_chat[i]), m->name);
+  }
+
   WebPanelServer::setExtRoutesRegistrar(&multiWebRegisterRoutes);   // unified panel + APIs
   WebPanelServer::setExtOwnsIndex(true);                            // panel served at "/" (stock SPA stays at /app)
 
   repeater_module.setup(&fs_rep, &port_rep);
   room_module.setup(&fs_room, &port_room);
   companion_module.setup(&fs_comp, &port_comp);
+  for (int i = 0; i < MULTI_MAX_CHAT_SLOTS; i++) {
+    if (multiChatSlotEnabled(i)) multiChatSlotModule(i)->setup(&fs_chat[i], &port_chat[i]);
+  }
 
   // authoritative last: overrides whatever each identity's own begin() just
   // applied to the shared radio_driver (see "shared-radio ownership" above)

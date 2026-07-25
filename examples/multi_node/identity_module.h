@@ -13,6 +13,10 @@ typedef fs::FS MultiFS;   // == FILESYSTEM on ESP32
 
 namespace mesh { class Radio; }
 
+// Optional extra chat identities (see wrap_slots.cpp). 3 fixed roles + 5
+// optional slots = 8 ports, matching SharedRadioCore::MAX_PORTS.
+#define MULTI_MAX_CHAT_SLOTS 5
+
 struct IdentityModule {
   const char* name;
   // construct the mesh on `port`, load/create identity from `fs` (its own

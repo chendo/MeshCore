@@ -204,6 +204,13 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
       <button class="sec" onclick="fieldSave('gps on','pw-status')">Power up</button></div>
     <div id="pw-status" class="mut" style="font-size:12px"></div>
   </div>
+  <div class="card"><h3>Identity slots</h3>
+    <div class="mut" style="font-size:12px;margin-bottom:8px">Each enabled slot is a full extra chat identity — its own
+    keypair, contacts and app connection on its own TCP port. Changes apply at the next reboot (radio ports are fixed
+    at boot). Disabling keeps the identity and its data on the filesystem, so re-enabling restores the same node.</div>
+    <div id="slots-list" class="mut" style="font-size:13px">loading...</div>
+    <div id="slots-status" class="mut" style="font-size:12px;margin-top:6px"></div>
+  </div>
   <div class="card"><h3>Panel</h3>
     <div class="row"><a href="/app" style="color:var(--acc)">Classic panel (/app)</a>
       <span class="mut">·</span><a href="/stats" style="color:var(--acc)">Legacy stats (/stats)</a></div>
@@ -412,6 +419,7 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{
   if(b.dataset.t==="dash"){ loadDash(); loadStatsTab(); }
   if(b.dataset.t==="rep") loadRepTab();
   if(b.dataset.t==="radio") loadRadioTab();
+  if(b.dataset.t==="set") loadSlots();
   if(b.dataset.t==="room") loadRoomTab();
 });
 
@@ -1494,6 +1502,31 @@ function drawSpark(cid,vid,pts){
   });
   ctx.stroke();
   $(vid).textContent="now "+vs[vs.length-1]+"  min "+min+"  max "+max;
+}
+
+// ---- settings: identity slots ----
+async function loadSlots(){
+  const txt=await cmd("slots");
+  const rows=stripReply(txt).split("\n").filter(Boolean);
+  let h="";
+  for(const line of rows){
+    const m=line.match(/^chat(\d+):\s*(enabled|disabled)(.*?)\s*\(app port (\d+)\)/);
+    if(!m){ h+="<div class=mut style='margin-bottom:4px'>"+esc(line)+"</div>"; continue; }
+    const [,n,state,note,port]=m;
+    const on=state==="enabled";
+    h+="<div class=row style='margin-bottom:2px'><label style='min-width:220px'>"+
+      "<input type=checkbox "+(on?"checked":"")+" onchange=\"setSlot("+n+",this.checked)\"> chat "+n+
+      " <span class=mut>· app port "+port+"</span></label>"+
+      (note.trim()?"<span class=err style='font-size:12px'>"+esc(note.trim().replace(/^—\s*/,""))+"</span>":
+        (on?"<span class=ok style='font-size:12px'>running</span>":""))+"</div>";
+  }
+  $("slots-list").innerHTML=h;
+}
+async function setSlot(n,on){
+  const r=stripReply(await cmd("set slot.chat"+n+" "+(on?"on":"off")));
+  $("slots-status").textContent=r;
+  await loadSlots();
+  if(/^OK/.test(r)&&confirm("Reboot now to apply?")) cmd("reboot");
 }
 
 // ---- settings: firmware OTA upload ----

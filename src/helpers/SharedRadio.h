@@ -101,7 +101,7 @@ struct PktLogEntry {
 
 class SharedRadioCore {
 public:
-  static const int MAX_PORTS = 4;
+  static const int MAX_PORTS = 8;
   static const int PKT_LOG_SIZE = 48;
 
   explicit SharedRadioCore(mesh::Radio& real) : _real(&real), _num_ports(0),
@@ -192,5 +192,5 @@ private:
   PktLogEntry _pkt_log[PKT_LOG_SIZE];
   volatile uint32_t _pkt_seq = 0;   // total packets ever logged; ring index = seq % SIZE
   volatile uint32_t _rx_total = 0, _tx_total = 0;
-  const char* _port_names[MAX_PORTS] = { "?", "?", "?", "?" };
+  const char* _port_names[MAX_PORTS] = { "?", "?", "?", "?", "?", "?", "?", "?" };
 };
