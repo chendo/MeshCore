@@ -326,3 +326,22 @@ physical nodes; not needed for normal use.
    `identities` shows three pubkeys.
 5. Report back: boot log, whether three IDs appear, whether adverts show on
    another node. That determines whether the arbiter is sound or needs work.
+
+## Git + fixes round (2026-07-25 night, delivered via OTA #4/#5)
+
+The tree is now a git repo: branch `multi-identity` on upstream
+`d350934` (remote `upstream` = xJARiD/MeshCore-EastMesh), with the full
+divergence in focused commits. data/ (contains identity PRIVATE KEYS from
+the migration) is gitignored — never commit it. New work gets atomic
+commits from now on.
+
+- **Name persistence FIXED**: applyAdvertPolicy() was running 'set name
+  <default>' every boot, clobbering saved names. Now seeds names only on an
+  identity's first boot (com_prefs absent). Verified: set → reboot → sticks.
+- **Socket starvation FIXED**: panel HTTPS server had 2 sockets, no LRU
+  purge — an open browser tab starved OTA/curl/other browsers. Now 3 + LRU.
+- **Neighbours persist**: composition snapshots the repeater's RAM-only
+  neighbour table to /sys/neighbours.csv every 5 min (epoch from hardware
+  RTC); Mesh tab shows "(remembered)" rows after restart.
+- **Dashboard**: tile grid (battery/uptime/radio totals/noise/wifi/heap/
+  contacts/forwarded/app state) + battery & packet-rate sparklines.
