@@ -101,16 +101,16 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
     <div class="row"><textarea id="rep-owner" class="grow" rows="2" placeholder="owner info"></textarea>
       <button class="sec" onclick="fieldSave('set owner.info '+v('rep-owner'),'rep-status')">Save owner</button>
       <button class="sec" onclick="fieldLoad('get owner.info','rep-owner')">&#8635;</button></div>
-    <div class="row"><input id="rep-prv" class="grow" type="password" placeholder="private key (hex)">
+    <div class="row"><input id="rep-prv" class="grow" type="password" placeholder="private key (hex)" autocomplete="off" data-1p-ignore>
       <button class="sec" onclick="fieldLoad('get prv.key','rep-prv')">Reveal</button>
       <button class="sec" onclick="copyText(v('rep-prv'))">Copy</button>
       <button class="sec" onclick="if(confirm('Overwrite the repeater private key?'))fieldSave('set prv.key '+v('rep-prv'),'rep-status')">Set</button></div>
     <div id="rep-status" class="mut" style="font-size:12px"></div>
   </div>
   <div class="card"><h3>Access</h3>
-    <div class="row"><input id="rep-admin" class="grow" placeholder="new admin password">
+    <div class="row"><input id="rep-admin" class="grow" placeholder="new admin password" autocomplete="off" data-1p-ignore>
       <button class="sec" onclick="fieldSave('password '+v('rep-admin'),'rep-status')">Set admin password</button></div>
-    <div class="row"><input id="rep-guest" class="grow" placeholder="new guest password">
+    <div class="row"><input id="rep-guest" class="grow" placeholder="new guest password" autocomplete="off" data-1p-ignore>
       <button class="sec" onclick="fieldSave('set guest.password '+v('rep-guest'),'rep-status')">Set guest password</button></div>
   </div>
   <div class="card"><h3>Advertising</h3>
@@ -175,6 +175,19 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
       <button class="act" id="fw-btn" onclick="fwUpload()">Upload &amp; flash</button></div>
     <div id="fw-status" class="mut" style="font-size:12px"></div>
   </div>
+  <div class="card"><h3>Power</h3>
+    <div class="mut" style="font-size:12px;margin-bottom:6px">WiFi modem sleep is the single biggest saver (~half the
+    idle draw); "min" adds a few ms of panel latency. GPS is unnecessary on a fixed node with lat/lon set — the
+    hardware RTC keeps time.</div>
+    <div class="row"><span class="mut" style="width:140px">WiFi powersave</span>
+      <select id="pw-wifi"><option value="none">none (full power)</option>
+        <option value="min">min (recommended)</option><option value="max">max</option></select>
+      <button class="sec" onclick="fieldSave('set wifi.powersave '+v('pw-wifi'),'pw-status')">Apply</button></div>
+    <div class="row"><span class="mut" style="width:140px">GPS</span>
+      <button class="sec" onclick="fieldSave('gps off','pw-status')">Power down</button>
+      <button class="sec" onclick="fieldSave('gps on','pw-status')">Power up</button></div>
+    <div id="pw-status" class="mut" style="font-size:12px"></div>
+  </div>
   <div class="card"><h3>Panel</h3>
     <div class="row"><a href="/app" style="color:var(--acc)">Classic panel (/app)</a>
       <span class="mut">·</span><a href="/stats" style="color:var(--acc)">Legacy stats (/stats)</a></div>
@@ -232,7 +245,7 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
       <button class="sec" onclick="roomCmd('set name '+v('room-name'))">Set name</button></div>
     <div class="row"><input id="room-lat" placeholder="lat"><input id="room-lon" placeholder="lon">
       <button class="sec" onclick="roomCmd('set lat '+v('room-lat')).then(()=>roomCmd('set lon '+v('room-lon')))">Set location</button></div>
-    <div class="row"><input id="room-pwd" class="grow" placeholder="new room password">
+    <div class="row"><input id="room-pwd" class="grow" placeholder="new room password" autocomplete="off" data-1p-ignore>
       <button class="sec" onclick="roomCmd('password '+v('room-pwd'))">Set password</button></div>
   </div>
   <div class="card"><h3>Output <span class="mut" style="font-weight:400;font-size:11px">(full console lives in the Debug tab)</span></h3>
@@ -286,7 +299,7 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
 
 </main>
 <div id="login" style="display:none"><div class="card">
-<h3>Unlock</h3><div class="row"><input id="pwd" type="password" class="grow" placeholder="admin password"
+<h3>Unlock</h3><div class="row"><input id="pwd" type="password" class="grow" placeholder="admin password" autocomplete="off" data-1p-ignore
 onkeydown="if(event.key=='Enter')doLogin()"></div>
 <button class="act" onclick="doLogin()" style="width:100%">Log in</button>
 <div id="login-err" class="err" style="font-size:12px;margin-top:6px"></div>
@@ -304,6 +317,7 @@ async function doLogin(){
   const r = await fetch("/login",{method:"POST",body:$("pwd").value});
   if(!r.ok){ $("login-err").textContent="wrong password"; return; }
   TOKEN=(await r.text()).trim(); localStorage.setItem("mp_token",TOKEN);
+  $("pwd").value="";               // a lingering value retriggers password managers on every nav
   $("login").style.display="none"; boot();
 }
 async function api(path,opts){
