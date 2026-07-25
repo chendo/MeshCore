@@ -527,12 +527,22 @@ async function pollPkts(){
     for(const p of d.pkts){
       lastSeq=Math.max(lastSeq,p.s);
       const tr=document.createElement("tr");
-      const when=new Date(Date.now()-(devNow-p.t)).toLocaleTimeString();
+      const wd=new Date(Date.now()-(devNow-p.t));
+      const when=wd.toTimeString().slice(0,8)+"."+String(wd.getMilliseconds()).padStart(3,"0");
       const rx=p.d==="rx";
-      const a=annot(p);
-      tr.innerHTML="<td>"+when+"</td><td class="+(rx?"ok":"err")+">"+(rx?"RX":"TX:"+p.d)+"</td><td>"+
-        ROUTES[p.h&3]+"</td><td>"+PTYPES[(p.h>>2)&15]+"</td><td>"+esc(a.src)+"</td><td class=mut>"+a.infoHtml+
-        "</td><td>"+p.l+"</td><td>"+(rx?snrSpan(p.snr):"")+"</td><td>"+(rx?rssiSpan(p.rssi):"")+"</td>";
+      if(p.e===1){          // RX decode/CRC failure
+        tr.innerHTML="<td>"+when+"</td><td style='color:#e08a4d'>RX-ERR</td><td colspan=4 class=mut>"+
+          "decode/CRC failure — collision or weak signal</td><td>?</td><td>"+
+          (p.snr?snrSpan(p.snr):"")+"</td><td>"+(p.rssi?rssiSpan(p.rssi):"")+"</td>";
+      } else if(p.e===2){   // TX never completed
+        tr.innerHTML="<td>"+when+"</td><td style='color:#e05d5d'>TX-FAIL:"+esc(p.d)+"</td><td colspan=4 class=mut>"+
+          "send timed out before TX-done (radio contention?)</td><td>-</td><td></td><td></td>";
+      } else {
+        const a=annot(p);
+        tr.innerHTML="<td>"+when+"</td><td class="+(rx?"ok":"err")+">"+(rx?"RX":"TX:"+p.d)+"</td><td>"+
+          ROUTES[p.h&3]+"</td><td>"+PTYPES[(p.h>>2)&15]+"</td><td>"+esc(a.src)+"</td><td class=mut>"+a.infoHtml+
+          "</td><td>"+p.l+"</td><td>"+(rx?snrSpan(p.snr):"")+"</td><td>"+(rx?rssiSpan(p.rssi):"")+"</td>";
+      }
       const tb=$("pkt-rows"); tb.insertBefore(tr,tb.firstChild);
       while(tb.children.length>120) tb.removeChild(tb.lastChild);
     }
@@ -887,7 +897,6 @@ async function syncMsgs(){
   $("msg-status").textContent="pulled "+got+" message(s) from device queue";
   if(got) pollArchive();
 }
-setInterval(()=>{ if($("autosync").checked) syncMsgs().catch(()=>{}); },5000);
 
 // Archive mirror: non-consuming message view
 let archSeq=+(localStorage.getItem("mp_arch_seq")||0);
@@ -1006,6 +1015,7 @@ function renderDashTiles(d){
     tile("Radio RX / TX",(d.radio?d.radio.rx:"-")+" / "+(d.radio?d.radio.tx:"-"),"packets since boot")+
     tile("Noise floor",(d.radio&&d.radio.noise?d.radio.noise+" dBm":"-"),"")+
     tile("WiFi",wifiRssi?wifiRssi+" dBm":"offline","")+
+    tile("CPU load",(d.load!==undefined?d.load+" %":"-"),(d.lps?d.lps+" loops/s":"main task duty"))+
     tile("Free heap",Math.round(d.heap/1024)+" k","psram "+Math.round(d.psram/1024)+" k")+
     tile("Contacts",contacts.length||"-","known nodes")+
     tile("Forwarded",(rp.flood_tx||0)+(rp.direct_tx||0),"rx errors "+((rp.recv_errors||0)+(ro.recv_errors||0)))+
@@ -1046,7 +1056,6 @@ async function loadDash(){
     }catch(e){}
   }
 }
-setInterval(()=>{ if($("tab-dash").classList.contains("on")) loadDash().catch(()=>{}); },60000);
 
 // ---- repeater tab ----
 async function loadRepTab(){
@@ -1161,8 +1170,8 @@ async function saveRegion(){
 }
 
 // ---- stats tab ----
-const SERIES=[["battery","battery (mV)"],["heap","free heap (kB)"],["wifi_rssi","wifi RSSI (dBm)"],
-  ["noise","radio noise floor (dBm)"],["packets","radio packets / min"]];
+const SERIES=[["battery","battery (mV)"],["load","CPU load (%)"],["heap","free heap (kB)"],
+  ["wifi_rssi","wifi RSSI (dBm)"],["noise","radio noise floor (dBm)"],["packets","radio packets / min"]];
 let lastDebug=null;
 async function loadStatsTab(){
   if(lastDebug){
@@ -1274,12 +1283,40 @@ function cliKey(e){
 }
 
 // ---- boot ----
+// Polling is load on the node (each request = TLS + up to 7 console commands
+// for /debug), and the panel's HTTPS server only has a few sockets. All
+// periodic work therefore runs through ONE sequential scheduler: jobs are
+// awaited one at a time, so the poller never has two requests in flight, and
+// nothing runs while the browser tab is hidden. The packet trace polls fast
+// only while the Debug section is on screen.
+const activeTab=()=>document.querySelector("nav button.on").dataset.t;
+const jobs=[
+  {name:"pkts",   fn:pollPkts,     period:()=>activeTab()==="debug"?4000:20000, due:0},
+  {name:"debug",  fn:pollDebug,    period:15000, due:1000},
+  {name:"archive",fn:pollArchive,  period:15000, due:5000},
+  {name:"nearby", fn:async()=>renderNearby(), period:15000, due:8000},   // local render, no request
+  {name:"dash",   fn:async()=>{ if($("tab-dash").classList.contains("on")) await loadDash(); }, period:120000, due:120000},
+  {name:"autosync",fn:async()=>{ if($("autosync").checked) await syncMsgs(); }, period:15000, due:12000},
+];
+let pumpBusy=false;
+async function pumpJobs(){
+  if(pumpBusy||document.hidden) return;
+  pumpBusy=true;
+  try{
+    for(const j of jobs){
+      if(Date.now()>=j.due){
+        j.due=Date.now()+(typeof j.period==="function"?j.period():j.period);
+        try{ await j.fn(); }catch(e){}
+      }
+    }
+  } finally{ pumpBusy=false; }
+}
 async function boot(){
-  pollDebug(); pollPkts(); loadDash(); loadStatsTab(); loadRailNames();
-  setInterval(pollDebug,5000);
-  setInterval(pollPkts,2500);
-  setInterval(pollArchive,4000);
-  setInterval(renderNearby,10000);
+  await pollDebug(); await loadDash(); loadStatsTab(); loadRailNames();
+  setInterval(pumpJobs,1000);
+  document.addEventListener("visibilitychange",()=>{
+    if(!document.hidden){ for(const j of jobs) j.due=0; pumpJobs(); }
+  });
   initComp().then(()=>{ pollArchive(); renderNearby(); renderRail(); }).catch(()=>{});
 }
 (async()=>{
