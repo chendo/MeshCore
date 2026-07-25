@@ -252,17 +252,48 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
 </div>
 
 <div id="tab-room" class="tabpane">
-  <div class="card"><h3>Room server</h3>
-    <div class="row"><button class="act" onclick="roomCmd('advert')">Send advert</button>
-    <button class="sec" onclick="roomCmd('get acl')">List ACL</button>
-    <button class="sec" onclick="roomCmd('ver')">Version</button>
-    <button class="sec" onclick="roomCmd('clock')">Clock</button></div>
-    <div class="row"><input id="room-name" class="grow" placeholder="room name">
-      <button class="sec" onclick="roomCmd('set name '+v('room-name'))">Set name</button></div>
-    <div class="row"><input id="room-lat" placeholder="lat"><input id="room-lon" placeholder="lon">
-      <button class="sec" onclick="roomCmd('set lat '+v('room-lat')).then(()=>roomCmd('set lon '+v('room-lon')))">Set location</button></div>
-    <div class="row"><input id="room-pwd" class="grow" placeholder="new room password" autocomplete="off" data-1p-ignore>
-      <button class="sec" onclick="roomCmd('password '+v('room-pwd'))">Set password</button></div>
+  <div class="card"><h3>Room config <span id="room-title" class="mut" style="font-weight:400"></span></h3>
+    <div class="row"><span class="mut" style="width:130px">room name</span><input id="room-name" class="grow" placeholder="room name">
+      <button class="sec" onclick="roomCmd('set name '+v('room-name')).then(loadRoomTab)">Save</button></div>
+    <div class="row"><span class="mut" style="width:130px">join password</span>
+      <input id="room-pwd" class="grow" placeholder="room join (guest) password" autocomplete="off" data-1p-ignore>
+      <button class="sec" onclick="roomCmd('set guest.password '+v('room-pwd'))">Save</button></div>
+    <div class="mut" style="font-size:11px;margin:-4px 0 8px 138px">members join with this password — the compile-time
+      default is the widely-known "hello"; CHANGE IT for a private room</div>
+    <div class="row"><span class="mut" style="width:130px">admin password</span>
+      <input id="room-apwd" class="grow" placeholder="room admin password" autocomplete="off" data-1p-ignore>
+      <button class="sec" onclick="roomCmd('password '+v('room-apwd'))">Save</button></div>
+    <div class="row"><span class="mut" style="width:130px">location</span>
+      <input id="room-lat" placeholder="lat" style="width:110px"><input id="room-lon" placeholder="lon" style="width:110px">
+      <button class="sec" onclick="roomCmd('set lat '+v('room-lat')).then(()=>roomCmd('set lon '+v('room-lon')))">Save</button>
+      <span class="mut" style="font-size:11px">(never advertised — room policy)</span></div>
+    <div class="row"><button class="sec" onclick="roomCmd('get acl')">List members (ACL)</button>
+      <button class="sec" onclick="roomCmd('clock')">Clock</button></div>
+  </div>
+  <div class="card"><h3>Privacy</h3>
+    <div class="mut" style="font-size:12px;margin-bottom:8px">A room is private when it (1) never announces itself and
+    (2) has a strong join password. In private mode the room sends no adverts, so it's invisible to passers-by — share
+    it with the QR/link below instead. Anyone who already has the key AND the join password can still use it.</div>
+    <div class="row"><label><input type="checkbox" id="room-private" onchange="roomPrivacy(this.checked)"> private mode
+      (never advertise)</label>
+      <span id="room-priv-state" class="mut" style="font-size:12px"></span></div>
+    <div class="row"><button class="act" onclick="roomCmd('advert').then(()=>$('room-priv-state').textContent='one advert sent')">Announce once now</button>
+      <span class="mut" style="font-size:11px">manual one-shot advert, even in private mode</span></div>
+  </div>
+  <div class="card"><h3>Join this room</h3>
+    <div class="mut" style="font-size:12px;margin-bottom:6px">Scan with the MeshCore app (or open the link) to add the
+    room as a contact without it ever broadcasting. The member still needs the join password.</div>
+    <div class="row" style="align-items:flex-start">
+      <div id="room-qr" style="background:#fff;padding:8px;border-radius:6px"></div>
+      <div class="grow" style="min-width:200px">
+        <div id="room-uri" style="font-family:monospace;font-size:10px;word-break:break-all"></div>
+        <button class="sec" style="margin-top:6px" onclick="copyText($('room-uri').textContent)">Copy link</button>
+      </div>
+    </div>
+  </div>
+  <div class="card"><h3>Stored posts <button class="sec" style="float:right;padding:2px 8px" onclick="loadRoomPosts()">&#8635;</button>
+    <span class="mut" style="font-weight:400;font-size:11px">(last 32, held for members to sync)</span></h3>
+    <div id="room-posts" class="mut">loading...</div>
   </div>
   <div class="card"><h3>Output <span class="mut" style="font-weight:400;font-size:11px">(full console lives in the Debug tab)</span></h3>
     <pre id="room-out" class="mut"></pre></div>
@@ -365,6 +396,7 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{
   if(b.dataset.t==="dash"){ loadDash(); loadStatsTab(); }
   if(b.dataset.t==="rep") loadRepTab();
   if(b.dataset.t==="radio") loadRadioTab();
+  if(b.dataset.t==="room") loadRoomTab();
 });
 
 // ---- rail role cards ----
@@ -890,6 +922,76 @@ async function roomCmd(c){
   const r=await cmd("room "+c);
   out.textContent=("> room "+c+"\n"+r+"\n\n"+out.textContent).slice(0,4000);
   return r;
+}
+let fullKeys={};
+async function loadFullKeys(){
+  if(fullKeys.room) return;
+  const r=await cmd("identities full");
+  for(const m of r.matchAll(/(\w+)=([0-9a-f]{64})/g)) fullKeys[m[1]]=m[2];
+}
+async function loadRoomTab(){
+  try{
+    const name=stripReply(await roomCmd("get name"));
+    $("room-name").value=name; $("room-title").textContent="— "+name;
+    railNames.room=name;
+    $("room-lat").value=stripReply(await cmd("room get lat"));
+    $("room-lon").value=stripReply(await cmd("room get lon"));
+    const adv=parseInt(stripReply(await cmd("room get advert.interval")))||0;
+    const fadv=parseInt(stripReply(await cmd("room get flood.advert.interval")))||0;
+    $("room-private").checked=(adv===0&&fadv===0);
+    $("room-priv-state").textContent=(adv===0&&fadv===0)?"room is silent (no periodic adverts)":
+      "announcing: local every "+adv+"min, flood every "+fadv+"h";
+    await loadFullKeys();
+    buildRoomShare(name);
+  }catch(e){}
+  loadRoomPosts();
+}
+async function roomPrivacy(on){
+  if(on){
+    localStorage.setItem("mp_room_adv",JSON.stringify({
+      a:stripReply(await cmd("room get advert.interval")),
+      f:stripReply(await cmd("room get flood.advert.interval"))}));
+    await cmd("room set advert.interval 0"); await cmd("room set flood.advert.interval 0");
+    $("room-priv-state").textContent="room is now silent — remember to set a strong join password";
+  }else{
+    let prev={}; try{ prev=JSON.parse(localStorage.getItem("mp_room_adv")||"{}"); }catch(e){}
+    await cmd("room set advert.interval "+(parseInt(prev.a)||60));
+    await cmd("room set flood.advert.interval "+(parseInt(prev.f)||12));
+    $("room-priv-state").textContent="announcing restored";
+  }
+}
+function buildRoomShare(name){
+  const pk=fullKeys.room;
+  if(!pk){ $("room-uri").textContent="(pubkey unavailable)"; return; }
+  const uri="meshcore://contact/add?name="+encodeURIComponent(name||"Room")+"&public_key="+pk+"&type=3";
+  $("room-uri").textContent=uri;
+  renderQr("room-qr",uri);
+}
+async function ensureQrLib(){
+  if(window.qrcode) return;
+  await new Promise((res,rej)=>{
+    const s=document.createElement("script");
+    s.src="https://unpkg.com/qrcode-generator@1.4.4/qrcode.js";
+    s.onload=res; s.onerror=rej; document.body.appendChild(s);
+  });
+}
+async function renderQr(id,text){
+  try{
+    await ensureQrLib();
+    const qr=qrcode(0,"M"); qr.addData(text); qr.make();
+    $(id).innerHTML=qr.createImgTag(3,6);
+  }catch(e){ $(id).innerHTML="<span class=mut style='color:#333;font-size:11px'>QR lib offline — use the link</span>"; }
+}
+async function loadRoomPosts(){
+  try{
+    const posts=await (await api("/api/multi/room/posts")).json();
+    if(!posts.length){ $("room-posts").innerHTML="<span class=mut>no stored posts yet — members' messages appear here</span>"; return; }
+    $("room-posts").innerHTML=posts.map(p=>{
+      const who=contactName(p.a)||p.a.slice(0,8);
+      return "<div class=msg><span class=who>"+esc(who)+"</span><span class=meta>"+
+        new Date(p.t*1000).toLocaleString()+"</span><br>"+esc(p.x)+"</div>";
+    }).join("");
+  }catch(e){ $("room-posts").textContent="failed to load posts"; }
 }
 
 // ---- companion frame protocol ----
