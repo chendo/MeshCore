@@ -16,6 +16,7 @@
 #include <FS.h>
 #include <esp_heap_caps.h>
 #include <nvs.h>                           // NVS health (identity mirror lives here)
+#include <esp_partition.h>                 // raw partition read (identity recovery)
 #include <target.h>                        // board (battery millivolts), rtc_clock
 #include <helpers/SharedRadio.h>
 #include <helpers/BaseSerialInterface.h>   // MAX_FRAME_SIZE
@@ -352,6 +353,43 @@ static esp_err_t handleRoomPosts(httpd_req_t* req) {
   return rc;
 }
 
+// ---------- /api/multi/rawpart (recovery tool) ----------
+// Reads a partition verbatim so an overwritten identity can be scavenged:
+// NVS and SPIFFS both mark old entries dead rather than zeroing them, so a
+// key that was replaced is often still sitting in the flash image.
+// SECURITY: this exposes private keys to anyone with a panel session. It is
+// deliberately temporary — remove it once recovery is done.
+
+static esp_err_t handleRawPart(httpd_req_t* req) {
+  if (!authOk(req)) return deny(req);
+
+  char query[96], name[16] = "nvs";
+  uint32_t off = 0, len = 4096;
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+    char v[16];
+    httpd_query_key_value(query, "name", name, sizeof(name));
+    if (httpd_query_key_value(query, "off", v, sizeof(v)) == ESP_OK) off = strtoul(v, nullptr, 10);
+    if (httpd_query_key_value(query, "len", v, sizeof(v)) == ESP_OK) len = strtoul(v, nullptr, 10);
+  }
+  if (len > 16384) len = 16384;
+
+  const esp_partition_t* p = esp_partition_find_first(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, name);
+  if (p == nullptr) return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such partition");
+  if (off >= p->size) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "offset past end");
+  if (off + len > p->size) len = p->size - off;
+
+  uint8_t* buf = (uint8_t*)malloc(len);
+  if (buf == nullptr) return httpd_resp_send_500(req);
+  esp_err_t rc = esp_partition_read(p, off, buf, len);
+  if (rc != ESP_OK) { free(buf); return httpd_resp_send_500(req); }
+
+  httpd_resp_set_type(req, "application/octet-stream");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  esp_err_t send = httpd_resp_send(req, (const char*)buf, len);
+  free(buf);
+  return send;
+}
+
 // ---------- /api/multi/comp/frame ----------
 
 static esp_err_t handleCompFrame(httpd_req_t* req) {
@@ -457,6 +495,7 @@ void multiWebRegisterRoutes(httpd_handle_t server, WebPanelServer* panel) {
   static const httpd_uri_t comp_uri  = {.uri = "/api/multi/comp/frame", .method = HTTP_POST, .handler = &handleCompFrame, .user_ctx = nullptr};
   static const httpd_uri_t arch_uri  = {.uri = "/api/multi/comp/archive", .method = HTTP_GET, .handler = &handleCompArchive, .user_ctx = nullptr};
   static const httpd_uri_t posts_uri = {.uri = "/api/multi/room/posts", .method = HTTP_GET, .handler = &handleRoomPosts, .user_ctx = nullptr};
+  static const httpd_uri_t raw_uri   = {.uri = "/api/multi/rawpart", .method = HTTP_GET, .handler = &handleRawPart, .user_ctx = nullptr};
   httpd_register_uri_handler(server, &root_uri);
   httpd_register_uri_handler(server, &old_uri);
   httpd_register_uri_handler(server, &debug_uri);
@@ -465,4 +504,5 @@ void multiWebRegisterRoutes(httpd_handle_t server, WebPanelServer* panel) {
   httpd_register_uri_handler(server, &comp_uri);
   httpd_register_uri_handler(server, &arch_uri);
   httpd_register_uri_handler(server, &posts_uri);
+  httpd_register_uri_handler(server, &raw_uri);
 }

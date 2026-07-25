@@ -62,20 +62,15 @@ static bool multiIdLoad(const char* role, fs::FS* fs, mesh::LocalIdentity& id) {
   if (store.load("_main", id)) {
     uint8_t blob[MULTI_ID_BLOB];
     bool ok = multiIdToBlob(id, blob);
-    // A readable file is NOT proof of a good file: this device saw the
-    // repeater's stored identity change underneath it (twice, to the same
-    // deterministic key), so a filesystem copy that disagrees with the mirror
-    // is treated as corruption and the mirror wins. Legitimate key changes go
-    // through multiIdImport(), which writes BOTH copies, so they never differ.
-    if (ok && have_mirror && memcmp(blob, mirror, MULTI_ID_BLOB) != 0) {
-      id = multiIdFromBlob(mirror);
-      store.save("_main", id);
-      nvs.end();
-      Serial.printf("[%s] identity MISMATCH — filesystem copy differed from the mirror; mirror restored\n", role);
-      multiIdNoteSource(role, "mirror (fs copy had changed!)");
-      return true;
+    // THE FILESYSTEM COPY IS AUTHORITATIVE. An earlier version treated a
+    // disagreement with the mirror as corruption and forced the mirror back —
+    // which silently reverted deliberate key changes (a rekey applied by any
+    // path that writes only the file) and was extremely hard to see. The
+    // mirror exists purely as a fallback for when the file is GONE, never as
+    // a veto over what the operator set.
+    if (ok && (!have_mirror || memcmp(blob, mirror, MULTI_ID_BLOB) != 0)) {
+      nvs.putBytes(role, blob, MULTI_ID_BLOB);   // follow the file
     }
-    if (ok && !have_mirror) nvs.putBytes(role, blob, MULTI_ID_BLOB);
     nvs.end();
     multiIdNoteSource(role, "filesystem");
     return true;
