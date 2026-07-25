@@ -10,6 +10,7 @@
 #include <freertos/task.h>
 #include <string.h>
 #include <Update.h>
+#include <Preferences.h>
 
 #include "EastMeshFavicon.h"
 #include "../mqtt/generated/WebPanelCert.h"
@@ -3302,7 +3303,8 @@ bool WebPanelServer::extAuthorize(httpd_req_t* req) {
 }
 
 WebPanelServer::WebPanelServer()
-    : _runner(nullptr), _server(nullptr), _redirect_server(nullptr), _token{0}, _last_activity_ms(0), _route_context{this} {
+    : _runner(nullptr), _server(nullptr), _redirect_server(nullptr), _token{0}, _tokens{}, _next_slot(0),
+      _last_activity_ms(0), _route_context{this} {
 }
 
 void WebPanelServer::setCommandRunner(WebPanelCommandRunner* runner) {
@@ -3371,6 +3373,8 @@ bool WebPanelServer::start() {
     _ext_routes_fn(_server, this);
   }
 
+  loadSessions();   // keep browsers logged in across reboots/OTA
+
   httpd_config_t redirect_config = HTTPD_DEFAULT_CONFIG();
   redirect_config.server_port = 80;
   // HTTPS already uses the default control port from HTTPD_SSL_CONFIG_DEFAULT().
@@ -3409,6 +3413,8 @@ void WebPanelServer::stop(bool clear_session) {
   if (clear_session) {
     _token[0] = 0;
     _last_activity_ms = 0;
+    // NOTE: the persisted session table is intentionally kept — a WiFi drop or
+    // an OTA reboot should not log every browser out.
   }
 }
 
@@ -3417,7 +3423,8 @@ bool WebPanelServer::isRunning() const {
 }
 
 bool WebPanelServer::hasSessionToken() const {
-  return _token[0] != 0;
+  for (int i = 0; i < MAX_SESSIONS; i++) if (_tokens[i][0] != 0) return true;
+  return false;
 }
 
 void WebPanelServer::stopRedirectServer() {
@@ -3439,6 +3446,9 @@ bool WebPanelServer::shouldAutoLock(unsigned long now_ms) const {
 void WebPanelServer::lockSession() {
   _token[0] = 0;
   _last_activity_ms = 0;
+  memset(_tokens, 0, sizeof(_tokens));   // explicit lock/logout ends ALL sessions
+  _next_slot = 0;
+  saveSessions();
 }
 
 esp_err_t WebPanelServer::handleIndex(httpd_req_t* req) {
@@ -3523,9 +3533,9 @@ esp_err_t WebPanelServer::handleLogin(httpd_req_t* req) {
   }
 
   freeScratchBuffer(password);
-  if (ctx->self->_token[0] == 0) {
-    ctx->self->refreshToken();   // only mint a new token when no session is active,
-  }                              // so a second browser/device doesn't kick the first
+  // every successful login gets its OWN token; existing sessions stay valid
+  ctx->self->refreshToken();
+  ctx->self->addSession(ctx->self->_token);
   ctx->self->noteActivity();
   WEB_PANEL_LOG("login accepted");
   httpd_resp_set_type(req, "text/plain; charset=utf-8");
@@ -3727,14 +3737,47 @@ void WebPanelServer::refreshToken() {
 }
 
 bool WebPanelServer::isAuthorized(httpd_req_t* req) const {
-  if (_token[0] == 0) {
-    return false;
-  }
   char token[40];
   if (httpd_req_get_hdr_value_str(req, "X-Auth-Token", token, sizeof(token)) != ESP_OK) {
     return false;
   }
-  return strcmp(token, _token) == 0;
+  for (int i = 0; i < MAX_SESSIONS; i++) {
+    if (_tokens[i][0] != 0 && strcmp(token, _tokens[i]) == 0) return true;
+  }
+  return false;
+}
+
+// ---- session table (persisted so reboots/OTA don't log everyone out) ----
+
+void WebPanelServer::loadSessions() {
+  Preferences nvs;
+  if (!nvs.begin("webpanel", true)) return;
+  size_t n = nvs.getBytes("sess", _tokens, sizeof(_tokens));
+  _next_slot = nvs.getUChar("slot", 0) % MAX_SESSIONS;
+  nvs.end();
+  if (n != sizeof(_tokens)) { memset(_tokens, 0, sizeof(_tokens)); _next_slot = 0; }
+  for (int i = 0; i < MAX_SESSIONS; i++) {
+    _tokens[i][sizeof(_tokens[i]) - 1] = 0;
+    if (_tokens[i][0] != 0) { strncpy(_token, _tokens[i], sizeof(_token) - 1); _token[sizeof(_token)-1] = 0; }
+  }
+}
+
+void WebPanelServer::saveSessions() {
+  Preferences nvs;
+  if (!nvs.begin("webpanel", false)) return;
+  nvs.putBytes("sess", _tokens, sizeof(_tokens));
+  nvs.putUChar("slot", _next_slot);
+  nvs.end();
+}
+
+bool WebPanelServer::addSession(const char* tok) {
+  int slot = -1;
+  for (int i = 0; i < MAX_SESSIONS && slot < 0; i++) if (_tokens[i][0] == 0) slot = i;
+  if (slot < 0) { slot = _next_slot; _next_slot = (_next_slot + 1) % MAX_SESSIONS; }   // evict round-robin
+  strncpy(_tokens[slot], tok, sizeof(_tokens[slot]) - 1);
+  _tokens[slot][sizeof(_tokens[slot]) - 1] = 0;
+  saveSessions();
+  return true;
 }
 
 void WebPanelServer::noteActivity() {

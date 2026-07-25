@@ -68,7 +68,16 @@ private:
   WebPanelCommandRunner* _runner;
   httpd_handle_t _server;
   httpd_handle_t _redirect_server;
-  char _token[33];
+  // Concurrent sessions: several browsers/devices/scripts can hold their own
+  // token at once, and the table is persisted so a reboot (e.g. an OTA
+  // update) doesn't log everyone out.
+  static const int MAX_SESSIONS = 4;
+  char _token[33];                       // most recently issued (compat)
+  char _tokens[MAX_SESSIONS][33];
+  uint8_t _next_slot;
+  void loadSessions();
+  void saveSessions();
+  bool addSession(const char* tok);
   unsigned long _last_activity_ms;
   RouteContext _route_context;
 
