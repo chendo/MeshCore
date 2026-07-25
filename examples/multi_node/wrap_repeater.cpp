@@ -17,6 +17,7 @@
 #undef MyMesh
 
 #include "identity_module.h"
+#include "identity_backup.h"
 #include <target.h>
 #include <helpers/ArduinoHelpers.h>
 
@@ -28,11 +29,13 @@ static void rep_setup(MultiFS* fs, mesh::Radio* port) {
   rep_rng.begin(radio_driver.getRngSeed());
   g_rep = new RepeaterMesh(board, *port, *new ArduinoMillis(), rep_rng, rtc_clock, rep_tables);
 
-  IdentityStore store(*fs, "/identity");
-  store.begin();
-  if (!store.load("_main", g_rep->self_id)) {
+  if (!multiIdLoad("repeater", fs, g_rep->self_id)) {   // FS copy, else NVS mirror
     g_rep->self_id = radio_new_identity();
+    IdentityStore store(*fs, "/identity");
+    store.begin();
     store.save("_main", g_rep->self_id);
+    multiIdImportSaveMirror("repeater", g_rep->self_id);
+    Serial.println("[repeater] NEW identity created (no saved copy found)");
   }
   Serial.print("[repeater] ID: ");
   mesh::Utils::printHex(Serial, g_rep->self_id.pub_key, PUB_KEY_SIZE); Serial.println();

@@ -17,6 +17,7 @@
 #include <helpers/web/WebService.h>
 #include "identity_module.h"
 #include "multi_web.h"
+#include "identity_backup.h"
 
 #ifndef SETUP_AP_SSID
 #define SETUP_AP_SSID "MeshCore-Multi-Setup"
@@ -279,6 +280,27 @@ public:
       snprintf(reply, reply_size, "OK - shared radio updated live for all 3 identities, no reboot needed");
       return;
     }
+    // recovery: restore a known identity (192 hex = pub||prv) into both the
+    // filesystem and the NVS mirror. Takes effect after a reboot.
+    if (strncmp(command, "set identity.", 13) == 0) {
+      const char* p = command + 13;
+      const char* sp = strchr(p, ' ');
+      if (sp == nullptr) { snprintf(reply, reply_size, "Error - usage: set identity.<role> <192 hex>"); return; }
+      char role[16];
+      size_t rl = (size_t)(sp - p);
+      if (rl >= sizeof(role)) { snprintf(reply, reply_size, "Error - bad role"); return; }
+      memcpy(role, p, rl); role[rl] = 0;
+      fs::FS* target = strcmp(role, "repeater") == 0 ? (fs::FS*)&fs_rep
+                     : strcmp(role, "room") == 0     ? (fs::FS*)&fs_room
+                     : strcmp(role, "companion") == 0 ? (fs::FS*)&fs_comp : nullptr;
+      if (target == nullptr) { snprintf(reply, reply_size, "Error - role must be repeater|room|companion"); return; }
+      if (multiIdImport(role, target, sp + 1)) {
+        snprintf(reply, reply_size, "OK - %s identity restored; reboot to apply", role);
+      } else {
+        snprintf(reply, reply_size, "Error - expected 192 hex chars (pub||prv)");
+      }
+      return;
+    }
     if (strcmp(command, "identities full") == 0) {   // full 64-hex pubkeys (contact sharing/QR)
       size_t o = 0;
       for (int i = 0; i < NUM_MODULES && o + 80 < reply_size; i++) {
@@ -461,7 +483,7 @@ void setup() {
 
 // read a line from USB serial and run it through the same dispatcher the web
 // panel uses, so the node is manageable over USB before WiFi is configured.
-static char s_line[160];
+static char s_line[512];   // identity-restore blobs are ~214 chars
 static size_t s_len = 0;
 
 static void serviceSerial() {

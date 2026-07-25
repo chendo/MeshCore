@@ -30,6 +30,7 @@ namespace roomspy {
 }
 
 #include "identity_module.h"
+#include "identity_backup.h"
 #include <target.h>
 #include <helpers/ArduinoHelpers.h>
 
@@ -41,11 +42,13 @@ static void room_setup(MultiFS* fs, mesh::Radio* port) {
   room_rng.begin(radio_driver.getRngSeed());
   g_room = new RoomMesh(board, *port, *new ArduinoMillis(), room_rng, rtc_clock, room_tables);
 
-  IdentityStore store(*fs, "/identity");
-  store.begin();
-  if (!store.load("_main", g_room->self_id)) {
+  if (!multiIdLoad("room", fs, g_room->self_id)) {   // FS copy, else NVS mirror
     g_room->self_id = radio_new_identity();
+    IdentityStore store(*fs, "/identity");
+    store.begin();
     store.save("_main", g_room->self_id);
+    multiIdImportSaveMirror("room", g_room->self_id);
+    Serial.println("[room] NEW identity created (no saved copy found)");
   }
   Serial.print("[room] ID: ");
   mesh::Utils::printHex(Serial, g_room->self_id.pub_key, PUB_KEY_SIZE); Serial.println();

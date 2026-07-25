@@ -26,7 +26,7 @@ namespace {
 
 constexpr size_t kWebServerStackSize = WEB_PANEL_STACK_SIZE;
 constexpr size_t kWebPasswordBufferSize = 80;
-constexpr size_t kWebCommandBufferSize = 192;
+constexpr size_t kWebCommandBufferSize = 512;   // fits identity-restore blobs (192 hex + prefix)
 constexpr size_t kWebReplyBufferSize = 1024;
 constexpr size_t kWebStatsQueryBufferSize = 96;
 constexpr size_t kWebStatsReplyBufferSize = 4608;

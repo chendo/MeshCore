@@ -18,6 +18,7 @@
 #undef MyMesh
 
 #include "identity_module.h"
+#include "identity_backup.h"
 #include "multi_web.h"
 #include <target.h>
 #include <WiFi.h>
@@ -185,7 +186,15 @@ static void comp_setup(MultiFS* fs, mesh::Radio* port) {
   comp_serial.init(40 * 1024);          // response buffer (PSRAM) — fits a full contact sync
   comp_web_mutex = xSemaphoreCreateMutex();
   g_comp = new CompanionMesh(*port, comp_rng, rtc_clock, comp_tables, *comp_store, NULL);
+  // The companion loads/creates its identity inside begin() (via DataStore),
+  // so we can't intervene mid-flight: instead pre-heal the file from the NVS
+  // mirror if it's missing, and mirror whatever it ends up using afterwards.
+  {
+    mesh::LocalIdentity pre;
+    multiIdLoad("companion", fs, pre);   // restores the file when only the mirror survives
+  }
   g_comp->begin(false);                 // loads/creates its own identity via DataStore
+  multiIdImportSaveMirror("companion", g_comp->self_id);
   g_comp->startInterface(comp_serial);
   Serial.print("[companion] ID: ");
   mesh::Utils::printHex(Serial, g_comp->self_id.pub_key, PUB_KEY_SIZE); Serial.println();
