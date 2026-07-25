@@ -44,51 +44,76 @@ static uint32_t s_next_sample_ms = 0;
 // FS, keyed by pubkey prefix, merged with live data by the web UI.
 
 static uint32_t s_next_nbr_save_ms = 120000;   // let RTC/WiFi settle first
+static uint32_t s_nbr_writes = 0;              // flash writes performed (diagnostics)
 
+// Flash-wear-aware: the file is only REWRITTEN when the neighbour set changes
+// (new node heard) or a node's saved last-heard has drifted by more than
+// REFRESH_S. Live nodes constantly bump their timestamps, so writing every
+// scan would rewrite the file forever for zero information gain; membership +
+// coarse ages is the useful, stable content. Reads don't wear flash.
 static void saveNeighboursSnapshot() {
+  static const uint32_t REFRESH_S = 6 * 3600;
+  static const int MAX_SAVED = 48;
+  struct Entry { char pfx[9]; uint32_t epoch; int snr4; };
+
   char reply[1024];
   reply[0] = 0;
   multiRunConsole("neighbors", reply, sizeof(reply));
   if (reply[0] == 0 || strncmp(reply, "-none-", 6) == 0 || strncmp(reply, "Err", 3) == 0) return;
 
-  // merge current lines into the saved set (keep nodes no longer in RAM)
-  String merged;
+  Entry saved[MAX_SAVED];
+  int n_saved = 0;
+  { File f = multiSysFS()->open("/neighbours.csv", "r");
+    if (f) {
+      while (f.available() && n_saved < MAX_SAVED) {
+        String l = f.readStringUntil('\n');
+        int c1 = l.indexOf(','), c2 = l.indexOf(',', c1 + 1);
+        if (c1 != 8 || c2 < 0) continue;
+        Entry& e = saved[n_saved];
+        l.substring(0, 8).toCharArray(e.pfx, sizeof(e.pfx));
+        e.epoch = strtoul(l.substring(c1 + 1, c2).c_str(), nullptr, 10);
+        e.snr4 = atoi(l.substring(c2 + 1).c_str());
+        n_saved++;
+      }
+      f.close();
+    } }
+
   uint32_t now_epoch = rtc_clock.getCurrentTime();
-  // existing entries first (skip ones we're about to refresh)
-  String fresh_prefixes;
-  {
-    char* save = nullptr;
-    for (char* line = strtok_r(reply, "\n", &save); line; line = strtok_r(nullptr, "\n", &save)) {
-      char* c1 = strchr(line, ':'); if (!c1) continue;
-      fresh_prefixes += String(line).substring(0, c1 - line) + ",";
-    }
-  }
-  File old_f = multiSysFS()->open("/neighbours.csv", "r");
-  if (old_f) {
-    while (old_f.available()) {
-      String l = old_f.readStringUntil('\n');
-      int c = l.indexOf(',');
-      if (c > 0 && fresh_prefixes.indexOf(l.substring(0, c) + ",") < 0) { merged += l; merged += '\n'; }
-    }
-    old_f.close();
-  }
-  // refreshed entries (neighbors reply was consumed by strtok; re-run)
-  reply[0] = 0;
-  multiRunConsole("neighbors", reply, sizeof(reply));
-  {
-    char* save = nullptr;
+  bool dirty = false;
+  { char* save = nullptr;
     for (char* line = strtok_r(reply, "\n", &save); line; line = strtok_r(nullptr, "\n", &save)) {
       char* c1 = strchr(line, ':'); if (!c1) continue;
       char* c2 = strchr(c1 + 1, ':'); if (!c2) continue;
       *c1 = 0; *c2 = 0;
-      long secs_ago = atol(c1 + 1);
-      merged += line; merged += ',';
-      merged += String(now_epoch - (uint32_t)secs_ago); merged += ',';
-      merged += (c2 + 1); merged += '\n';
-    }
-  }
+      if (strlen(line) != 8) continue;
+      uint32_t heard = now_epoch - (uint32_t)atol(c1 + 1);
+      int snr4 = atoi(c2 + 1);
+      int i = 0;
+      while (i < n_saved && strcasecmp(saved[i].pfx, line) != 0) i++;
+      if (i == n_saved) {                       // new neighbour -> must persist
+        if (n_saved < MAX_SAVED) {
+          strncpy(saved[n_saved].pfx, line, sizeof(saved[0].pfx));
+          saved[n_saved].epoch = heard;
+          saved[n_saved].snr4 = snr4;
+          n_saved++;
+          dirty = true;
+        }
+      } else if (heard > saved[i].epoch + REFRESH_S) {   // coarse freshness only
+        saved[i].epoch = heard;
+        saved[i].snr4 = snr4;
+        dirty = true;
+      }
+    } }
+  if (!dirty) return;
+
   File f = multiSysFS()->open("/neighbours.csv", "w", true);
-  if (f) { f.print(merged); f.close(); }
+  if (f) {
+    for (int i = 0; i < n_saved; i++) {
+      f.printf("%s,%lu,%d\n", saved[i].pfx, (unsigned long)saved[i].epoch, saved[i].snr4);
+    }
+    f.close();
+    s_nbr_writes++;
+  }
 }
 
 void multiWebTick() {
@@ -179,7 +204,9 @@ static esp_err_t handleDebug(httpd_req_t* req) {
       char buf[512]; int n = f.read((uint8_t*)buf, sizeof(buf) - 1); f.close();
       if (n > 0) { buf[n] = 0; jsonEscapeAppend(out, buf); }
     } }
-  out += "\",\"epoch\":";
+  out += "\",\"nbr_writes\":";
+  out += String(s_nbr_writes);
+  out += ",\"epoch\":";
   out += String((unsigned long)rtc_clock.getCurrentTime());
   out += ",\"uptime_s\":";
   out += String(millis() / 1000);
