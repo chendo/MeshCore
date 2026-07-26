@@ -18,6 +18,7 @@ protected:
   // cleanly moments later in a burst is useful evidence.
   uint8_t  last_err_payload[MAX_TRANS_UNIT];
   uint8_t  last_err_len = 0;
+  uint32_t n_err_crc = 0, n_err_header = 0, n_err_timeout = 0, n_err_other = 0;
   int32_t _floor_sample_sum;
   uint8_t _preamble_sf;
 
@@ -68,6 +69,11 @@ public:
   int16_t  getLastRecvError() const { return last_recv_error; }   // RadioLib error code of most recent RX failure
   const uint8_t* getLastRecvErrorPayload() const { return last_err_payload; }
   uint8_t  getLastRecvErrorLen() const { return last_err_len; }
+  // receive failures split by cause (see recvRaw)
+  uint32_t getRecvErrCrc() const { return n_err_crc; }
+  uint32_t getRecvErrHeader() const { return n_err_header; }
+  uint32_t getRecvErrTimeout() const { return n_err_timeout; }
+  uint32_t getRecvErrOther() const { return n_err_other; }
   uint32_t getPacketsSent() const { return n_sent; }
   void resetStats() { n_recv = n_sent = n_recv_errors = 0; }
 

@@ -13,15 +13,35 @@
 
 static volatile uint8_t state = STATE_IDLE;
 
+// The DIO1 interrupt used to be a bit inside `state`, set with `state |=
+// STATE_INT_READY`. That is a read-modify-write racing against the plain
+// stores the main loop makes to the same byte (state = STATE_RX, etc):
+//
+//   main: load state (IDLE) | ISR: state |= INT_READY | main: store STATE_RX
+//
+// and the interrupt is silently gone. A lost RX interrupt means a received
+// packet is never read out — it sits in the FIFO until the next packet
+// overwrites it, and it increments no counter, so the loss is invisible. A
+// lost TX-done means isSendComplete() never becomes true.
+//
+// Split into a monotonic counter written ONLY by the ISR and a copy written
+// ONLY by the main loop. Neither side updates the other's variable, so there
+// is no shared read-modify-write and no update can be lost.
+static volatile uint32_t irq_count = 0;   // ISR writes, main reads
+static uint32_t irq_seen = 0;             // main writes only
+
+static inline bool intReady() { return irq_count != irq_seen; }
+static inline void clearInt() { irq_seen = irq_count; }
+
 // this function is called when a complete packet
 // is transmitted by the module
-static 
+static
 #if defined(ESP8266) || defined(ESP32)
   ICACHE_RAM_ATTR
 #endif
 void setFlag(void) {
-  // we sent a packet, set the flag
-  state |= STATE_INT_READY;
+  // we sent (or received) a packet, note the event
+  irq_count++;
 }
 
 void RadioLibWrapper::begin() {
@@ -29,6 +49,7 @@ void RadioLibWrapper::begin() {
   _preamble_sf = getSpreadingFactor();
   _radio->setPreambleLength(preambleLengthForSF(_preamble_sf)); // longer preamble for lower SF improves reliability
   state = STATE_IDLE;
+  clearInt();
 
   if (_board->getStartupReason() == BD_STARTUP_RX_PACKET) {  // received a LoRa packet (while in deep sleep)
     setFlag(); // LoRa packet is already received
@@ -72,7 +93,7 @@ void RadioLibWrapper::doResetAGC() {
 
 void RadioLibWrapper::resetAGC() {
   // make sure we're not mid-receive of packet!
-  if ((state & STATE_INT_READY) != 0 || isReceivingPacket()) return;
+  if (intReady() || isReceivingPacket()) return;
 
   doResetAGC();
   state = STATE_IDLE;   // trigger a startReceive()
@@ -117,12 +138,13 @@ void RadioLibWrapper::startRecv() {
 }
 
 bool RadioLibWrapper::isInRecvMode() const {
-  return (state & ~STATE_INT_READY) == STATE_RX;
+  return state == STATE_RX;
 }
 
 int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
   int len = 0;
-  if (state & STATE_INT_READY) {
+  if (intReady()) {
+    clearInt();
     len = _radio->getPacketLength();
     if (len > 0) {
       if (len > sz) { len = sz; }
@@ -134,7 +156,17 @@ int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
         memcpy(last_err_payload, bytes, last_err_len);
         len = 0;
         n_recv_errors++;
-        last_recv_error = (int16_t)err;   // e.g. CRC mismatch vs header damaged
+        last_recv_error = (int16_t)err;
+        // Split by cause: the mix is diagnostic. CRC-dominated points at
+        // collisions (payload mangled but the frame still parsed); header
+        // damage points at weak signal or interference corrupting the PHY
+        // header itself, where even the length can't be trusted.
+        switch (err) {
+          case RADIOLIB_ERR_CRC_MISMATCH:   n_err_crc++;     break;
+          case RADIOLIB_ERR_LORA_HEADER_DAMAGED: n_err_header++; break;
+          case RADIOLIB_ERR_RX_TIMEOUT:     n_err_timeout++; break;
+          default:                          n_err_other++;   break;
+        }
       } else {
       //  Serial.print("  readData() -> "); Serial.println(len);
         n_recv++;
@@ -173,7 +205,8 @@ bool RadioLibWrapper::startSendRaw(const uint8_t* bytes, int len) {
 }
 
 bool RadioLibWrapper::isSendComplete() {
-  if (state & STATE_INT_READY) {
+  if (intReady()) {
+    clearInt();
     state = STATE_IDLE;
     n_sent++;
     return true;
@@ -198,9 +231,10 @@ bool RadioLibWrapper::isChannelActive() {
   // cad: hardware channel activity detection
   if (_cad_enabled) {
     int16_t result = performChannelScan();
-    // scanChannel() triggers DIO interrupt (CAD done) which sets STATE_INT_READY
-    // via setFlag() ISR. Clear it before restarting RX so recvRaw() doesn't
-    // try to read a non-existent packet and count a spurious recv error.
+    // scanChannel() triggers the DIO interrupt (CAD done) via setFlag().
+    // Consume it before restarting RX so recvRaw() doesn't try to read a
+    // non-existent packet and count a spurious recv error.
+    clearInt();
     state = STATE_IDLE;
     startRecv();
     if (result != RADIOLIB_CHANNEL_FREE) return true;

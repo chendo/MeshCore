@@ -206,6 +206,13 @@ static esp_err_t handleDebug(httpd_req_t* req) {
     out += ",\"refused\":"; out += String(c ? c->txRefused() : 0);
     out += ",\"recoveries\":"; out += String(c ? c->radioRecoveries() : 0);
     out += ",\"rx_age_s\":"; out += String(c ? c->msSinceLastRx() / 1000 : 0);
+    // receive failures by cause — the mix says collisions vs weak signal
+    out += ",\"err\":{\"crc\":";  out += String(radio_driver.getRecvErrCrc());
+    out += ",\"header\":";        out += String(radio_driver.getRecvErrHeader());
+    out += ",\"timeout\":";       out += String(radio_driver.getRecvErrTimeout());
+    out += ",\"other\":";         out += String(radio_driver.getRecvErrOther());
+    out += ",\"ok\":";            out += String(radio_driver.getPacketsRecv());
+    out += "}";
     // relay confirmation: floods we sent that a neighbour demonstrably passed on
     out += ",\"heard\":{\"sent\":"; out += String(c ? c->floodsSent(0) : 0);
     out += ",\"confirmed\":"; out += String(c ? c->floodsConfirmed(0) : 0);

@@ -1408,6 +1408,12 @@ function renderDashTiles(d){
     tile("NVS",(d.nvs&&d.nvs.total?Math.round(100*d.nvs.used/d.nvs.total)+" % used":"-"),
       d.nvs?(d.nvs.free+" entries free"):"identity mirror store")+
     tile("Noise floor",(d.radio&&d.radio.noise?d.radio.noise+" dBm":"-"),"")+
+    (function(){
+      const e=d.radio&&d.radio.err; if(!e) return "";
+      const bad=e.crc+e.header+e.timeout+e.other, all=bad+e.ok;
+      return tile("RX failures",(all?Math.round(100*bad/all)+" %":"-"),
+        "crc "+e.crc+" · header "+e.header+" · timeout "+e.timeout+" · other "+e.other);
+    })()+
     tile("WiFi",wifiRssi?wifiRssi+" dBm":"offline","")+
     tile("CPU load",(d.load!==undefined?d.load+" %":"-"),(d.lps?d.lps+" loops/s":"main task duty"))+
     tile("Clock",(((d.clock||"").match(/utc=(\S+)/)||[])[1]||"-").replace("Z","")+" UTC",
