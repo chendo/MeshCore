@@ -1408,6 +1408,15 @@ async function dashCmd(label,c){
   const r=stripReply(await cmd(c));
   $("dash-status").textContent=label+": "+(r||"OK");
 }
+// Battery percentage with a small inline bar. Colour tracks how much runtime
+// is actually left, not just the number: below ~10% this node has minutes, not
+// hours, because the discharge curve falls off a cliff under 3.5 V.
+function battBar(pct){
+  const p=Math.max(0,Math.min(100,pct|0));
+  const col=p<=10?"#e05d5d":p<=25?"#e0b34d":"#5fd694";
+  return p+" %<div style='margin-top:5px;height:5px;border-radius:3px;background:#243040;overflow:hidden'>"+
+    "<div style='height:100%;width:"+p+"%;background:"+col+"'></div></div>";
+}
 function tile(lbl,val,sub){
   return "<div class=tile><div class=lbl>"+lbl+"</div><div class=val>"+val+"</div>"+
     (sub?"<div class=sub>"+sub+"</div>":"")+"</div>";
@@ -1420,7 +1429,14 @@ function renderDashTiles(d){
   const upStr=up>=86400?Math.floor(up/86400)+"d "+Math.floor(up%86400/3600)+"h":
     up>=3600?Math.floor(up/3600)+"h "+Math.floor(up%3600/60)+"m":Math.floor(up/60)+"m "+(up%60)+"s";
   $("dash-tiles").innerHTML=
-    tile("Battery",core.battery_mv?(core.battery_mv/1000).toFixed(2)+" V":"-","")+
+    // percentage leads, volts as the detail — the curve is measured from this
+    // board's own discharge, and 0% is a real 3.20V (it cannot boot below that)
+    tile("Battery",
+      (d.batt_pct!==undefined&&d.batt_mv)?battBar(d.batt_pct):
+        (core.battery_mv?(core.battery_mv/1000).toFixed(2)+" V":"-"),
+      d.batt_mv?((d.batt_mv/1000).toFixed(3)+" V"+
+        (d.batt_mv>=4150?" · charged":d.batt_mv<=3350?" · <span class=err>critical</span>":
+         d.batt_mv<=3600?" · low":"")):"")+
     tile("Uptime",upStr,"")+
     tile("Radio RX / TX",(d.radio?d.radio.rx:"-")+" / "+(d.radio?d.radio.tx:"-"),
       "packets · last rx "+(d.radio?age(d.radio.rx_age_s):"?")+" ago"+

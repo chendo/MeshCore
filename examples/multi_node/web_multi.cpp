@@ -21,6 +21,7 @@
 #include <helpers/BaseSerialInterface.h>   // MAX_FRAME_SIZE
 #include <helpers/web/WebPanelServer.h>
 #include "multi_web.h"
+#include "battery_pct.h"
 
 // ---------- stats history sampler ----------
 // One sample per minute into a PSRAM ring; 1440 samples = 24h of history.
@@ -273,6 +274,11 @@ static esp_err_t handleDebug(httpd_req_t* req) {
   out += String((unsigned long)rtc_clock.getCurrentTime());
   out += ",\"uptime_s\":";
   out += String(millis() / 1000);
+  // battery as both raw millivolts and a calibrated percentage (battery_pct.h:
+  // the curve is measured from this board's own discharge, not a generic table)
+  { uint16_t bmv = (uint16_t)board.getBattMilliVolts();
+    out += ",\"batt_mv\":"; out += String(bmv);
+    out += ",\"batt_pct\":"; out += String((unsigned)batteryPercent(bmv)); }
   out += ",\"heap\":";
   out += String((unsigned)ESP.getFreeHeap());
   out += ",\"psram\":";
