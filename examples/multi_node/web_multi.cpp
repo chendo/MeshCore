@@ -206,6 +206,9 @@ static esp_err_t handleDebug(httpd_req_t* req) {
     out += ",\"refused\":"; out += String(c ? c->txRefused() : 0);
     out += ",\"recoveries\":"; out += String(c ? c->radioRecoveries() : 0);
     out += ",\"rx_age_s\":"; out += String(c ? c->msSinceLastRx() / 1000 : 0);
+    // receive queue: dropped means every identity fell behind at once
+    out += ",\"rxq\":"; out += String(c ? c->rxQueued() : 0);
+    out += ",\"rxdrop\":"; out += String(c ? c->rxDropped() : 0);
     // receive failures by cause — the mix says collisions vs weak signal
     out += ",\"err\":{\"crc\":";  out += String(radio_driver.getRecvErrCrc());
     out += ",\"header\":";        out += String(radio_driver.getRecvErrHeader());

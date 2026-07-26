@@ -70,22 +70,73 @@ TEST(SharedRadio, EveryPortReceivesTheFrameExactlyOnce) {
   EXPECT_EQ(0, take(f.a, buf));
 }
 
-TEST(SharedRadio, FrameIsHeldUntilEveryPortHasConsumedIt) {
+TEST(SharedRadio, ASlowPortStillReceivesEveryFrameInOrder) {
   Fixture f;
   f.deliver({0xAA});
   uint8_t buf[MAX_TRANS_UNIT];
   ASSERT_EQ(1, take(f.a, buf));
 
-  // a new frame arrives at the radio, but pump() must not fetch it yet
-  f.radio.pending_rx = {0xBB};
-  f.core.pump();
+  // A second frame arrives while b and c are still behind. It must be taken off
+  // the radio immediately — waiting for them is how packets were lost — but the
+  // laggards must still be handed the frames in arrival order.
+  f.deliver({0xBB});
   ASSERT_EQ(1, take(f.b, buf));
   EXPECT_EQ(0xAA, buf[0]) << "port b must still see the first frame";
+  ASSERT_EQ(1, take(f.b, buf));
+  EXPECT_EQ(0xBB, buf[0]);
 
-  ASSERT_EQ(1, take(f.c, buf));
-  f.core.pump();                      // now the next frame may be fetched
   ASSERT_EQ(1, take(f.a, buf));
   EXPECT_EQ(0xBB, buf[0]);
+  ASSERT_EQ(1, take(f.c, buf));
+  EXPECT_EQ(0xAA, buf[0]);
+  ASSERT_EQ(1, take(f.c, buf));
+  EXPECT_EQ(0xBB, buf[0]);
+  EXPECT_EQ(0u, f.core.rxDropped());
+}
+
+// The whole point of the queue: the radio's own buffer holds ONE packet, so
+// anything not read out before the next one lands is gone. Draining must never
+// be gated on the identities keeping up.
+TEST(SharedRadio, TheRadioIsDrainedEvenWhenNoPortIsReading) {
+  Fixture f;
+  for (uint8_t i = 0; i < 4; i++) f.deliver({(uint8_t)(0xA0 + i)});
+  EXPECT_EQ(4, f.core.rxQueued());
+  EXPECT_EQ(0u, f.core.rxDropped());
+
+  uint8_t buf[MAX_TRANS_UNIT];
+  for (uint8_t i = 0; i < 4; i++) {
+    ASSERT_EQ(1, take(f.a, buf));
+    EXPECT_EQ(0xA0 + i, buf[0]) << "frames must arrive in the order they were heard";
+  }
+  EXPECT_EQ(0, take(f.a, buf));
+}
+
+TEST(SharedRadio, AFullQueueDiscardsTheOldestFrameAndCountsIt) {
+  Fixture f;
+  const int slots = SharedRadioCore::RX_SLOTS, over = 3;
+  for (int i = 0; i < slots + over; i++) f.deliver({(uint8_t)i});
+  EXPECT_EQ(slots, f.core.rxQueued());
+  EXPECT_EQ((uint32_t)over, f.core.rxDropped())
+      << "overflow must be visible, not silent";
+
+  // what survives is the NEWEST run of frames — those are still propagating
+  uint8_t buf[MAX_TRANS_UNIT];
+  ASSERT_EQ(1, take(f.a, buf));
+  EXPECT_EQ(over, buf[0]);
+}
+
+// Frames retire as soon as every listening port has taken them, so a steady
+// stream never accumulates.
+TEST(SharedRadio, FullyConsumedFramesFreeTheirSlots) {
+  Fixture f;
+  uint8_t buf[MAX_TRANS_UNIT];
+  const int rounds = SharedRadioCore::RX_SLOTS * 3;
+  for (int i = 0; i < rounds; i++) {
+    f.deliver({(uint8_t)i});
+    take(f.a, buf); take(f.b, buf); take(f.c, buf);
+    ASSERT_EQ(0, f.core.rxQueued());
+  }
+  EXPECT_EQ(0u, f.core.rxDropped());
 }
 
 TEST(SharedRadio, PortMetadataMatchesTheReceivedFrame) {

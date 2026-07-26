@@ -1397,7 +1397,8 @@ function renderDashTiles(d){
       "packets · last rx "+(d.radio?age(d.radio.rx_age_s):"?")+" ago"+
       (d.radio&&d.radio.refused?" · <span class=err>"+d.radio.refused+" refused</span>":"")+
       (d.radio&&d.radio.recoveries?" · <span class=err>"+d.radio.recoveries+" radio resets</span>":"")+
-      (d.radio&&d.radio.stuck?" · <span class=err>"+d.radio.stuck+" stuck TX</span>":""))+
+      (d.radio&&d.radio.stuck?" · <span class=err>"+d.radio.stuck+" stuck TX</span>":"")+
+      (d.radio&&d.radio.rxdrop?" · <span class=err>"+d.radio.rxdrop+" rx queue drops</span>":""))+
     tile("Heard by peers",
       (d.radio&&d.radio.heard&&d.radio.heard.sent
         ? Math.round(100*d.radio.heard.confirmed/d.radio.heard.sent)+" %" : "-"),

@@ -104,9 +104,15 @@ class SharedRadioCore {
 public:
   static const int MAX_PORTS = 8;
   static const int PKT_LOG_SIZE = 48;
+  // Received frames are QUEUED rather than held one at a time. The radio is
+  // drained the moment a packet lands; identities consume from the queue at
+  // their own pace. Previously the next packet could not be fetched until every
+  // identity had taken the current one — and a dispatcher waiting on its own
+  // transmit skips its receive step entirely, so one busy identity stalled
+  // reception for all of them and packets were lost in the radio's FIFO.
+  static const int RX_SLOTS = 6;
 
   explicit SharedRadioCore(mesh::Radio& real) : _real(&real), _num_ports(0),
-      _rx_len(0), _rx_snr(0), _rx_rssi(0), _consumed_mask(0),
       _tx_owner(nullptr), _pwr_ctl(nullptr), _applied_pwr(0x7F) {}
 
   void setTxPowerControl(TxPowerControl* ctl) { _pwr_ctl = ctl; }
@@ -156,6 +162,9 @@ public:
   // times the radio was re-initialised after going silent
   uint32_t radioRecoveries() const { return _radio_recoveries; }
   uint32_t msSinceLastRx() const { return _last_rx_ms ? (uint32_t)(millis() - _last_rx_ms) : 0; }
+  // frames discarded because every identity was too slow to drain the queue
+  uint32_t rxDropped() const { return _rx_dropped; }
+  int rxQueued() const { return _rx_count; }
   // how the composition puts a wedged transceiver back together
   void setRadioReinit(void (*fn)()) { _reinit_fn = fn; }
 
@@ -230,10 +239,17 @@ private:
   RadioPort* _ports[MAX_PORTS];
   int _num_ports;
 
-  uint8_t  _rx_buf[MAX_TRANS_UNIT];
-  int      _rx_len;
-  float    _rx_snr, _rx_rssi;
-  uint32_t _consumed_mask;   // bit i set once port i has taken the current frame
+  struct RxFrame {
+    uint8_t  buf[MAX_TRANS_UNIT];
+    uint8_t  len;
+    float    snr, rssi;
+    uint32_t consumed;       // bit i set once port i has taken this frame
+  };
+  RxFrame  _rx[RX_SLOTS];
+  uint8_t  _rx_head = 0, _rx_count = 0;
+  volatile uint32_t _rx_dropped = 0;   // queue was full — the oldest was discarded
+  bool enqueueRx(const uint8_t* bytes, int len, float snr, float rssi, uint32_t consumed_init);
+  void retireConsumedFrames();
 
   RadioPort* _tx_owner;
   TxPowerControl* _pwr_ctl;

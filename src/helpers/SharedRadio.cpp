@@ -28,35 +28,24 @@ void SharedRadioCore::pump() {
 
   _real->loop();   // ports' loop() is a stub; the real driver is serviced here
 
-  // Hold the current frame until every port has consumed it, then fetch next.
-  if (_rx_len > 0 && _consumed_mask != allPortsMask()) {
-    return;   // still delivering the buffered frame this cycle
-  }
+  retireConsumedFrames();
 
-  // Deliver a locally-transmitted frame to the sibling identities before
-  // pulling the next one off the air (see setLoopback()).
-  if (_lb_count > 0) {
+  // Deliver locally-transmitted frames to the sibling identities (see
+  // setLoopback()); the sender is pre-marked so it never hears itself.
+  while (_lb_count > 0 && _rx_count < RX_SLOTS) {
     LbFrame& f = _lb[_lb_head];
-    memcpy(_rx_buf, f.buf, f.len);
-    _rx_len = f.len;
-    _rx_snr = 12.0f;      // synthetic: same board, effectively perfect link
-    _rx_rssi = -20.0f;
-    _consumed_mask = (f.from >= 0) ? (1u << f.from) : 0;   // sender doesn't hear itself
+    enqueueRx(f.buf, f.len, 12.0f, -20.0f, f.from >= 0 ? (1u << f.from) : 0);
     _lb_head = (_lb_head + 1) % LB_SLOTS;
     _lb_count--;
-    return;
   }
 
   uint8_t tmp[MAX_TRANS_UNIT];
-  int len = _real->recvRaw(tmp, sizeof(tmp));   // also re-arms real RX
+  int len = _real->recvRaw(tmp, sizeof(tmp));   // ALWAYS drain the radio
 
   // surface RX decode/CRC failures (driver only counts them) as trace events
   if (_rx_err_fn != nullptr) {
     uint32_t errs = _rx_err_fn();
     int16_t code = _rx_err_code_fn ? _rx_err_code_fn() : 0;
-    // Log the DAMAGED bytes too: RadioLib fills the buffer before reporting a
-    // CRC mismatch, so a corrupt frame can still be decoded on a best-effort
-    // basis — handy when the same packet arrives intact later in a burst.
     const uint8_t* bad = _rx_err_payload_fn ? _rx_err_payload_fn() : nullptr;
     int bad_len = _rx_err_len_fn ? (int)_rx_err_len_fn() : 0;
     while (_rx_err_seen < errs) {
@@ -67,16 +56,10 @@ void SharedRadioCore::pump() {
   }
 
   if (len > 0) {
-    memcpy(_rx_buf, tmp, len);
-    _rx_len = len;
-    _rx_snr = _real->getLastSNR();
-    _rx_rssi = _real->getLastRSSI();
-    _consumed_mask = 0;
     _last_rx_ms = millis();
-    pktLogAdd(-1, tmp, len, (int8_t)(_rx_snr * 4), (int16_t)_rx_rssi);
+    enqueueRx(tmp, len, _real->getLastSNR(), _real->getLastRSSI(), 0);
+    pktLogAdd(-1, tmp, len, (int8_t)(_real->getLastSNR() * 4), (int16_t)_real->getLastRSSI());
     checkRelayConfirmation(tmp, len);   // did someone relay something we sent?
-  } else {
-    _rx_len = 0;   // nothing pending
   }
 
   // RADIO HEALTH WATCHDOG.
@@ -85,37 +68,71 @@ void SharedRadioCore::pump() {
   // samples the noise floor while it is actually in receive mode — the whole
   // radio simply goes quiet with no error anywhere. Observed in the field: the
   // board was deaf for 3.4 hours after a transmit, and recovered only on
-  // reboot. Silence for this long is not a quiet band, it is a broken radio:
-  // re-initialise the chip and carry on.
+  // reboot. Silence for this long is not a quiet band, it is a broken radio.
   if (_reinit_fn != nullptr && _last_rx_ms != 0 &&
       (uint32_t)(millis() - _last_rx_ms) > RX_SILENCE_LIMIT_MS) {
     _radio_recoveries = _radio_recoveries + 1;
     _last_rx_ms = millis();          // don't retry in a tight loop
-    _tx_owner = nullptr;             // whatever it was doing is gone now
-    _rx_len = 0;
+    _tx_owner = nullptr;
     _reinit_fn();
   }
 }
 
+// Queue a frame for the identities to consume. Returns false only if it had to
+// discard something to make room.
+bool SharedRadioCore::enqueueRx(const uint8_t* bytes, int len, float snr, float rssi,
+                                uint32_t consumed_init) {
+  if (bytes == nullptr || len <= 0) return true;
+  bool ok = true;
+  if (_rx_count >= RX_SLOTS) {
+    // Every identity has fallen behind. Losing the OLDEST frame is the better
+    // trade: the newest is the one still propagating through the mesh.
+    _rx_head = (_rx_head + 1) % RX_SLOTS;
+    _rx_count--;
+    _rx_dropped = _rx_dropped + 1;
+    ok = false;
+  }
+  RxFrame& f = _rx[(_rx_head + _rx_count) % RX_SLOTS];
+  f.len = (uint8_t)(len > MAX_TRANS_UNIT ? MAX_TRANS_UNIT : len);
+  memcpy(f.buf, bytes, f.len);
+  f.snr = snr; f.rssi = rssi;
+  f.consumed = consumed_init | ~allPortsMask();   // inactive ports never consume
+  _rx_count++;
+  return ok;
+}
+
+// Drop frames from the front once every listening identity has taken them.
+void SharedRadioCore::retireConsumedFrames() {
+  while (_rx_count > 0) {
+    RxFrame& f = _rx[_rx_head];
+    if ((f.consumed & allPortsMask()) != allPortsMask()) break;
+    _rx_head = (_rx_head + 1) % RX_SLOTS;
+    _rx_count--;
+  }
+}
+
 int SharedRadioCore::takeFrame(RadioPort* p, uint8_t* dst, int sz) {
-  if (_rx_len <= 0) return 0;
   int idx = portIndex(p);
   if (idx < 0) return 0;
   uint32_t bit = (1u << idx);
-  // A silenced identity must not receive. It also must not mark the frame
-  // consumed: the mask is compared for equality against the ACTIVE set, so an
-  // inactive bit creeping in would stall delivery permanently.
+  // A silenced identity must not receive (and must not mark frames consumed,
+  // or they could never retire).
   if ((_active_mask & bit) == 0) return 0;
-  if (_consumed_mask & bit) return 0;   // this port already got it
 
-  int len = _rx_len;
-  if (len > sz) len = sz;
-  memcpy(dst, _rx_buf, len);
-  p->setLastMetadata(_rx_snr, _rx_rssi);
-  _consumed_mask |= bit;
-  _port_rx[idx] = _port_rx[idx] + 1;      // per-identity liveness
-  _port_last_ms[idx] = millis();
-  return len;
+  for (uint8_t k = 0; k < _rx_count; k++) {
+    RxFrame& f = _rx[(_rx_head + k) % RX_SLOTS];
+    if (f.consumed & bit) continue;              // this port already had it
+    int len = f.len;
+    if (len > sz) len = sz;
+    memcpy(dst, f.buf, len);
+    p->setLastMetadata(f.snr, f.rssi);
+    f.consumed |= bit;
+    _port_rx[idx] = _port_rx[idx] + 1;
+    _port_last_ms[idx] = millis();
+    retireConsumedFrames();
+    return len;
+  }
+  return 0;
 }
 
 bool SharedRadioCore::tryStartSend(RadioPort* p, const uint8_t* bytes, int len) {
@@ -275,13 +292,15 @@ void SharedRadioCore::setPortActive(int idx, bool active) {
   if (idx < 0 || idx >= MAX_PORTS) return;
   uint32_t bit = (1u << idx);
   if (active) {
-    // a frame already in flight was fetched before this port was listening:
-    // mark it consumed so pump() isn't stuck waiting for it
-    if (_rx_len > 0) _consumed_mask |= bit;
+    // Frames already queued arrived while this port was silent — mark them
+    // consumed so it doesn't wake up to a backlog of packets it never heard.
+    for (uint8_t k = 0; k < _rx_count; k++) _rx[(_rx_head + k) % RX_SLOTS].consumed |= bit;
     _active_mask |= bit;
   } else {
     _active_mask &= ~bit;
-    _consumed_mask |= bit;        // never wait on a silenced port
+    // never wait on a silenced port, or its frames could never retire
+    for (uint8_t k = 0; k < _rx_count; k++) _rx[(_rx_head + k) % RX_SLOTS].consumed |= bit;
+    retireConsumedFrames();
     if (_tx_owner != nullptr && portIndex(_tx_owner) == idx) {
       _real->onSendFinished();    // don't strand the transmitter
       _tx_owner = nullptr;
