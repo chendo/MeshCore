@@ -241,6 +241,7 @@ static esp_err_t handleDebug(httpd_req_t* req) {
       out += ",\"sent\":"; out += String(c->floodsSent(i));
       out += ",\"heard\":";out += String(c->floodsConfirmed(i));
       out += ",\"busy\":"; out += String(c->txContentionFor(i));
+      out += ",\"poolfull\":"; out += String(multiPortPoolFull(i));
       out += ",\"idle_s\":";
       out += String(c->portEverActive(i) ? c->portIdleMs(i) / 1000 : 0);
       out += ",\"seen\":"; out += c->portEverActive(i) ? "true" : "false";

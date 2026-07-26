@@ -54,4 +54,6 @@ static void rep_cmd(const char* c, char* r, size_t n) {
 
 static void rep_pk(uint8_t out[32]) { if (g_rep) memcpy(out, g_rep->self_id.pub_key, PUB_KEY_SIZE); }
 
-IdentityModule repeater_module = { "repeater", rep_setup, rep_loop, rep_cmd, rep_pk };
+static uint32_t rep_pool_full() { return g_rep ? g_rep->getNumRxPoolFull() : 0; }
+
+IdentityModule repeater_module = { "repeater", rep_setup, rep_loop, rep_cmd, rep_pk, rep_pool_full };

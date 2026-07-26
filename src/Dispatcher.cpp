@@ -19,6 +19,7 @@ namespace mesh {
 void Dispatcher::begin() {
   n_sent_flood = n_sent_direct = 0;
   n_recv_flood = n_recv_direct = 0;
+  n_rx_pool_full = 0;
   _err_flags = 0;
   radio_nonrx_start = _ms->getMillis();
 
@@ -203,6 +204,11 @@ void Dispatcher::checkRecv() {
 
       pkt = _mgr->allocNew();
       if (pkt == NULL) {
+        // The packet was received and is now thrown away. Debug logging is
+        // compiled out of release builds, so count it: an exhausted pool is a
+        // real packet loss with no other evidence anywhere.
+        n_rx_pool_full++;
+        _err_flags |= ERR_EVENT_FULL;
         MESH_DEBUG_PRINTLN("%s Dispatcher::checkRecv(): WARNING: received data, no unused packets available!", getLogDateTime());
       } else {
         if (tryParsePacket(pkt, raw, len)) {

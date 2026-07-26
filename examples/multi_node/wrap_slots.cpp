@@ -112,6 +112,11 @@ static void slot_pk(uint8_t out[32]) {
   if (s_slots[I].mesh) memcpy(out, s_slots[I].mesh->self_id.pub_key, PUB_KEY_SIZE);
 }
 
+template <int I>
+static uint32_t slot_pool_full() {
+  return s_slots[I].mesh ? s_slots[I].mesh->getNumRxPoolFull() : 0;
+}
+
 // Build the module table once. Templates give each slot its own callbacks
 // without duplicating the mesh implementation (one SlotChatMesh class serves
 // them all — only the instances differ).
@@ -134,7 +139,8 @@ void multiChatSlotsInit() {
   }
   #define WIRE(N) \
     s_modules[N].setup = &slot_setup<N>; s_modules[N].loop = &slot_loop<N>; \
-    s_modules[N].run_command = &slot_cmd<N>; s_modules[N].get_pubkey = &slot_pk<N>;
+    s_modules[N].run_command = &slot_cmd<N>; s_modules[N].get_pubkey = &slot_pk<N>; \
+    s_modules[N].rx_pool_full = &slot_pool_full<N>;
   WIRE(0) WIRE(1) WIRE(2) WIRE(3) WIRE(4)
   #undef WIRE
 }

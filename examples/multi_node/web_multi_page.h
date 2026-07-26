@@ -111,7 +111,7 @@ tr.relayrow td{background:#12211a}
   <div class="card"><h3>Identities <button class="sec" style="float:right;padding:2px 8px" onclick="loadStatsTab()">&#8635;</button>
     <span class="mut" style="font-weight:400;font-size:11px">every identity, from the shared radio itself</span></h3>
   <div style="overflow-x:auto"><table><thead><tr><th>identity</th><th>state</th><th>last activity</th><th>rx</th><th>tx</th>
-    <th>floods sent</th><th>heard back</th><th>deferred</th><th>flood rx</th><th>rx errors</th><th>queue</th></tr></thead>
+    <th>floods sent</th><th>heard back</th><th>deferred</th><th>flood rx</th><th>rx errors</th><th>pool full</th><th>queue</th></tr></thead>
   <tbody id="stats-live"></tbody></table></div>
   <pre id="stats-node" class="mut" style="margin-top:8px"></pre></div>
   <div class="card"><h3>History (24h, 1-min samples)</h3><div id="stats-charts"></div></div>
@@ -242,7 +242,7 @@ tr.relayrow td{background:#12211a}
     <pre id="cli-out" class="mut"></pre></div>
   <div class="card"><h3>Identity stats</h3>
   <div style="overflow-x:auto"><table><thead><tr><th>identity</th><th>state</th><th>last activity</th><th>rx</th><th>tx</th>
-    <th>floods sent</th><th>heard back</th><th>deferred</th><th>flood rx</th><th>rx errors</th><th>queue</th></tr></thead>
+    <th>floods sent</th><th>heard back</th><th>deferred</th><th>flood rx</th><th>rx errors</th><th>pool full</th><th>queue</th></tr></thead>
   <tbody id="dbg-stats"></tbody></table></div></div>
   <div class="card"><h3>Nodes nearby (repeater neighbours)</h3><pre id="dbg-nbrs" class="mut">-</pre></div>
   <div class="card"><h3>Radio packets <span class="mut" id="pkt-count"></span></h3>
@@ -513,6 +513,7 @@ function identityRows(d){
       "</td><td>"+p.rx+"</td><td>"+p.tx+"</td><td>"+p.sent+"</td><td>"+
       (p.sent?p.heard+" ("+Math.round(100*p.heard/p.sent)+"%)":"—")+
       "</td><td>"+(p.busy||0)+"</td><td>"+(mesh?mesh.flood_rx:"—")+"</td><td>"+(mesh?mesh.recv_errors:"—")+
+      "</td><td"+(p.poolfull?" class=err":"")+">"+(p.poolfull||0)+
       "</td><td>"+(core?core.queue_len:"—")+"</td></tr>";
   }).join("");
 }

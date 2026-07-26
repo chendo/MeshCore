@@ -113,4 +113,6 @@ int compArchiveCopy(uint32_t after, uint8_t* out, size_t cap) {
 
 static void comp_pk(uint8_t out[32]) { if (g_comp) memcpy(out, g_comp->self_id.pub_key, PUB_KEY_SIZE); }
 
-IdentityModule companion_module = { "companion", comp_setup, comp_loop, comp_cmd, comp_pk };
+static uint32_t comp_pool_full() { return g_comp ? g_comp->getNumRxPoolFull() : 0; }
+
+IdentityModule companion_module = { "companion", comp_setup, comp_loop, comp_cmd, comp_pk, comp_pool_full };

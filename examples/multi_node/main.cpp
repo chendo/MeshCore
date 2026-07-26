@@ -738,6 +738,18 @@ bool multiRunInLoop(MultiLoopFn fn, void* arg, uint32_t timeout_ms) {
   return done;
 }
 
+// Packets this identity received and then discarded for want of a free Packet
+// in its pool — a silent loss in the stock dispatcher. Keyed by arbiter port
+// index so the panel can report it beside that port's other counters.
+uint32_t multiPortPoolFull(int port_idx) {
+  for (int i = 0; i < NUM_MODULES; i++) {
+    int p = (i < 3) ? i : g_slot_port_idx[i - 3];
+    if (p != port_idx) continue;
+    return g_modules[i]->rx_pool_full ? g_modules[i]->rx_pool_full() : 0;
+  }
+  return 0;
+}
+
 fs::FS* multiSysFS() { return &fs_sys; }
 void multiGetRadioParams(float* freq, float* bw, uint8_t* sf, uint8_t* cr) {
   if (freq) *freq = g_radio.freq;

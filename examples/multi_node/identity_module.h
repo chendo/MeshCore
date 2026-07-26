@@ -26,4 +26,8 @@ struct IdentityModule {
   // run a CLI command against this identity, reply into buf.
   void (*run_command)(const char* cmd, char* reply, size_t reply_size);
   void (*get_pubkey)(uint8_t out[32]);
+  // Received packets this identity had to discard because its packet pool was
+  // empty. The stock dispatcher only logs that in debug builds, so on a release
+  // firmware it is a completely silent loss. Optional — may be null.
+  uint32_t (*rx_pool_full)();
 };

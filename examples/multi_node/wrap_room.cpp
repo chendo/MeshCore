@@ -68,7 +68,9 @@ static void room_cmd(const char* c, char* r, size_t n) {
 
 static void room_pk(uint8_t out[32]) { if (g_room) memcpy(out, g_room->self_id.pub_key, PUB_KEY_SIZE); }
 
-IdentityModule room_module = { "room", room_setup, room_loop, room_cmd, room_pk };
+static uint32_t room_pool_full() { return g_room ? g_room->getNumRxPoolFull() : 0; }
+
+IdentityModule room_module = { "room", room_setup, room_loop, room_cmd, room_pk, room_pool_full };
 
 // Stored posts (newest last), as JSON for the web panel. Reads the room's
 // cyclic RAM queue directly (see the access-override note above the include).

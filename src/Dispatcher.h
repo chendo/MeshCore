@@ -125,6 +125,7 @@ class Dispatcher {
   bool  prev_isrecv_mode;
   uint32_t n_sent_flood, n_sent_direct;
   uint32_t n_recv_flood, n_recv_direct;
+  uint32_t n_rx_pool_full;   // received, but no free Packet to parse it into
   unsigned long tx_budget_ms;
   unsigned long last_budget_update;
   unsigned long duty_cycle_window_ms;
@@ -187,8 +188,10 @@ public:
   uint32_t getNumSentDirect() const { return n_sent_direct; }
   uint32_t getNumRecvFlood() const { return n_recv_flood; }
   uint32_t getNumRecvDirect() const { return n_recv_direct; }
+  uint32_t getNumRxPoolFull() const { return n_rx_pool_full; }
   void resetStats() {
     n_sent_flood = n_sent_direct = n_recv_flood = n_recv_direct = 0;
+    n_rx_pool_full = 0;
     _err_flags = 0;
   }
 
