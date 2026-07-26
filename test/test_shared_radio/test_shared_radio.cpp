@@ -322,6 +322,88 @@ TEST(SharedRadioCorrupt, ErrorWithNoRecoverableBytesStillLogsTheEvent) {
   EXPECT_EQ(0, entries[0].raw_len);
 }
 
+// ------------------------------------------------ stuck-transmitter watchdog
+
+// pump() deliberately refuses to touch the radio while a transmit is in
+// flight, so a send that never completes takes the WHOLE BOARD off air — every
+// identity goes deaf, not just the sender. This happened in the field: a
+// repeater advert held the transmitter for 3.4 hours and nothing was received
+// in that time. The arbiter must take the radio back.
+
+TEST(SharedRadioWatchdog, ATransmitThatNeverCompletesIsForceReleased) {
+  Fixture f;
+  g_fake_millis = 1000;
+  uint8_t msg[] = {1, 2, 3};
+  f.radio.send_complete = false;                 // TX-done will never arrive
+  ASSERT_TRUE(f.a.startSendRaw(msg, 3));
+
+  // radio stays untouched for a normal in-flight transmit
+  g_fake_millis += 2000;
+  f.radio.pending_rx = {0xAA};
+  f.core.pump();
+  EXPECT_FALSE(f.radio.pending_rx.empty()) << "must not disturb a live transmit";
+  EXPECT_EQ(0u, f.core.txStuck());
+
+  // ...but not forever
+  g_fake_millis += 20000;
+  f.core.pump();
+  EXPECT_EQ(1u, f.core.txStuck()) << "the watchdog must reclaim the transmitter";
+  EXPECT_TRUE(f.radio.pending_rx.empty()) << "and the radio must be serviced again";
+}
+
+TEST(SharedRadioWatchdog, RecoveryRestoresReceiveAndLetsOthersTransmit) {
+  Fixture f;
+  g_fake_millis = 1000;
+  uint8_t msg[] = {9};
+  f.radio.send_complete = false;
+  ASSERT_TRUE(f.a.startSendRaw(msg, 1));
+  ASSERT_FALSE(f.b.startSendRaw(msg, 1)) << "blocked while the owner holds it";
+
+  g_fake_millis += 20000;
+  f.core.pump();                                  // watchdog fires
+
+  EXPECT_TRUE(f.b.startSendRaw(msg, 1)) << "another identity can transmit again";
+  f.radio.send_complete = true;
+  f.b.isSendComplete();
+  f.b.onSendFinished();                           // let b's send finish normally
+
+  f.deliver({0x42});                              // and reception works
+  uint8_t buf[MAX_TRANS_UNIT];
+  EXPECT_EQ(1, take(f.b, buf));
+}
+
+TEST(SharedRadioWatchdog, ForcedReleaseIsLoggedWithHowLongItWasHeld) {
+  Fixture f;
+  g_fake_millis = 1000;
+  uint8_t msg[] = {1};
+  f.radio.send_complete = false;
+  ASSERT_TRUE(f.a.startSendRaw(msg, 1));
+  g_fake_millis += 30000;                         // held 30s
+  f.core.pump();
+
+  PktLogEntry entries[SharedRadioCore::PKT_LOG_SIZE];
+  int n = f.core.pktLogCopy(entries, SharedRadioCore::PKT_LOG_SIZE, 0);
+  ASSERT_GE(n, 2);
+  const PktLogEntry& e = entries[n - 1];
+  EXPECT_EQ(PKT_FLAG_TX_FAIL, e.flag);
+  EXPECT_EQ(f.ia, e.dir) << "attributed to the identity that wedged the radio";
+  EXPECT_GE(e.aux, 29) << "records the seconds it was held, for diagnosis";
+}
+
+TEST(SharedRadioWatchdog, NormalTransmitsAreNeverReclaimed) {
+  Fixture f;
+  g_fake_millis = 1000;
+  uint8_t msg[] = {1};
+  for (int i = 0; i < 5; i++) {
+    ASSERT_TRUE(f.a.startSendRaw(msg, 1));
+    g_fake_millis += 700;                         // realistic airtime
+    ASSERT_TRUE(f.a.isSendComplete());
+    f.a.onSendFinished();
+    f.core.pump();
+  }
+  EXPECT_EQ(0u, f.core.txStuck()) << "the watchdog must not fire on healthy traffic";
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

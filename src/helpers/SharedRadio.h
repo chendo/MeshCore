@@ -149,6 +149,8 @@ public:
   // of sharing one radio, invisible until now because the dispatcher just
   // silently backs off and retries
   uint32_t txContention() const { return _tx_contention; }
+  // transmits force-released by the watchdog below (see pump())
+  uint32_t txStuck() const { return _tx_stuck; }
   uint32_t txContentionFor(int idx) const {
     return (idx >= 0 && idx < MAX_PORTS) ? _tx_contention_port[idx] : 0;
   }
@@ -215,6 +217,12 @@ private:
   volatile uint32_t _pkt_seq = 0;   // total packets ever logged; ring index = seq % SIZE
   volatile uint32_t _rx_total = 0, _tx_total = 0;
   volatile uint32_t _tx_contention = 0;
+  volatile uint32_t _tx_stuck = 0;
+  uint32_t _tx_started_ms = 0;
+  // Longest a port may hold the transmitter before the arbiter takes it back.
+  // Well beyond any legal LoRa airtime (a 255-byte frame at SF12/BW125 is
+  // ~9s); this is a deadlock breaker, not a timing parameter.
+  static const uint32_t TX_HOLD_LIMIT_MS = 15000;
   volatile uint32_t _tx_contention_port[MAX_PORTS] = {0};
   const char* _port_names[MAX_PORTS] = { "?", "?", "?", "?", "?", "?", "?", "?" };
 };

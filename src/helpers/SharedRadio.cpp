@@ -7,8 +7,23 @@ void SharedRadioCore::pump() {
   // While a port owns the transmitter, leave the real radio alone: recvRaw()
   // re-arms RX (startReceive()) whenever state != STATE_RX, which would abort
   // an in-flight transmit and its TX-done interrupt would never arrive.
+  //
+  // WATCHDOG: because pump() is gated on that, a transmit that never finishes
+  // takes the whole board off air — every identity goes deaf, not just the
+  // sender. Observed in the field: a repeater advert held the transmitter for
+  // 3.4 hours (its TX-done never arrived AND its dispatcher never expired it),
+  // and nothing received a single packet in that time. A shared transmitter
+  // must never be held indefinitely, whatever the reason, so take it back.
   if (_tx_owner != nullptr) {
-    return;
+    if ((uint32_t)(millis() - _tx_started_ms) < TX_HOLD_LIMIT_MS) {
+      return;                       // normal in-flight transmit
+    }
+    _tx_stuck = _tx_stuck + 1;
+    int idx = portIndex(_tx_owner);
+    pktLogAdd((int8_t)idx, nullptr, 0, 0, 0, PKT_FLAG_TX_FAIL,
+              (int16_t)((millis() - _tx_started_ms) / 1000));   // aux = seconds held
+    _real->onSendFinished();        // release the radio; recvRaw() re-arms RX below
+    _tx_owner = nullptr;
   }
 
   _real->loop();   // ports' loop() is a stub; the real driver is serviced here
@@ -105,6 +120,7 @@ bool SharedRadioCore::tryStartSend(RadioPort* p, const uint8_t* bytes, int len) 
   bool ok = _real->startSendRaw(bytes, len);
   if (ok) {
     _tx_owner = p;
+    _tx_started_ms = millis();
     _tx_completed = false;
     pktLogAdd((int8_t)portIndex(p), bytes, len, 0, 0);
 
