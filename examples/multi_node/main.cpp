@@ -620,8 +620,65 @@ int multiIdSourceReport(char* out, size_t cap) {
 
 // accessors for the unified web panel (web_multi.cpp)
 SharedRadioCore* multiCore() { return g_core; }
+// ---- console execution is confined to the loop task -------------------------
+// The HTTPS server runs in its own FreeRTOS task, so a handler calling straight
+// into runWebCommand() would execute mesh code CONCURRENTLY with the super-loop
+// driving the same objects. That is a data race on live state — and not a
+// theoretical one: 'advert' allocates from the shared packet pool and queues an
+// outbound packet, which the dispatcher may be manipulating at that instant.
+// Corrupting the pool loses packets, which is exactly what we must not do.
+//
+// So web/serial callers hand the command to the loop task and wait for it. The
+// wait costs one loop iteration (~1-10ms) and makes every panel action safe by
+// construction — the same approach already used for the companion frame mux
+// and the identity slot toggles.
+static TaskHandle_t     g_loop_task = nullptr;
+static SemaphoreHandle_t g_console_mutex = nullptr;
+static volatile bool    g_console_pending = false;
+static volatile bool    g_console_done = false;
+static char             g_console_cmd[512];
+static char             g_console_reply[1024];
+
+static void serviceConsoleRequest() {
+  if (!g_console_pending) return;
+  g_console_reply[0] = 0;
+  g_runner.runWebCommand(g_console_cmd, g_console_reply, sizeof(g_console_reply));
+  g_console_pending = false;
+  g_console_done = true;
+}
+
 void multiRunConsole(const char* cmd, char* reply, size_t reply_size) {
-  g_runner.runWebCommand(cmd, reply, reply_size);
+  if (reply_size) reply[0] = 0;
+  if (cmd == nullptr) return;
+
+  // already on the loop task (serial console, boot-time config): run inline
+  if (g_loop_task == nullptr || xTaskGetCurrentTaskHandle() == g_loop_task) {
+    g_runner.runWebCommand(cmd, reply, reply_size);
+    return;
+  }
+
+  if (g_console_mutex == nullptr ||
+      xSemaphoreTake(g_console_mutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
+    snprintf(reply, reply_size, "busy - console unavailable");
+    return;
+  }
+  strncpy(g_console_cmd, cmd, sizeof(g_console_cmd) - 1);
+  g_console_cmd[sizeof(g_console_cmd) - 1] = 0;
+  g_console_done = false;
+  g_console_pending = true;                 // published last
+
+  uint32_t start = millis();
+  while (!g_console_done && (uint32_t)(millis() - start) < 4000) {
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+  if (g_console_done) {
+    strncpy(reply, g_console_reply, reply_size - 1);
+    reply[reply_size - 1] = 0;
+  } else {
+    g_console_pending = false;              // give up rather than wedge the server
+    snprintf(reply, reply_size, "timeout - node busy");
+  }
+  xSemaphoreGive(g_console_mutex);
 }
 fs::FS* multiSysFS() { return &fs_sys; }
 void multiGetRadioParams(float* freq, float* bw, uint8_t* sf, uint8_t* cr) {
@@ -753,6 +810,9 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("=== MeshCore multi-identity ===");
+
+  g_loop_task = xTaskGetCurrentTaskHandle();   // console commands must run here
+  g_console_mutex = xSemaphoreCreateMutex();
 
   board.begin();
   if (!radio_init()) { Serial.println("Radio init failed!"); halt(); }
@@ -915,6 +975,7 @@ void loop() {
     network.loop(true);           // composition keeps WiFi up for the panel
     web.loop();
   }
+  serviceConsoleRequest();        // run web/serial commands in THIS task, not the server's
   applySlotRequests();            // hot enable/disable of chat identities
   gpsSyncTick();                  // scheduled GPS clock discipline
   multiWebTick();                 // stats history sampler (unified panel)
