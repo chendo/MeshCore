@@ -74,10 +74,18 @@ private:
   static const int MAX_SESSIONS = 4;
   char _token[33];                       // most recently issued (compat)
   char _tokens[MAX_SESSIONS][33];
-  uint8_t _next_slot;
+  // When the table is full the LEAST RECENTLY USED session is evicted. "Used"
+  // means a request actually authenticated with it, not when it was issued —
+  // a browser left open on the panel keeps its slot, while a token minted by a
+  // one-off curl and never seen again is the first to go. Ordering is a
+  // monotonic counter rather than a clock: these survive reboots in RTC memory,
+  // and millis() restarts at zero, which would scramble the ordering.
+  mutable uint32_t _tok_used[MAX_SESSIONS];   // _use_seq value at that slot's last use
+  mutable uint32_t _use_seq;                  // bumped on every successful auth
   void loadSessions();
   void saveSessions();
   bool addSession(const char* tok);
+  void touchSession(int slot) const;     // called from the const auth path
   unsigned long _last_activity_ms;
   RouteContext _route_context;
 

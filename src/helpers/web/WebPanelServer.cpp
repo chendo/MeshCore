@@ -3303,7 +3303,8 @@ bool WebPanelServer::extAuthorize(httpd_req_t* req) {
 }
 
 WebPanelServer::WebPanelServer()
-    : _runner(nullptr), _server(nullptr), _redirect_server(nullptr), _token{0}, _tokens{}, _next_slot(0),
+    : _runner(nullptr), _server(nullptr), _redirect_server(nullptr), _token{0}, _tokens{},
+      _tok_used{}, _use_seq(0),
       _last_activity_ms(0), _route_context{this} {
 }
 
@@ -3447,7 +3448,7 @@ void WebPanelServer::lockSession() {
   _token[0] = 0;
   _last_activity_ms = 0;
   memset(_tokens, 0, sizeof(_tokens));   // explicit lock/logout ends ALL sessions
-  _next_slot = 0;
+  memset(_tok_used, 0, sizeof(_tok_used));
   saveSessions();
 }
 
@@ -3742,7 +3743,7 @@ bool WebPanelServer::isAuthorized(httpd_req_t* req) const {
     return false;
   }
   for (int i = 0; i < MAX_SESSIONS; i++) {
-    if (_tokens[i][0] != 0 && strcmp(token, _tokens[i]) == 0) return true;
+    if (_tokens[i][0] != 0 && strcmp(token, _tokens[i]) == 0) { touchSession(i); return true; }
   }
   return false;
 }
@@ -3755,22 +3756,29 @@ bool WebPanelServer::isAuthorized(httpd_req_t* req) const {
 // every single login, and that churn is capable of exhausting a small NVS
 // partition, at which point unrelated NVS reads start failing. On this device
 // that cascaded into identity loss.
-#define WEB_SESSION_MAGIC 0x57534553u   // 'WSES'
+// The magic doubles as a layout version: adding the use-order fields moves
+// every RTC variable, so a stale table from the previous firmware must not be
+// read back as valid sessions. Bumping it forces one clean reset on upgrade
+// (everyone logs in once more), which is the fail-closed direction.
+#define WEB_SESSION_MAGIC 0x57534554u   // 'WSET' — bumped when use-order was added
 #define WEB_SESSION_SLOTS 4     // must match WebPanelServer::MAX_SESSIONS
 RTC_NOINIT_ATTR static uint32_t s_sess_magic;
 RTC_NOINIT_ATTR static char     s_sess_tokens[WEB_SESSION_SLOTS][33];
-RTC_NOINIT_ATTR static uint8_t  s_sess_next_slot;
+RTC_NOINIT_ATTR static uint32_t s_sess_used[WEB_SESSION_SLOTS];
+RTC_NOINIT_ATTR static uint32_t s_sess_use_seq;
 
 void WebPanelServer::loadSessions() {
   static_assert(WEB_SESSION_SLOTS == WebPanelServer::MAX_SESSIONS,
                 "RTC session table must match MAX_SESSIONS");
   if (s_sess_magic != WEB_SESSION_MAGIC) {        // cold boot: RTC RAM is garbage
     memset(s_sess_tokens, 0, sizeof(s_sess_tokens));
-    s_sess_next_slot = 0;
+    memset(s_sess_used, 0, sizeof(s_sess_used));
+    s_sess_use_seq = 0;
     s_sess_magic = WEB_SESSION_MAGIC;
   }
   memcpy(_tokens, s_sess_tokens, sizeof(_tokens));
-  _next_slot = s_sess_next_slot % MAX_SESSIONS;
+  memcpy(_tok_used, s_sess_used, sizeof(_tok_used));
+  _use_seq = s_sess_use_seq;
   for (int i = 0; i < MAX_SESSIONS; i++) {
     _tokens[i][sizeof(_tokens[i]) - 1] = 0;
     if (_tokens[i][0] != 0) { strncpy(_token, _tokens[i], sizeof(_token) - 1); _token[sizeof(_token)-1] = 0; }
@@ -3779,16 +3787,34 @@ void WebPanelServer::loadSessions() {
 
 void WebPanelServer::saveSessions() {
   memcpy(s_sess_tokens, _tokens, sizeof(s_sess_tokens));
-  s_sess_next_slot = _next_slot;
+  memcpy(s_sess_used, _tok_used, sizeof(s_sess_used));
+  s_sess_use_seq = _use_seq;
   s_sess_magic = WEB_SESSION_MAGIC;
+}
+
+// Record that a slot was just used. Only the RTC mirror is updated (a plain
+// word store); this runs on every authenticated request, so it must stay cheap.
+void WebPanelServer::touchSession(int slot) const {
+  if (slot < 0 || slot >= MAX_SESSIONS) return;
+  _tok_used[slot] = ++_use_seq;
+  s_sess_used[slot] = _tok_used[slot];
+  s_sess_use_seq = _use_seq;
 }
 
 bool WebPanelServer::addSession(const char* tok) {
   int slot = -1;
   for (int i = 0; i < MAX_SESSIONS && slot < 0; i++) if (_tokens[i][0] == 0) slot = i;
-  if (slot < 0) { slot = _next_slot; _next_slot = (_next_slot + 1) % MAX_SESSIONS; }   // evict round-robin
+  if (slot < 0) {
+    // Full: evict the least recently used. Compared as a signed difference so
+    // the ordering still holds if the counter ever wraps.
+    slot = 0;
+    for (int i = 1; i < MAX_SESSIONS; i++) {
+      if ((int32_t)(_tok_used[i] - _tok_used[slot]) < 0) slot = i;
+    }
+  }
   strncpy(_tokens[slot], tok, sizeof(_tokens[slot]) - 1);
   _tokens[slot][sizeof(_tokens[slot]) - 1] = 0;
+  touchSession(slot);        // a fresh login is the most recent use, not the oldest
   saveSessions();
   return true;
 }
