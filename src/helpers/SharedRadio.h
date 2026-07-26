@@ -64,10 +64,17 @@ public:
   // called by the core when delivering a buffered frame to this port
   void setLastMetadata(float snr, float rssi) { _last_snr = snr; _last_rssi = rssi; }
 
+  // what this identity's prefs asked for; the core decides what the shared
+  // radio actually does (see applyRadioPolicy)
+  bool wantsCAD() const { return _cad_want; }
+  int  wantedThreshold() const { return _thresh_want; }
+
 private:
   SharedRadioCore* _core;
   float _last_snr, _last_rssi;
   int8_t _tx_power_dbm;
+  bool _cad_want = false;
+  int  _thresh_want = 0;
 };
 
 // Optional: something that can set the real radio's TX power (RadioLibWrapper
@@ -162,6 +169,19 @@ public:
   // times the radio was re-initialised after going silent
   uint32_t radioRecoveries() const { return _radio_recoveries; }
   uint32_t msSinceLastRx() const { return _last_rx_ms ? (uint32_t)(millis() - _last_rx_ms) : 0; }
+
+  // COLLISION AVOIDANCE IS A PROPERTY OF THE RADIO, NOT OF AN IDENTITY.
+  // Each stock mesh's dispatcher pushes its own cad_enabled and
+  // interference_threshold prefs onto its radio every couple of seconds. With
+  // one radio behind three of them that is three writers to one setting, and
+  // whichever ran last decides — so an identity with CAD off silently disables
+  // it for the others, and the RSSI threshold flaps between three values.
+  // Transmitting on top of a packet already in the air corrupts both, which is
+  // exactly the failure we are trying to remove, so the core takes the most
+  // cautious setting any listening identity asked for.
+  void applyRadioPolicy(bool recalibrate);
+  bool cadEnabled() const { return _cad_applied > 0; }
+  int  interferenceThreshold() const { return _thresh_applied; }
   // frames discarded because every identity was too slow to drain the queue
   uint32_t rxDropped() const { return _rx_dropped; }
   int rxQueued() const { return _rx_count; }
@@ -250,6 +270,11 @@ private:
   volatile uint32_t _rx_dropped = 0;   // queue was full — the oldest was discarded
   bool enqueueRx(const uint8_t* bytes, int len, float snr, float rssi, uint32_t consumed_init);
   void retireConsumedFrames();
+
+  int8_t   _cad_applied = -1;      // -1 = never applied
+  int      _thresh_applied = 0;
+  uint32_t _last_calib_ms = 0;
+  static const uint32_t CALIB_MIN_INTERVAL_MS = 2000;   // stock per-mesh cadence
 
   RadioPort* _tx_owner;
   TxPowerControl* _pwr_ctl;

@@ -209,6 +209,10 @@ static esp_err_t handleDebug(httpd_req_t* req) {
     // receive queue: dropped means every identity fell behind at once
     out += ",\"rxq\":"; out += String(c ? c->rxQueued() : 0);
     out += ",\"rxdrop\":"; out += String(c ? c->rxDropped() : 0);
+    // collision avoidance actually in force on the shared radio (see
+    // SharedRadioCore::applyRadioPolicy — it is not per-identity)
+    out += ",\"cad\":"; out += (c && c->cadEnabled()) ? "true" : "false";
+    out += ",\"thresh\":"; out += String(c ? c->interferenceThreshold() : 0);
     // receive failures by cause — the mix says collisions vs weak signal
     out += ",\"err\":{\"crc\":";  out += String(radio_driver.getRecvErrCrc());
     out += ",\"header\":";        out += String(radio_driver.getRecvErrHeader());

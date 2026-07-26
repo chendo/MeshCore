@@ -21,8 +21,13 @@ public:
   int  begin_calls = 0;
   int  finish_calls = 0;
   uint32_t recv_errors = 0;
+  bool cad = false;
+  int  threshold = 0;
+  int  calib_calls = 0;
 
   void begin() override { begin_calls++; }
+  void setCADEnabled(bool on) override { cad = on; }
+  void triggerNoiseFloorCalibrate(int t) override { threshold = t; calib_calls++; }
   int recvRaw(uint8_t* bytes, int sz) override {
     if (pending_rx.empty()) return 0;
     int n = (int)pending_rx.size(); if (n > sz) n = sz;
@@ -265,6 +270,71 @@ TEST(SharedRadioPorts, ActivationStateIsReported) {
   EXPECT_TRUE(f.core.portActive(f.ia));
   f.core.setPortActive(f.ia, false);
   EXPECT_FALSE(f.core.portActive(f.ia));
+}
+
+// ------------------------------------------------- shared collision avoidance
+// Each identity's dispatcher pushes its own CAD / interference-threshold prefs
+// at the radio every couple of seconds. There is only one radio, so the core
+// has to reconcile them rather than let the last writer win.
+
+TEST(SharedRadioPolicy, CADStaysOnIfAnyIdentityWantsIt) {
+  Fixture f;
+  f.a.setCADEnabled(true);
+  EXPECT_TRUE(f.radio.cad);
+  f.b.setCADEnabled(false);            // b's prefs must not disable it for a
+  EXPECT_TRUE(f.radio.cad);
+  f.a.setCADEnabled(false);            // now nobody wants it
+  EXPECT_FALSE(f.radio.cad);
+}
+
+TEST(SharedRadioPolicy, TheMostCautiousThresholdWins) {
+  Fixture f;
+  f.a.triggerNoiseFloorCalibrate(12);
+  EXPECT_EQ(12, f.radio.threshold);
+  f.b.triggerNoiseFloorCalibrate(6);   // defers to weaker signals -> more cautious
+  EXPECT_EQ(6, f.radio.threshold);
+  f.c.triggerNoiseFloorCalibrate(0);   // "off" must not switch the check off
+  EXPECT_EQ(6, f.radio.threshold);
+}
+
+TEST(SharedRadioPolicy, ASilencedIdentityHasNoSay) {
+  Fixture f;
+  f.a.setCADEnabled(true);
+  f.a.triggerNoiseFloorCalibrate(6);
+  f.b.triggerNoiseFloorCalibrate(20);
+  ASSERT_TRUE(f.radio.cad);
+  ASSERT_EQ(6, f.radio.threshold);
+
+  f.core.setPortActive(f.ia, false);
+  EXPECT_FALSE(f.radio.cad) << "the only identity wanting CAD is no longer listening";
+  f.b.triggerNoiseFloorCalibrate(20);
+  EXPECT_EQ(20, f.radio.threshold);
+}
+
+TEST(SharedRadioPolicy, CalibrationKeepsTheStockCadenceNotThreeTimesIt) {
+  Fixture f;
+  g_fake_millis = 100000;
+  f.a.triggerNoiseFloorCalibrate(6);
+  int after_first = f.radio.calib_calls;
+
+  // all three dispatchers ask within the same window: one calibration, not three
+  f.b.triggerNoiseFloorCalibrate(6);
+  f.c.triggerNoiseFloorCalibrate(6);
+  EXPECT_EQ(after_first, f.radio.calib_calls);
+
+  g_fake_millis += 2000;
+  f.a.triggerNoiseFloorCalibrate(6);
+  EXPECT_EQ(after_first + 1, f.radio.calib_calls);
+}
+
+TEST(SharedRadioPolicy, AChangedThresholdAppliesImmediately) {
+  Fixture f;
+  g_fake_millis = 200000;
+  f.a.triggerNoiseFloorCalibrate(12);
+  int n = f.radio.calib_calls;
+  f.b.triggerNoiseFloorCalibrate(4);   // inside the rate limit, but it matters
+  EXPECT_EQ(n + 1, f.radio.calib_calls);
+  EXPECT_EQ(4, f.radio.threshold);
 }
 
 // ---------------------------------------------------------------- packet log

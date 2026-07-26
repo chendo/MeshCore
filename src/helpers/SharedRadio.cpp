@@ -288,6 +288,37 @@ void SharedRadioCore::checkRelayConfirmation(const uint8_t* frame, int len) {
   }
 }
 
+void SharedRadioCore::applyRadioPolicy(bool recalibrate) {
+  bool cad = false;
+  int thresh = 0;          // 0 means "RSSI check off"
+  for (int i = 0; i < _num_ports; i++) {
+    if ((_active_mask & (1u << i)) == 0) continue;   // a silenced identity has no say
+    if (_ports[i]->wantsCAD()) cad = true;
+    int t = _ports[i]->wantedThreshold();
+    // a lower non-zero threshold defers to weaker signals, so it is the more
+    // cautious of the two; any identity asking for the check turns it on
+    if (t != 0 && (thresh == 0 || t < thresh)) thresh = t;
+  }
+
+  if (_cad_applied != (int8_t)cad) {
+    _cad_applied = (int8_t)cad;
+    _real->setCADEnabled(cad);
+  }
+
+  // Recalibration resets the noise-floor sampling window. Three dispatchers
+  // asking every 2s would restart it three times as often as the stock design
+  // intends, so it is rate-limited back to the original cadence — except when
+  // the threshold itself changed, which must take effect immediately.
+  bool thresh_changed = (thresh != _thresh_applied);
+  if (recalibrate &&
+      (thresh_changed || _last_calib_ms == 0 ||
+       (uint32_t)(millis() - _last_calib_ms) >= CALIB_MIN_INTERVAL_MS)) {
+    _thresh_applied = thresh;
+    _last_calib_ms = millis();
+    _real->triggerNoiseFloorCalibrate(thresh);
+  }
+}
+
 void SharedRadioCore::setPortActive(int idx, bool active) {
   if (idx < 0 || idx >= MAX_PORTS) return;
   uint32_t bit = (1u << idx);
@@ -306,6 +337,7 @@ void SharedRadioCore::setPortActive(int idx, bool active) {
       _tx_owner = nullptr;
     }
   }
+  applyRadioPolicy(false);        // a silenced identity no longer votes
 }
 
 bool SharedRadioCore::portActive(int idx) const {
@@ -359,12 +391,16 @@ int RadioPort::getNoiseFloor() const {
   return _core ? _core->real()->getNoiseFloor() : 0;
 }
 
+// These two record what this identity's prefs want; the core reconciles the
+// three requests into one setting for the shared radio.
 void RadioPort::triggerNoiseFloorCalibrate(int threshold) {
-  if (_core) _core->real()->triggerNoiseFloorCalibrate(threshold);
+  _thresh_want = threshold;
+  if (_core) _core->applyRadioPolicy(true);
 }
 
 void RadioPort::setCADEnabled(bool enable) {
-  if (_core) _core->real()->setCADEnabled(enable);
+  _cad_want = enable;
+  if (_core) _core->applyRadioPolicy(false);
 }
 
 void RadioPort::resetAGC() {

@@ -1408,7 +1408,9 @@ function renderDashTiles(d){
         : "relay confirmations")+
     tile("NVS",(d.nvs&&d.nvs.total?Math.round(100*d.nvs.used/d.nvs.total)+" % used":"-"),
       d.nvs?(d.nvs.free+" entries free"):"identity mirror store")+
-    tile("Noise floor",(d.radio&&d.radio.noise?d.radio.noise+" dBm":"-"),"")+
+    tile("Noise floor",(d.radio&&d.radio.noise?d.radio.noise+" dBm":"-"),
+      d.radio?("listen-before-talk "+(d.radio.cad?"on":"off")+
+        (d.radio.thresh?" · RSSI guard +"+d.radio.thresh+" dB":" · no RSSI guard")):"")+
     (function(){
       const e=d.radio&&d.radio.err; if(!e) return "";
       const bad=e.crc+e.header+e.timeout+e.other, all=bad+e.ok;
