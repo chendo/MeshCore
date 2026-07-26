@@ -230,6 +230,14 @@ bool RadioLibWrapper::isChannelActive() {
 
   // cad: hardware channel activity detection
   if (_cad_enabled) {
+    // NEVER scan on top of a packet we already have or are still receiving.
+    // scanChannel() consumes the DIO interrupt and re-arms RX below, so a
+    // received frame still sitting unread in the FIFO would be destroyed to
+    // answer a question we can already answer: the channel is busy. That loss
+    // would be completely silent — no counter moves, because readData() is
+    // never reached. resetAGC() guards itself the same way.
+    if (intReady() || isReceivingPacket()) return true;
+
     int16_t result = performChannelScan();
     // scanChannel() triggers the DIO interrupt (CAD done) via setFlag().
     // Consume it before restarting RX so recvRaw() doesn't try to read a
