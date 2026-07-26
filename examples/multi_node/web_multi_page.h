@@ -48,6 +48,10 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
 .tabpane{display:none}.tabpane.on{display:block}
 .warn{background:#3a2d16;border:1px solid #6b5320;color:#e8c874;padding:8px 10px;border-radius:6px;margin-bottom:10px;font-size:13px}
 .hop{cursor:help;border-bottom:1px dotted #5c6875}
+.relay{display:inline-block;padding:0 5px;border-radius:4px;font-size:11px;font-weight:600;margin-right:6px}
+.relay.sure{background:#14361f;color:#5fd694;border:1px solid #2c6b45}
+.relay.weak{background:#3a2d16;color:#e8c874;border:1px solid #6b5320}
+tr.relayrow td{background:#12211a}
 .tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:8px;margin-bottom:4px}
 .tile{background:#12171d;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
 .tile .val{font-size:21px;font-weight:650;margin-top:2px}
@@ -238,6 +242,10 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
   <tbody id="dbg-stats"></tbody></table></div>
   <div class="card"><h3>Nodes nearby (repeater neighbours)</h3><pre id="dbg-nbrs" class="mut">-</pre></div>
   <div class="card"><h3>Radio packets <span class="mut" id="pkt-count"></span></h3>
+    <div class="mut" style="font-size:11px;margin-bottom:6px">
+      <span class="relay sure">&#8618; relayed</span> a neighbour passed on something we sent (2-byte+ hash — certain) ·
+      <span class="relay weak">&#8618; relayed?</span> same, but a 1-byte hash, so ~1 in 256 could be coincidence
+    </div>
   <div style="overflow-x:auto"><table><thead><tr><th>time</th><th>dir</th><th>route</th><th>type</th><th>src</th><th>info</th><th>len</th><th>SNR</th><th>RSSI</th></tr></thead>
   <tbody id="pkt-rows"></tbody></table></div></div>
 </div>
@@ -605,9 +613,22 @@ function annot(p){
     const dn=hashName(pay[0]);
     info="src "+hx1(pay[1])+" → dest "+hx1(pay[0])+(dn?" ("+dn+")":"");
   }
+  // Does this packet's path carry one of OUR hashes? If so a neighbour heard
+  // something we sent and relayed it onward — direct proof we are being heard.
+  // Only meaningful on receive: our own transmissions contain our hash by
+  // definition, because we append it when forwarding.
+  let relay=null;
+  for(const g of groups){
+    const hex=gHex(g).toLowerCase();
+    for(const [role,pfx] of Object.entries(selfIds)){
+      if(pfx.startsWith(hex)){ relay={role,width:Array.isArray(g)?g.length:1}; break; }
+    }
+    if(relay) break;
+  }
+
   let infoHtml=esc(info);
   if(hops) infoHtml+=(infoHtml?"  |  ":"")+hops+" hop"+(hops>1?"s":"")+" "+hopsHtml(groups);
-  return {src,infoHtml};
+  return {src,infoHtml,relay};
 }
 
 async function pollPkts(){
@@ -645,8 +666,18 @@ async function pollPkts(){
           "send timed out before TX-done (radio contention?)</td><td>-</td><td></td><td></td>";
       } else {
         const a=annot(p);
+        // a received packet carrying our own hash = someone relayed us
+        let badge="";
+        if(rx&&a.relay){
+          const sure=a.relay.width>=2;
+          badge="<span class='relay "+(sure?"sure":"weak")+"' title=\""+
+            (sure?"a neighbour relayed a packet we sent — "+a.relay.width+"-byte hash match, effectively certain"
+                 :"possible relay of our packet — 1-byte hash, ~1 in 256 chance of coincidence")+
+            "\">&#8618; relayed "+esc(a.relay.role)+(sure?"":"?")+"</span>";
+          tr.className="relayrow";
+        }
         tr.innerHTML="<td>"+when+"</td><td class="+(rx?"ok":"err")+">"+(rx?"RX":"TX:"+p.d)+"</td><td>"+
-          ROUTES[p.h&3]+"</td><td>"+PTYPES[(p.h>>2)&15]+"</td><td>"+esc(a.src)+"</td><td class=mut>"+a.infoHtml+
+          ROUTES[p.h&3]+"</td><td>"+PTYPES[(p.h>>2)&15]+"</td><td>"+esc(a.src)+"</td><td class=mut>"+badge+a.infoHtml+
           "</td><td>"+p.l+"</td><td>"+(rx?snrSpan(p.snr):"")+"</td><td>"+(rx?rssiSpan(p.rssi):"")+"</td>";
         tr.style.cursor="pointer";
         tr.title="click to decode";
