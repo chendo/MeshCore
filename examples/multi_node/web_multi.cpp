@@ -202,7 +202,10 @@ static esp_err_t handleDebug(httpd_req_t* req) {
     out += ",\"rx\":"; out += String(c ? c->rxTotal() : 0);
     out += ",\"tx\":"; out += String(c ? c->txTotal() : 0);
     out += ",\"busy\":"; out += String(c ? c->txContention() : 0);
-    out += ",\"stuck\":"; out += String(c ? c->txStuck() : 0); }
+    out += ",\"stuck\":"; out += String(c ? c->txStuck() : 0);
+    out += ",\"refused\":"; out += String(c ? c->txRefused() : 0);
+    out += ",\"recoveries\":"; out += String(c ? c->radioRecoveries() : 0);
+    out += ",\"rx_age_s\":"; out += String(c ? c->msSinceLastRx() / 1000 : 0); }
   out += "},\"nvs\":{";
   { nvs_stats_t st;
     if (nvs_get_stats(nullptr, &st) == ESP_OK) {

@@ -404,6 +404,73 @@ TEST(SharedRadioWatchdog, NormalTransmitsAreNeverReclaimed) {
   EXPECT_EQ(0u, f.core.txStuck()) << "the watchdog must not fire on healthy traffic";
 }
 
+// ---------------------------------------------------- radio health watchdog
+
+// The real field failure: the transceiver wedged, every RadioLib call started
+// failing, and the board sat deaf for 3.4 hours with no error recorded
+// anywhere — sends were refused silently and the noise floor simply froze.
+namespace { int g_reinits = 0; }
+
+TEST(SharedRadioHealth, ARefusedSendIsCountedAndTraced) {
+  Fixture f;
+  f.radio.send_ok = false;                      // radio rejects everything
+  uint8_t msg[] = {1, 2, 3};
+
+  EXPECT_FALSE(f.a.startSendRaw(msg, 3));
+  EXPECT_EQ(1u, f.core.txRefused()) << "a refused send is a transmit failure";
+  EXPECT_EQ(0u, f.core.txTotal()) << "and must not count as a successful transmit";
+
+  PktLogEntry entries[SharedRadioCore::PKT_LOG_SIZE];
+  int n = f.core.pktLogCopy(entries, SharedRadioCore::PKT_LOG_SIZE, 0);
+  ASSERT_EQ(1, n) << "it must leave evidence in the trace";
+  EXPECT_EQ(PKT_FLAG_TX_FAIL, entries[0].flag);
+  EXPECT_EQ(f.ia, entries[0].dir);
+}
+
+TEST(SharedRadioHealth, ASilentRadioIsReinitialised) {
+  Fixture f;
+  g_reinits = 0;
+  g_fake_millis = 1000;
+  f.core.setRadioReinit([]() { g_reinits++; });
+
+  f.deliver({0x01});                            // a packet arrives: radio is alive
+  uint8_t buf[MAX_TRANS_UNIT];
+  take(f.a, buf); take(f.b, buf); take(f.c, buf);
+
+  g_fake_millis += 300000;                      // 5 min quiet — normal
+  f.core.pump();
+  EXPECT_EQ(0, g_reinits) << "a quiet band must not trigger recovery";
+
+  g_fake_millis += 700000;                      // now well past the limit
+  f.core.pump();
+  EXPECT_EQ(1, g_reinits) << "a radio silent this long is wedged, not quiet";
+  EXPECT_EQ(1u, f.core.radioRecoveries());
+}
+
+TEST(SharedRadioHealth, RecoveryIsNotRetriedInATightLoop) {
+  Fixture f;
+  g_reinits = 0;
+  g_fake_millis = 1000;
+  f.core.setRadioReinit([]() { g_reinits++; });
+  f.deliver({0x01});
+  uint8_t buf[MAX_TRANS_UNIT];
+  take(f.a, buf); take(f.b, buf); take(f.c, buf);
+
+  g_fake_millis += 1000000;
+  for (int i = 0; i < 50; i++) f.core.pump();
+  EXPECT_EQ(1, g_reinits) << "one attempt, then wait again";
+}
+
+TEST(SharedRadioHealth, NoRecoveryBeforeTheRadioHasEverReceived) {
+  Fixture f;
+  g_reinits = 0;
+  g_fake_millis = 1000;
+  f.core.setRadioReinit([]() { g_reinits++; });
+  g_fake_millis += 1000000;                     // long boot with no traffic yet
+  f.core.pump();
+  EXPECT_EQ(0, g_reinits) << "cannot judge a radio that has never heard anything";
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

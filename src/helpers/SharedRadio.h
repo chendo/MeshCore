@@ -151,6 +151,13 @@ public:
   uint32_t txContention() const { return _tx_contention; }
   // transmits force-released by the watchdog below (see pump())
   uint32_t txStuck() const { return _tx_stuck; }
+  // sends the radio itself refused (RadioLib error) — a real TX failure
+  uint32_t txRefused() const { return _tx_refused; }
+  // times the radio was re-initialised after going silent
+  uint32_t radioRecoveries() const { return _radio_recoveries; }
+  uint32_t msSinceLastRx() const { return _last_rx_ms ? (uint32_t)(millis() - _last_rx_ms) : 0; }
+  // how the composition puts a wedged transceiver back together
+  void setRadioReinit(void (*fn)()) { _reinit_fn = fn; }
   uint32_t txContentionFor(int idx) const {
     return (idx >= 0 && idx < MAX_PORTS) ? _tx_contention_port[idx] : 0;
   }
@@ -218,7 +225,15 @@ private:
   volatile uint32_t _rx_total = 0, _tx_total = 0;
   volatile uint32_t _tx_contention = 0;
   volatile uint32_t _tx_stuck = 0;
+  volatile uint32_t _tx_refused = 0;
+  volatile uint32_t _radio_recoveries = 0;
   uint32_t _tx_started_ms = 0;
+  uint32_t _last_rx_ms = 0;
+  void (*_reinit_fn)() = nullptr;
+  // How long a silent radio is tolerated before it is assumed wedged. Long
+  // enough that a genuinely quiet band never trips it; short enough that the
+  // node is not off air for hours.
+  static const uint32_t RX_SILENCE_LIMIT_MS = 900000;   // 15 minutes
   // Longest a port may hold the transmitter before the arbiter takes it back.
   // Well beyond any legal LoRa airtime (a 255-byte frame at SF12/BW125 is
   // ~9s); this is a deadlock breaker, not a timing parameter.

@@ -72,9 +72,27 @@ void SharedRadioCore::pump() {
     _rx_snr = _real->getLastSNR();
     _rx_rssi = _real->getLastRSSI();
     _consumed_mask = 0;
+    _last_rx_ms = millis();
     pktLogAdd(-1, tmp, len, (int8_t)(_rx_snr * 4), (int16_t)_rx_rssi);
   } else {
     _rx_len = 0;   // nothing pending
+  }
+
+  // RADIO HEALTH WATCHDOG.
+  // The transceiver can wedge: every RadioLib call starts failing, so nothing
+  // is received, nothing can be transmitted, and — because the driver only
+  // samples the noise floor while it is actually in receive mode — the whole
+  // radio simply goes quiet with no error anywhere. Observed in the field: the
+  // board was deaf for 3.4 hours after a transmit, and recovered only on
+  // reboot. Silence for this long is not a quiet band, it is a broken radio:
+  // re-initialise the chip and carry on.
+  if (_reinit_fn != nullptr && _last_rx_ms != 0 &&
+      (uint32_t)(millis() - _last_rx_ms) > RX_SILENCE_LIMIT_MS) {
+    _radio_recoveries = _radio_recoveries + 1;
+    _last_rx_ms = millis();          // don't retry in a tight loop
+    _tx_owner = nullptr;             // whatever it was doing is gone now
+    _rx_len = 0;
+    _reinit_fn();
   }
 }
 
@@ -118,7 +136,15 @@ bool SharedRadioCore::tryStartSend(RadioPort* p, const uint8_t* bytes, int len) 
     }
   }
   bool ok = _real->startSendRaw(bytes, len);
-  if (ok) {
+  if (!ok) {
+    // The radio REFUSED the send (RadioLib error). This used to be completely
+    // silent — no trace entry, no counter — which is why hours of failed
+    // transmits left no evidence at all. It is a transmit failure: count it.
+    _tx_refused = _tx_refused + 1;
+    pktLogAdd((int8_t)portIndex(p), bytes, len, 0, 0, PKT_FLAG_TX_FAIL, -1);
+    return false;
+  }
+  {
     _tx_owner = p;
     _tx_started_ms = millis();
     _tx_completed = false;

@@ -766,6 +766,15 @@ void setup() {
 
   g_core = new SharedRadioCore(radio_driver);
   g_core->setTxPowerControl(&g_txpwr);
+  // Put a wedged transceiver back together: full chip init, re-attach the
+  // DIO1 ISR, then restore the shared radio parameters (radio_init() leaves
+  // the compiled-in defaults, which are not what this node runs).
+  g_core->setRadioReinit([]() {
+    Serial.println("[radio] no packets for 15 min — re-initialising the transceiver");
+    radio_init();
+    radio_driver.begin();
+    applyRadioParams(g_radio);
+  });
   g_core->setRxErrorCounter([]() -> uint32_t { return radio_driver.getPacketsRecvErrors(); },
                             []() -> int16_t { return radio_driver.getLastRecvError(); },
                             []() -> const uint8_t* { return radio_driver.getLastRecvErrorPayload(); },

@@ -1332,8 +1332,10 @@ function renderDashTiles(d){
     tile("Battery",core.battery_mv?(core.battery_mv/1000).toFixed(2)+" V":"-","")+
     tile("Uptime",upStr,"")+
     tile("Radio RX / TX",(d.radio?d.radio.rx:"-")+" / "+(d.radio?d.radio.tx:"-"),
-      "packets · "+(d.radio&&d.radio.busy?d.radio.busy+" deferred":"no contention")+
-      (d.radio&&d.radio.stuck?" · <span class=err>"+d.radio.stuck+" stuck TX recovered</span>":""))+
+      "packets · last rx "+(d.radio?age(d.radio.rx_age_s):"?")+" ago"+
+      (d.radio&&d.radio.refused?" · <span class=err>"+d.radio.refused+" refused</span>":"")+
+      (d.radio&&d.radio.recoveries?" · <span class=err>"+d.radio.recoveries+" radio resets</span>":"")+
+      (d.radio&&d.radio.stuck?" · <span class=err>"+d.radio.stuck+" stuck TX</span>":""))+
     tile("NVS",(d.nvs&&d.nvs.total?Math.round(100*d.nvs.used/d.nvs.total)+" % used":"-"),
       d.nvs?(d.nvs.free+" entries free"):"identity mirror store")+
     tile("Noise floor",(d.radio&&d.radio.noise?d.radio.noise+" dBm":"-"),"")+
