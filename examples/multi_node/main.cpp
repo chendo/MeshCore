@@ -680,6 +680,64 @@ void multiRunConsole(const char* cmd, char* reply, size_t reply_size) {
   }
   xSemaphoreGive(g_console_mutex);
 }
+
+// Same reasoning, generalised. Handlers that READ live mesh state (the room's
+// post ring, for instance) race the loop task just as writers do — a ring being
+// rotated underneath a reader yields a torn record, and following a pointer the
+// loop task is rewriting can be worse than that. Those reads hand a function to
+// the loop task instead.
+//
+// OWNERSHIP: if the loop task is too slow and we stop waiting, it will still
+// run the call afterwards, so `arg` must outlive an abandoned request. Callers
+// heap-allocate it and deliberately leak on timeout — a few kilobytes lost on a
+// loop that has stalled for seconds beats writing into a freed stack frame.
+static SemaphoreHandle_t   g_defer_mutex = nullptr;
+static MultiLoopFn volatile g_defer_fn = nullptr;   // published last; null = idle
+static void*               g_defer_arg = nullptr;
+
+static void serviceDeferredCall() {
+  MultiLoopFn fn = g_defer_fn;
+  if (fn == nullptr) return;
+  fn(g_defer_arg);
+  g_defer_arg = nullptr;
+  g_defer_fn = nullptr;         // cleared last: marks the slot free again
+}
+
+bool multiOnLoopTask() {
+  return g_loop_task == nullptr || xTaskGetCurrentTaskHandle() == g_loop_task;
+}
+
+bool multiRunInLoop(MultiLoopFn fn, void* arg, uint32_t timeout_ms) {
+  if (fn == nullptr) return false;
+  if (multiOnLoopTask()) { fn(arg); return true; }
+  if (g_defer_mutex == nullptr ||
+      xSemaphoreTake(g_defer_mutex, pdMS_TO_TICKS(2000)) != pdTRUE) return false;
+
+  // A previous request that timed out is still queued; it must be allowed to
+  // complete before the slot is reused, or the loop task would run it against
+  // this caller's argument.
+  uint32_t start = millis();
+  while (g_defer_fn != nullptr) {
+    if ((uint32_t)(millis() - start) >= timeout_ms) {
+      xSemaphoreGive(g_defer_mutex);
+      return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+
+  g_defer_arg = arg;
+  g_defer_fn = fn;                          // published last
+
+  bool done = false;
+  start = millis();
+  while ((uint32_t)(millis() - start) < timeout_ms) {
+    if (g_defer_fn == nullptr) { done = true; break; }
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+  xSemaphoreGive(g_defer_mutex);
+  return done;
+}
+
 fs::FS* multiSysFS() { return &fs_sys; }
 void multiGetRadioParams(float* freq, float* bw, uint8_t* sf, uint8_t* cr) {
   if (freq) *freq = g_radio.freq;
@@ -813,6 +871,7 @@ void setup() {
 
   g_loop_task = xTaskGetCurrentTaskHandle();   // console commands must run here
   g_console_mutex = xSemaphoreCreateMutex();
+  g_defer_mutex   = xSemaphoreCreateMutex();
 
   board.begin();
   if (!radio_init()) { Serial.println("Radio init failed!"); halt(); }
@@ -964,8 +1023,8 @@ uint32_t multiLoopsPerSec() { return s_loops_per_s; }
 void loop() {
   uint32_t t0 = micros();
 
-  // pump each identity, then fetch the next shared radio frame (order matters:
-  // all ports must consume the current frame before pump() fetches the next)
+  // pump each identity, then service the shared radio: pump() drains it into
+  // the receive queue, which the identities take from on the next iteration
   for (int i = 0; i < NUM_MODULES; i++) g_modules[i]->loop();
   g_core->pump();
 
@@ -976,6 +1035,7 @@ void loop() {
     web.loop();
   }
   serviceConsoleRequest();        // run web/serial commands in THIS task, not the server's
+  serviceDeferredCall();          // ...and web reads of live mesh state, likewise
   applySlotRequests();            // hot enable/disable of chat identities
   gpsSyncTick();                  // scheduled GPS clock discipline
   multiWebTick();                 // stats history sampler (unified panel)

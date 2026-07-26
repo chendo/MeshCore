@@ -123,14 +123,23 @@ public:
     uint32_t oldest = newest > ARCH_SLOTS ? newest - ARCH_SLOTS : 0;
     if (after < oldest) after = oldest;
     size_t o = 0;
+    // The loop task keeps writing while this runs (the web reads it from the
+    // HTTPS task), so a slot can be recycled underneath us. The sequence number
+    // is written last, and re-checked AFTER the copy as well as before: a slot
+    // that turned over mid-memcpy yields a half-old/half-new frame, which the
+    // panel would render as a corrupt message. Dropping it is correct — the
+    // caller polls again and picks it up as a newer entry.
     for (uint32_t s = after + 1; s <= newest; s++) {
       ArchSlot& a = _arch[(s - 1) % ARCH_SLOTS];
-      if (a.seq != s) continue;               // overwritten mid-copy
-      if (o + 6 + a.len > cap) break;
+      if (a.seq != s) continue;
+      uint16_t len = a.len;
+      if (len > MAX_FRAME_SIZE) continue;
+      if (o + 6 + len > cap) break;
       memcpy(out + o, &s, 4);
-      out[o + 4] = a.len & 0xFF; out[o + 5] = (a.len >> 8) & 0xFF;
-      memcpy(out + o + 6, a.buf, a.len);
-      o += 6 + a.len;
+      out[o + 4] = len & 0xFF; out[o + 5] = (len >> 8) & 0xFF;
+      memcpy(out + o + 6, a.buf, len);
+      if (a.seq != s) continue;               // recycled while we copied
+      o += 6 + len;
     }
     return (int)o;
   }

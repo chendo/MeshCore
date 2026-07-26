@@ -30,6 +30,7 @@ namespace roomspy {
 }
 
 #include "identity_module.h"
+#include "multi_web.h"
 #include "identity_backup.h"
 #include <target.h>
 #include <helpers/ArduinoHelpers.h>
@@ -71,7 +72,7 @@ IdentityModule room_module = { "room", room_setup, room_loop, room_cmd, room_pk 
 
 // Stored posts (newest last), as JSON for the web panel. Reads the room's
 // cyclic RAM queue directly (see the access-override note above the include).
-int roomGetPostsJson(char* out, size_t cap) {
+static int roomFillPostsJson(char* out, size_t cap) {
   if (g_room == nullptr || out == nullptr || cap < 3) { if (out && cap) out[0] = 0; return 0; }
   size_t o = 0;
   out[o++] = '[';
@@ -101,4 +102,38 @@ int roomGetPostsJson(char* out, size_t cap) {
   out[o++] = ']';
   out[o] = 0;
   return (int)o;
+}
+
+// The panel polls this from the HTTPS task while the loop task is receiving
+// posts into the very ring being walked — next_post_idx advancing mid-read
+// duplicates or skips entries, and a post being overwritten mid-copy yields a
+// half-written string. Run the read on the loop task instead.
+//
+// Request and scratch are one heap block owned by the call, because if the loop
+// task is too slow to answer it will still run the read afterwards. On that
+// path the block is deliberately leaked rather than freed underneath it.
+namespace {
+  struct PostsReq { size_t cap; int len; char buf[1]; };
+  void roomPostsOnLoop(void* p) {
+    PostsReq* r = (PostsReq*)p;
+    r->len = roomFillPostsJson(r->buf, r->cap);
+  }
+}
+
+int roomGetPostsJson(char* out, size_t cap) {
+  if (out == nullptr || cap < 3) return 0;
+  if (multiOnLoopTask()) return roomFillPostsJson(out, cap);
+
+  PostsReq* r = (PostsReq*)malloc(sizeof(PostsReq) + cap);
+  if (r == nullptr) { snprintf(out, cap, "[]"); return 2; }
+  r->cap = cap; r->len = 0; r->buf[0] = 0;
+
+  if (!multiRunInLoop(roomPostsOnLoop, r, 4000)) {
+    snprintf(out, cap, "[]");     // r is intentionally NOT freed — still queued
+    return 2;
+  }
+  int n = r->len;
+  memcpy(out, r->buf, (size_t)n + 1);
+  free(r);
+  return n;
 }

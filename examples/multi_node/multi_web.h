@@ -16,6 +16,15 @@ SharedRadioCore* multiCore();
 // run a console command (same dispatcher as serial console / web /api/command:
 // supports repeater/room/companion prefixes plus composition intercepts)
 void multiRunConsole(const char* cmd, char* reply, size_t reply_size);
+// Run fn(arg) on the super-loop task and wait for it. Anything that touches
+// live mesh state from the HTTPS server task must go through this: the loop is
+// mutating those objects concurrently, and a torn read is the good outcome.
+// Returns false if it could not be run in time — in which case the loop task
+// will STILL run it later, so `arg` must remain valid forever (heap-allocate it
+// and leak on failure; the alternative is a write into a freed frame).
+typedef void (*MultiLoopFn)(void*);
+bool multiRunInLoop(MultiLoopFn fn, void* arg, uint32_t timeout_ms);
+bool multiOnLoopTask();
 void multiGetRadioParams(float* freq, float* bw, uint8_t* sf, uint8_t* cr);
 namespace fs { class FS; }
 fs::FS* multiSysFS();   // composition prefs area of the shared partition
