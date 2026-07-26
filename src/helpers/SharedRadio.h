@@ -179,6 +179,20 @@ public:
   uint32_t confirmsByWidth(int bytes) const {   // 1..4
     return (bytes >= 1 && bytes <= 4) ? _confirm_width[bytes - 1] : 0;
   }
+
+  // ---- per-identity liveness -----------------------------------------------
+  // Every identity funnels through a port, so the arbiter can report what each
+  // one is actually doing — including the chat identities, which have no CLI
+  // and therefore no stock stats of their own.
+  int numPorts() const { return _num_ports; }
+  uint32_t portRxCount(int idx) const { return (idx >= 0 && idx < MAX_PORTS) ? _port_rx[idx] : 0; }
+  uint32_t portTxCount(int idx) const { return (idx >= 0 && idx < MAX_PORTS) ? _port_tx[idx] : 0; }
+  // ms since this identity last sent or received anything (0 = never)
+  uint32_t portIdleMs(int idx) const {
+    if (idx < 0 || idx >= MAX_PORTS || _port_last_ms[idx] == 0) return 0;
+    return (uint32_t)(millis() - _port_last_ms[idx]);
+  }
+  bool portEverActive(int idx) const { return idx >= 0 && idx < MAX_PORTS && _port_last_ms[idx] != 0; }
   uint32_t txContentionFor(int idx) const {
     return (idx >= 0 && idx < MAX_PORTS) ? _tx_contention_port[idx] : 0;
   }
@@ -263,6 +277,9 @@ private:
   volatile uint32_t _flood_sent[MAX_PORTS] = {0};
   volatile uint32_t _flood_confirmed[MAX_PORTS] = {0};
   volatile uint32_t _confirm_width[4] = {0};
+  volatile uint32_t _port_rx[MAX_PORTS] = {0};
+  volatile uint32_t _port_tx[MAX_PORTS] = {0};
+  volatile uint32_t _port_last_ms[MAX_PORTS] = {0};
   void noteFloodSent(int port_idx);
   void checkRelayConfirmation(const uint8_t* frame, int len);
   // How long a silent radio is tolerated before it is assumed wedged. Long

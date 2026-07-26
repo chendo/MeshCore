@@ -17,6 +17,7 @@ aside .brand{font-weight:700;font-size:15px;padding:2px 6px}
 .role .rname{font-weight:600;display:flex;align-items:center;gap:6px}
 .role .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:none}
 .role .dot.off{background:#5c6875}
+.role .dot.warn{background:#e0b34d}
 .role .rkey{font-family:ui-monospace,monospace;font-size:10px;color:var(--mut);cursor:pointer;word-break:break-all}
 .role .rstat{color:var(--mut);margin-top:2px}
 nav{display:flex;flex-direction:column;gap:2px;margin-top:4px}
@@ -107,8 +108,10 @@ tr.relayrow td{background:#12211a}
     <div style="overflow-x:auto"><table><thead><tr><th>name</th><th>kind</th><th>key</th><th>heard</th><th>last advert</th><th>dist</th></tr></thead>
     <tbody id="dash-nearby"><tr><td colspan=6 class=mut>listening for adverts...</td></tr></tbody></table></div>
   </div>
-  <div class="card"><h3>Live <button class="sec" style="float:right;padding:2px 8px" onclick="loadStatsTab()">&#8635;</button></h3>
-  <div style="overflow-x:auto"><table><thead><tr><th></th><th>recv</th><th>sent</th><th>flood tx</th><th>direct tx</th><th>flood rx</th><th>direct rx</th><th>rx errors</th><th>queue</th><th>err flags</th></tr></thead>
+  <div class="card"><h3>Identities <button class="sec" style="float:right;padding:2px 8px" onclick="loadStatsTab()">&#8635;</button>
+    <span class="mut" style="font-weight:400;font-size:11px">every identity, from the shared radio itself</span></h3>
+  <div style="overflow-x:auto"><table><thead><tr><th>identity</th><th>state</th><th>last activity</th><th>rx</th><th>tx</th>
+    <th>floods sent</th><th>heard back</th><th>deferred</th><th>flood rx</th><th>rx errors</th><th>queue</th></tr></thead>
   <tbody id="stats-live"></tbody></table></div>
   <pre id="stats-node" class="mut" style="margin-top:8px"></pre></div>
   <div class="card"><h3>History (24h, 1-min samples)</h3><div id="stats-charts"></div></div>
@@ -238,8 +241,9 @@ tr.relayrow td{background:#12211a}
       <button class="act" onclick="cliRun()">Run</button></div>
     <pre id="cli-out" class="mut"></pre></div>
   <div class="card"><h3>Identity stats</h3>
-  <table><thead><tr><th></th><th>recv</th><th>sent</th><th>flood tx</th><th>direct tx</th><th>flood rx</th><th>direct rx</th><th>rx errors</th><th>queue</th><th>err flags</th></tr></thead>
-  <tbody id="dbg-stats"></tbody></table></div>
+  <div style="overflow-x:auto"><table><thead><tr><th>identity</th><th>state</th><th>last activity</th><th>rx</th><th>tx</th>
+    <th>floods sent</th><th>heard back</th><th>deferred</th><th>flood rx</th><th>rx errors</th><th>queue</th></tr></thead>
+  <tbody id="dbg-stats"></tbody></table></div></div>
   <div class="card"><h3>Nodes nearby (repeater neighbours)</h3><pre id="dbg-nbrs" class="mut">-</pre></div>
   <div class="card"><h3>Radio packets <span class="mut" id="pkt-count"></span></h3>
     <div class="mut" style="font-size:11px;margin-bottom:6px">
@@ -442,19 +446,34 @@ async function loadRailNames(){
   try{ railNames.room=stripReply(await cmd("room get name")); }catch(e){}
   renderRail();
 }
+// Cards reflect what each identity is ACTUALLY doing, from the arbiter's
+// per-port counters — not merely that the identity exists.
+const IDLE_WARN_S=600;                       // quiet this long = something's off
+function portState(p){
+  if(!p.active) return {cls:"off", word:"stopped"};
+  if(!p.seen)   return {cls:"warn", word:"no traffic yet"};
+  if(p.idle_s>IDLE_WARN_S) return {cls:"warn", word:"quiet "+age(p.idle_s)};
+  return {cls:"", word:"active "+age(p.idle_s)+" ago"};
+}
+const LABELS={repeater:"REPEATER", room:"ROOM", companion:"CHAT"};
 function renderRail(){
-  if(!lastDebug) return;
-  const rp=lastDebug.stats.repeater.packets||{};
-  const kinds=[["repeater","REPEATER",(rp.flood_tx||0)+(rp.direct_tx||0)+" fwd · "+(rp.recv_errors||0)+" err"],
-    ["room","ROOM","serving"],
-    ["companion","CHAT",contacts.length+" contacts · app "+(lastDebug.companion.client?"connected":"—")]];
+  if(!lastDebug||!lastDebug.ports) return;
+  const rp=(lastDebug.stats.repeater||{}).packets||{};
   let h="";
-  for(const [role,label,stat] of kinds){
-    const pk=selfIds[role];
-    h+="<div class=role><div class=rname><span class=dot"+(pk?"":" off")+"></span>"+label+"</div>"+
-      "<div>"+esc(railNames[role]||(role==="companion"?($("self-name").textContent||"").replace(/[()]/g,""):""))+"</div>"+
+  for(const p of lastDebug.ports){
+    if(!p.active) continue;                  // disabled slots aren't roles you have
+    const st=portState(p);
+    const pk=selfIds[p.name]||"";
+    let detail;
+    if(p.name==="repeater") detail=(rp.flood_tx||0)+" fwd · "+p.heard+"/"+p.sent+" heard back";
+    else if(p.name==="room") detail=p.tx+" sent · "+p.rx+" rx";
+    else detail=contacts.length+" contacts · app "+(lastDebug.companion.client?"connected":"—");
+    h+="<div class=role><div class=rname><span class='dot "+st.cls+"'></span>"+
+      (LABELS[p.name]||p.name.toUpperCase())+"</div>"+
+      "<div>"+esc(railNames[p.name]||(p.name==="companion"?($("self-name").textContent||"").replace(/[()]/g,""):""))+"</div>"+
       (pk?"<div class=rkey title='click to copy prefix' onclick=\"copyText('"+pk+"')\">"+pk+"</div>":"")+
-      "<div class=rstat>"+esc(stat)+"</div></div>";
+      "<div class=rstat>"+esc(st.word)+"</div>"+
+      "<div class=rstat>"+esc(detail)+"</div></div>";
   }
   $("rail-roles").innerHTML=h;
 }
@@ -478,11 +497,24 @@ async function fieldSave(c,statusId){
 const ROUTES=["T-FLOOD","FLOOD","DIRECT","T-DIRECT"];
 const PTYPES=["REQ","RESPONSE","TXT_MSG","ACK","ADVERT","GRP_TXT","GRP_DATA","ANON_REQ","PATH","TRACE","MULTIPART","CONTROL","?","?","?","RAW"];
 let lastSeq=0, devNow=0;
-function statRow(name,p,c){
-  if(!p) return "<tr><td>"+name+"</td><td colspan=9 class=mut>-</td></tr>";
-  return "<tr><td>"+name+"</td><td>"+p.recv+"</td><td>"+p.sent+"</td><td>"+p.flood_tx+"</td><td>"+p.direct_tx+
-   "</td><td>"+p.flood_rx+"</td><td>"+p.direct_rx+"</td><td>"+p.recv_errors+"</td><td>"+(c?c.queue_len:"-")+
-   "</td><td>"+(c?c.errors:"-")+"</td></tr>";
+// One row per identity, sourced from the arbiter so the chat identities (which
+// have no CLI and no stock stats) appear too. Mesh-level columns are filled in
+// only for the identities that can report them.
+function identityRows(d){
+  if(!d.ports) return "";
+  return d.ports.map(p=>{
+    const st=portState(p);
+    const mesh=(d.stats[p.name]||{}).packets;
+    const core=(d.stats[p.name]||{}).core;
+    const nm=railNames[p.name]||(p.name==="companion"?($("self-name").textContent||"").replace(/[()]/g,""):"");
+    const dot="<span class='dot "+st.cls+"' style='display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px'></span>";
+    return "<tr"+(p.active?"":" class=mut")+"><td>"+dot+esc(p.name)+(nm?" <span class=mut>"+esc(nm)+"</span>":"")+
+      "</td><td>"+esc(st.word)+"</td><td>"+(p.seen?age(p.idle_s)+" ago":"—")+
+      "</td><td>"+p.rx+"</td><td>"+p.tx+"</td><td>"+p.sent+"</td><td>"+
+      (p.sent?p.heard+" ("+Math.round(100*p.heard/p.sent)+"%)":"—")+
+      "</td><td>"+(p.busy||0)+"</td><td>"+(mesh?mesh.flood_rx:"—")+"</td><td>"+(mesh?mesh.recv_errors:"—")+
+      "</td><td>"+(core?core.queue_len:"—")+"</td></tr>";
+  }).join("");
 }
 let selfIds={}, selfLoc=null, nbrsRaw="";
 async function pollDebug(){
@@ -496,8 +528,7 @@ async function pollDebug(){
     $("dash-info").textContent=info;
     try{ renderDashTiles(d); }catch(e){}
     try{ renderRail(); }catch(e){}
-    $("dbg-stats").innerHTML=statRow("repeater",d.stats.repeater.packets,d.stats.repeater.core)+
-      statRow("room",d.stats.room.packets,d.stats.room.core);
+    $("dbg-stats").innerHTML=identityRows(d);
     $("dbg-nbrs").textContent=d.neighbors||"(none heard yet)";
     $("msg-warn").style.display=d.companion.client?"":"none";
     nbrsRaw=(d.neighbors==="-none-")?"":d.neighbors;
@@ -1543,8 +1574,7 @@ const SERIES=[["battery","battery (mV)"],["load","CPU load (%)"],["heap","free h
 let lastDebug=null;
 async function loadStatsTab(){
   if(lastDebug){
-    $("stats-live").innerHTML=statRow("repeater",lastDebug.stats.repeater.packets,lastDebug.stats.repeater.core)+
-      statRow("room",lastDebug.stats.room.packets,lastDebug.stats.room.core);
+    $("stats-live").innerHTML=identityRows(lastDebug);
     const c=lastDebug.stats.repeater.core;
     $("stats-node").textContent="battery "+(c?c.battery_mv+" mV":"-")+"   uptime "+lastDebug.uptime_s+
       "s   heap "+Math.round(lastDebug.heap/1024)+"k   psram "+Math.round(lastDebug.psram/1024)+"k";

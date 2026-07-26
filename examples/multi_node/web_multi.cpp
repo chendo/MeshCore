@@ -213,7 +213,27 @@ static esp_err_t handleDebug(httpd_req_t* req) {
     out += ",\"w2\":"; out += String(c ? c->confirmsByWidth(2) : 0);
     out += ",\"w3\":"; out += String(c ? c->confirmsByWidth(3) : 0);
     out += "}"; }
-  out += "},\"nvs\":{";
+  // per-identity state straight from the arbiter — covers the chat identities
+  // too, which have no CLI and so no stock stats of their own
+  out += "},\"ports\":[";
+  { SharedRadioCore* c = multiCore();
+    int n = c ? c->numPorts() : 0;
+    for (int i = 0; i < n; i++) {
+      if (i) out += ',';
+      out += "{\"name\":\""; out += c->portName(i);
+      out += "\",\"active\":"; out += c->portActive(i) ? "true" : "false";
+      out += ",\"rx\":";   out += String(c->portRxCount(i));
+      out += ",\"tx\":";   out += String(c->portTxCount(i));
+      out += ",\"sent\":"; out += String(c->floodsSent(i));
+      out += ",\"heard\":";out += String(c->floodsConfirmed(i));
+      out += ",\"busy\":"; out += String(c->txContentionFor(i));
+      out += ",\"idle_s\":";
+      out += String(c->portEverActive(i) ? c->portIdleMs(i) / 1000 : 0);
+      out += ",\"seen\":"; out += c->portEverActive(i) ? "true" : "false";
+      out += '}';
+    }
+  }
+  out += "],\"nvs\":{";
   { nvs_stats_t st;
     if (nvs_get_stats(nullptr, &st) == ESP_OK) {
       out += "\"used\":"; out += String(st.used_entries);

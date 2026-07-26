@@ -113,6 +113,8 @@ int SharedRadioCore::takeFrame(RadioPort* p, uint8_t* dst, int sz) {
   memcpy(dst, _rx_buf, len);
   p->setLastMetadata(_rx_snr, _rx_rssi);
   _consumed_mask |= bit;
+  _port_rx[idx] = _port_rx[idx] + 1;      // per-identity liveness
+  _port_last_ms[idx] = millis();
   return len;
 }
 
@@ -150,9 +152,14 @@ bool SharedRadioCore::tryStartSend(RadioPort* p, const uint8_t* bytes, int len) 
     _tx_started_ms = millis();
     _tx_completed = false;
     pktLogAdd((int8_t)portIndex(p), bytes, len, 0, 0);
+    int pidx = portIndex(p);
+    if (pidx >= 0 && pidx < MAX_PORTS) {
+      _port_tx[pidx] = _port_tx[pidx] + 1;    // per-identity liveness
+      _port_last_ms[pidx] = millis();
+    }
     // only floods get relayed onward, so only they can be confirmed this way
     uint8_t route = len > 0 ? (bytes[0] & 0x03) : 0xFF;
-    if (route == 0 || route == 1) noteFloodSent(portIndex(p));
+    if (route == 0 || route == 1) noteFloodSent(pidx);
 
     if (_loopback && _num_ports > 1 && len > 0 && len <= MAX_TRANS_UNIT && _lb_count < LB_SLOTS) {
       LbFrame& f = _lb[(_lb_head + _lb_count) % LB_SLOTS];
