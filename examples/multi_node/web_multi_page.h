@@ -1336,6 +1336,13 @@ function renderDashTiles(d){
       (d.radio&&d.radio.refused?" · <span class=err>"+d.radio.refused+" refused</span>":"")+
       (d.radio&&d.radio.recoveries?" · <span class=err>"+d.radio.recoveries+" radio resets</span>":"")+
       (d.radio&&d.radio.stuck?" · <span class=err>"+d.radio.stuck+" stuck TX</span>":""))+
+    tile("Heard by peers",
+      (d.radio&&d.radio.heard&&d.radio.heard.sent
+        ? Math.round(100*d.radio.heard.confirmed/d.radio.heard.sent)+" %" : "-"),
+      d.radio&&d.radio.heard
+        ? d.radio.heard.confirmed+"/"+d.radio.heard.sent+" floods relayed on · "+
+          (d.radio.heard.w2+d.radio.heard.w3)+" certain, "+d.radio.heard.w1+" weak (1-byte)"
+        : "relay confirmations")+
     tile("NVS",(d.nvs&&d.nvs.total?Math.round(100*d.nvs.used/d.nvs.total)+" % used":"-"),
       d.nvs?(d.nvs.free+" entries free"):"identity mirror store")+
     tile("Noise floor",(d.radio&&d.radio.noise?d.radio.noise+" dBm":"-"),"")+

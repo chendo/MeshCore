@@ -158,6 +158,27 @@ public:
   uint32_t msSinceLastRx() const { return _last_rx_ms ? (uint32_t)(millis() - _last_rx_ms) : 0; }
   // how the composition puts a wedged transceiver back together
   void setRadioReinit(void (*fn)()) { _reinit_fn = fn; }
+
+  // ---- relay confirmation --------------------------------------------------
+  // Did anyone actually hear us? When another node relays a flood we sent, it
+  // appends its own hash and re-transmits — so a received packet carrying OUR
+  // hash in its path is proof that a neighbour received our transmission and
+  // passed it on. Give the arbiter each port's public key so it can spot that.
+  //
+  // Matches are counted separately by hash width because they are not equally
+  // trustworthy: a 1-byte hash collides roughly 1 in 256 per hop, so with
+  // several hops per packet a fair number of "confirmations" are coincidence.
+  // A 2-byte match is ~1 in 65536 — effectively certain.
+  void setPortIdentity(int idx, const uint8_t* pub_key) {
+    if (idx < 0 || idx >= MAX_PORTS || pub_key == nullptr) return;
+    memcpy(_port_hash[idx], pub_key, 4);
+    _port_hash_set |= (1u << idx);
+  }
+  uint32_t floodsSent(int idx) const { return (idx >= 0 && idx < MAX_PORTS) ? _flood_sent[idx] : 0; }
+  uint32_t floodsConfirmed(int idx) const { return (idx >= 0 && idx < MAX_PORTS) ? _flood_confirmed[idx] : 0; }
+  uint32_t confirmsByWidth(int bytes) const {   // 1..4
+    return (bytes >= 1 && bytes <= 4) ? _confirm_width[bytes - 1] : 0;
+  }
   uint32_t txContentionFor(int idx) const {
     return (idx >= 0 && idx < MAX_PORTS) ? _tx_contention_port[idx] : 0;
   }
@@ -230,6 +251,20 @@ private:
   uint32_t _tx_started_ms = 0;
   uint32_t _last_rx_ms = 0;
   void (*_reinit_fn)() = nullptr;
+
+  // relay confirmation bookkeeping
+  static const int TX_RING = 16;
+  static const uint32_t CONFIRM_WINDOW_MS = 30000;   // how long a relay may take
+  struct TxRecord { uint32_t t_ms; int8_t port; bool confirmed; };
+  TxRecord _tx_ring[TX_RING];
+  uint8_t  _tx_ring_head = 0, _tx_ring_count = 0;
+  uint8_t  _port_hash[MAX_PORTS][4];
+  uint32_t _port_hash_set = 0;
+  volatile uint32_t _flood_sent[MAX_PORTS] = {0};
+  volatile uint32_t _flood_confirmed[MAX_PORTS] = {0};
+  volatile uint32_t _confirm_width[4] = {0};
+  void noteFloodSent(int port_idx);
+  void checkRelayConfirmation(const uint8_t* frame, int len);
   // How long a silent radio is tolerated before it is assumed wedged. Long
   // enough that a genuinely quiet band never trips it; short enough that the
   // node is not off air for hours.

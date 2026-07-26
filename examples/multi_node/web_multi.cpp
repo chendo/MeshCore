@@ -205,7 +205,14 @@ static esp_err_t handleDebug(httpd_req_t* req) {
     out += ",\"stuck\":"; out += String(c ? c->txStuck() : 0);
     out += ",\"refused\":"; out += String(c ? c->txRefused() : 0);
     out += ",\"recoveries\":"; out += String(c ? c->radioRecoveries() : 0);
-    out += ",\"rx_age_s\":"; out += String(c ? c->msSinceLastRx() / 1000 : 0); }
+    out += ",\"rx_age_s\":"; out += String(c ? c->msSinceLastRx() / 1000 : 0);
+    // relay confirmation: floods we sent that a neighbour demonstrably passed on
+    out += ",\"heard\":{\"sent\":"; out += String(c ? c->floodsSent(0) : 0);
+    out += ",\"confirmed\":"; out += String(c ? c->floodsConfirmed(0) : 0);
+    out += ",\"w1\":"; out += String(c ? c->confirmsByWidth(1) : 0);
+    out += ",\"w2\":"; out += String(c ? c->confirmsByWidth(2) : 0);
+    out += ",\"w3\":"; out += String(c ? c->confirmsByWidth(3) : 0);
+    out += "}"; }
   out += "},\"nvs\":{";
   { nvs_stats_t st;
     if (nvs_get_stats(nullptr, &st) == ESP_OK) {

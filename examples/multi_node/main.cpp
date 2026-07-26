@@ -807,6 +807,19 @@ void setup() {
     if (multiChatSlotEnabled(i)) { multiChatSlotModule(i)->setup(&fs_chat[i], &port_chat[i]); g_slot_started[i] = true; }
   }
 
+  // tell the arbiter each identity's key so it can spot our own hash coming
+  // back in another node's relayed path (see setPortIdentity)
+  { uint8_t pk[32];
+    repeater_module.get_pubkey(pk);  g_core->setPortIdentity(0, pk);
+    room_module.get_pubkey(pk);      g_core->setPortIdentity(1, pk);
+    companion_module.get_pubkey(pk); g_core->setPortIdentity(2, pk);
+    for (int i = 0; i < MULTI_MAX_CHAT_SLOTS; i++) {
+      if (!multiChatSlotEnabled(i)) continue;
+      multiChatSlotModule(i)->get_pubkey(pk);
+      g_core->setPortIdentity(g_slot_port_idx[i], pk);
+    }
+  }
+
   // authoritative last: overrides whatever each identity's own begin() just
   // applied to the shared radio_driver (see "shared-radio ownership" above)
   applyRadioParams(radioStoreGet());

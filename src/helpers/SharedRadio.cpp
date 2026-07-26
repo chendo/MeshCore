@@ -74,6 +74,7 @@ void SharedRadioCore::pump() {
     _consumed_mask = 0;
     _last_rx_ms = millis();
     pktLogAdd(-1, tmp, len, (int8_t)(_rx_snr * 4), (int16_t)_rx_rssi);
+    checkRelayConfirmation(tmp, len);   // did someone relay something we sent?
   } else {
     _rx_len = 0;   // nothing pending
   }
@@ -149,6 +150,9 @@ bool SharedRadioCore::tryStartSend(RadioPort* p, const uint8_t* bytes, int len) 
     _tx_started_ms = millis();
     _tx_completed = false;
     pktLogAdd((int8_t)portIndex(p), bytes, len, 0, 0);
+    // only floods get relayed onward, so only they can be confirmed this way
+    uint8_t route = len > 0 ? (bytes[0] & 0x03) : 0xFF;
+    if (route == 0 || route == 1) noteFloodSent(portIndex(p));
 
     if (_loopback && _num_ports > 1 && len > 0 && len <= MAX_TRANS_UNIT && _lb_count < LB_SLOTS) {
       LbFrame& f = _lb[(_lb_head + _lb_count) % LB_SLOTS];
@@ -208,6 +212,55 @@ void SharedRadioCore::onSendFinishedFor(RadioPort* p) {
     }
     _real->onSendFinished();
     _tx_owner = nullptr;
+  }
+}
+
+// ---- relay confirmation -----------------------------------------------------
+
+void SharedRadioCore::noteFloodSent(int port_idx) {
+  if (port_idx < 0 || port_idx >= MAX_PORTS) return;
+  _flood_sent[port_idx] = _flood_sent[port_idx] + 1;
+  TxRecord& r = _tx_ring[(_tx_ring_head + _tx_ring_count) % TX_RING];
+  r.t_ms = millis();
+  r.port = (int8_t)port_idx;
+  r.confirmed = false;
+  if (_tx_ring_count < TX_RING) _tx_ring_count++;
+  else _tx_ring_head = (_tx_ring_head + 1) % TX_RING;   // overwrite the oldest
+}
+
+// A received flood carrying one of our hashes in its path means a neighbour
+// heard us and relayed it onward.
+void SharedRadioCore::checkRelayConfirmation(const uint8_t* frame, int len) {
+  if (_port_hash_set == 0 || frame == nullptr || len < 2) return;
+
+  uint8_t route = frame[0] & 0x03;
+  int o = 1;
+  if (route == 0 || route == 3) o += 4;          // transport codes
+  if (o >= len) return;
+  uint8_t pl = frame[o++];
+  uint8_t hops = pl & 63;
+  uint8_t sz = (pl >> 6) + 1;                    // 1..4 byte hashes
+  if (hops == 0 || o + hops * sz > len) return;
+
+  for (uint8_t h = 0; h < hops; h++) {
+    const uint8_t* hop = &frame[o + h * sz];
+    for (int p = 0; p < _num_ports; p++) {
+      if ((_port_hash_set & (1u << p)) == 0) continue;
+      if (memcmp(hop, _port_hash[p], sz) != 0) continue;
+
+      // credit the most recent unconfirmed transmit from that port
+      uint32_t now = millis();
+      for (int k = _tx_ring_count - 1; k >= 0; k--) {
+        TxRecord& r = _tx_ring[(_tx_ring_head + k) % TX_RING];
+        if (r.port != p || r.confirmed) continue;
+        if ((uint32_t)(now - r.t_ms) > CONFIRM_WINDOW_MS) break;   // older ones are older still
+        r.confirmed = true;
+        _flood_confirmed[p] = _flood_confirmed[p] + 1;
+        _confirm_width[sz - 1] = _confirm_width[sz - 1] + 1;
+        return;
+      }
+      return;   // our hash is present but no recent send of ours to credit
+    }
   }
 }
 

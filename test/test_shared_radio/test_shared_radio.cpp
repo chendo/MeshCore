@@ -471,6 +471,111 @@ TEST(SharedRadioHealth, NoRecoveryBeforeTheRadioHasEverReceived) {
   EXPECT_EQ(0, g_reinits) << "cannot judge a radio that has never heard anything";
 }
 
+// ------------------------------------------------------- relay confirmation
+
+// Proof that a neighbour actually heard us: when someone relays a flood we
+// sent, they append their own hash and rebroadcast — so the packet coming back
+// past us still carries OUR hash in its path.
+namespace {
+// header byte: route=FLOOD(1), type=TXT_MSG(2) -> (2<<2)|1
+const uint8_t FLOOD_HDR = (2 << 2) | 1;
+// build a flood frame whose path is the given hop hashes (hash width = sz)
+std::vector<uint8_t> floodWithPath(std::vector<std::vector<uint8_t>> hops, uint8_t sz) {
+  std::vector<uint8_t> f{FLOOD_HDR};
+  f.push_back((uint8_t)(((sz - 1) << 6) | hops.size()));
+  for (auto& h : hops) for (uint8_t i = 0; i < sz; i++) f.push_back(h[i]);
+  f.push_back(0xAA);   // payload
+  return f;
+}
+const uint8_t SELF_KEY[32] = {0x30, 0x70, 0x30, 0x70};   // our pubkey prefix
+}
+
+TEST(RelayConfirm, AOneByteMatchConfirmsOurTransmit) {
+  Fixture f;
+  g_fake_millis = 1000;
+  f.core.setPortIdentity(f.ia, SELF_KEY);
+
+  std::vector<uint8_t> ours{FLOOD_HDR, 0x00, 0xAA};
+  ASSERT_TRUE(f.a.startSendRaw(ours.data(), ours.size()));
+  f.a.onSendFinished();
+  EXPECT_EQ(1u, f.core.floodsSent(f.ia));
+  EXPECT_EQ(0u, f.core.floodsConfirmed(f.ia));
+
+  g_fake_millis += 3000;
+  f.deliver(floodWithPath({{0x30}}, 1));          // relayed, carrying our hash
+  EXPECT_EQ(1u, f.core.floodsConfirmed(f.ia)) << "a neighbour passed our packet on";
+  EXPECT_EQ(1u, f.core.confirmsByWidth(1));
+  EXPECT_EQ(0u, f.core.confirmsByWidth(2));
+}
+
+TEST(RelayConfirm, TwoByteMatchesAreCountedSeparately) {
+  Fixture f;
+  g_fake_millis = 1000;
+  f.core.setPortIdentity(f.ia, SELF_KEY);
+  std::vector<uint8_t> ours{FLOOD_HDR, 0x00, 0xAA};
+  f.a.startSendRaw(ours.data(), ours.size());
+  f.a.onSendFinished();
+
+  g_fake_millis += 2000;
+  f.deliver(floodWithPath({{0x30, 0x70}}, 2));
+  EXPECT_EQ(1u, f.core.confirmsByWidth(2)) << "2-byte matches are the trustworthy ones";
+  EXPECT_EQ(0u, f.core.confirmsByWidth(1));
+}
+
+TEST(RelayConfirm, AForeignPathDoesNotCount) {
+  Fixture f;
+  g_fake_millis = 1000;
+  f.core.setPortIdentity(f.ia, SELF_KEY);
+  std::vector<uint8_t> ours{FLOOD_HDR, 0x00, 0xAA};
+  f.a.startSendRaw(ours.data(), ours.size());
+  f.a.onSendFinished();
+
+  g_fake_millis += 2000;
+  f.deliver(floodWithPath({{0x99}, {0xAB}}, 1));   // somebody else's traffic
+  EXPECT_EQ(0u, f.core.floodsConfirmed(f.ia));
+}
+
+TEST(RelayConfirm, EachTransmitIsCreditedOnlyOnce) {
+  Fixture f;
+  g_fake_millis = 1000;
+  f.core.setPortIdentity(f.ia, SELF_KEY);
+  std::vector<uint8_t> ours{FLOOD_HDR, 0x00, 0xAA};
+  f.a.startSendRaw(ours.data(), ours.size());
+  f.a.onSendFinished();
+
+  uint8_t buf[MAX_TRANS_UNIT];
+  for (int i = 0; i < 4; i++) {                    // four neighbours relay it
+    g_fake_millis += 1000;
+    f.deliver(floodWithPath({{0x30}}, 1));
+    take(f.a, buf); take(f.b, buf); take(f.c, buf);
+  }
+  EXPECT_EQ(1u, f.core.floodsConfirmed(f.ia))
+      << "one transmit confirmed, however many nodes echo it";
+}
+
+TEST(RelayConfirm, AnOldTransmitIsNotCreditedByLateTraffic) {
+  Fixture f;
+  g_fake_millis = 1000;
+  f.core.setPortIdentity(f.ia, SELF_KEY);
+  std::vector<uint8_t> ours{FLOOD_HDR, 0x00, 0xAA};
+  f.a.startSendRaw(ours.data(), ours.size());
+  f.a.onSendFinished();
+
+  g_fake_millis += 120000;                         // long past the window
+  f.deliver(floodWithPath({{0x30}}, 1));
+  EXPECT_EQ(0u, f.core.floodsConfirmed(f.ia)) << "too late to be about our packet";
+}
+
+TEST(RelayConfirm, DirectSendsAreNotTrackedOnlyFloods) {
+  Fixture f;
+  g_fake_millis = 1000;
+  f.core.setPortIdentity(f.ia, SELF_KEY);
+  uint8_t direct[] = {(uint8_t)((2 << 2) | 2), 0x00, 0xAA};   // ROUTE_TYPE_DIRECT
+  f.a.startSendRaw(direct, sizeof(direct));
+  f.a.onSendFinished();
+  EXPECT_EQ(0u, f.core.floodsSent(f.ia)) << "only floods get relayed onward";
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
