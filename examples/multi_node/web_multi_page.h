@@ -52,7 +52,14 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
 .relay{display:inline-block;padding:0 5px;border-radius:4px;font-size:11px;font-weight:600;margin-right:6px}
 .relay.sure{background:#14361f;color:#5fd694;border:1px solid #2c6b45}
 .relay.weak{background:#3a2d16;color:#e8c874;border:1px solid #6b5320}
+.relay.direct{background:#12293d;color:#6cb6f0;border:1px solid #2a5a80}
 tr.relayrow td{background:#12211a}
+/* heard straight off the air — no repeater in between. The left edge marks it
+   so a burst of direct traffic is visible without reading every row. */
+tr.directrow td{background:#111c26}
+tr.directrow td:first-child{box-shadow:inset 3px 0 0 #3d7fb3}
+/* filter applies to rows added later too, so it survives live polling */
+tbody.directonly tr:not(.directrow){display:none}
 .tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:8px;margin-bottom:4px}
 .tile{background:#12171d;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
 .tile .val{font-size:21px;font-weight:650;margin-top:2px}
@@ -71,6 +78,7 @@ tr.relayrow td{background:#12211a}
     <button data-t="room">Room</button>
     <button data-t="rep">Repeater</button>
     <button data-t="radio">Radio</button>
+    <button data-t="pkts">Packets</button>
     <button data-t="debug">Debug</button>
     <button data-t="set">Settings</button>
   </nav>
@@ -245,8 +253,14 @@ tr.relayrow td{background:#12211a}
     <th>floods sent</th><th>heard back</th><th>deferred</th><th>flood rx</th><th>rx errors</th><th>pool full</th><th>queue</th></tr></thead>
   <tbody id="dbg-stats"></tbody></table></div></div>
   <div class="card"><h3>Nodes nearby (repeater neighbours)</h3><pre id="dbg-nbrs" class="mut">-</pre></div>
-  <div class="card"><h3>Radio packets <span class="mut" id="pkt-count"></span></h3>
+</div>
+
+<div id="tab-pkts" class="tabpane">
+  <div class="card"><h3>Radio packets <span class="mut" id="pkt-count"></span>
+    <label style="float:right;font-weight:400;font-size:12px;cursor:pointer">
+      <input type="checkbox" id="pkt-direct-only" onchange="applyPktFilter()"> direct only</label></h3>
     <div class="mut" style="font-size:11px;margin-bottom:6px">
+      <span class="relay direct">&#9679; direct</span> heard straight off the air, zero hops — the sender is in RF range of this node ·
       <span class="relay sure">&#8618; relayed</span> a neighbour passed on something we sent (2-byte+ hash — certain) ·
       <span class="relay weak">&#8618; relayed?</span> same, but a 1-byte hash, so ~1 in 256 could be coincidence
     </div>
@@ -660,9 +674,13 @@ function annot(p){
 
   let infoHtml=esc(info);
   if(hops) infoHtml+=(infoHtml?"  |  ":"")+hops+" hop"+(hops>1?"s":"")+" "+hopsHtml(groups);
-  return {src,infoHtml,relay};
+  return {src,infoHtml,relay,hops};
 }
 
+// CSS-driven so rows arriving from the next poll obey it without re-filtering
+function applyPktFilter(){
+  $("pkt-rows").classList.toggle("directonly", $("pkt-direct-only").checked);
+}
 async function pollPkts(){
   try{
     const d=await (await api("/api/multi/packets?after="+lastSeq)).json();
@@ -698,11 +716,21 @@ async function pollPkts(){
           "send timed out before TX-done (radio contention?)</td><td>-</td><td></td><td></td>";
       } else {
         const a=annot(p);
-        // a received packet carrying our own hash = someone relayed us
+        // An empty path means no repeater has appended its hash yet, so this is
+        // the originator's own transmission reaching us over the air. Anything
+        // with hops has been through at least one relay.
         let badge="";
+        if(rx&&a.hops===0){
+          badge+="<span class='relay direct' title=\"zero hops — heard straight from the sender, "+
+            "no repeater in between\">&#9679; direct</span>";
+          tr.className="directrow";
+        }
+        // a received packet carrying our own hash = someone relayed us
         if(rx&&a.relay){
           const sure=a.relay.width>=2;
-          badge="<span class='relay "+(sure?"sure":"weak")+"' title=\""+
+          // can't collide with the direct badge — a relayed packet has hops by
+          // definition, so it is never zero-hop — but append rather than assign
+          badge+="<span class='relay "+(sure?"sure":"weak")+"' title=\""+
             (sure?"a neighbour relayed a packet we sent — "+a.relay.width+"-byte hash match, effectively certain"
                  :"possible relay of our packet — 1-byte hash, ~1 in 256 chance of coincidence")+
             "\">&#8618; relayed "+esc(a.relay.role)+(sure?"":"?")+"</span>";
@@ -1720,10 +1748,10 @@ function cliKey(e){
 // periodic work therefore runs through ONE sequential scheduler: jobs are
 // awaited one at a time, so the poller never has two requests in flight, and
 // nothing runs while the browser tab is hidden. The packet trace polls fast
-// only while the Debug section is on screen.
+// only while the Packets section is on screen.
 const activeTab=()=>document.querySelector("nav button.on").dataset.t;
 const jobs=[
-  {name:"pkts",   fn:pollPkts,     period:()=>activeTab()==="debug"?4000:20000, due:0},
+  {name:"pkts",   fn:pollPkts,     period:()=>activeTab()==="pkts"?4000:20000, due:0},
   {name:"debug",  fn:pollDebug,    period:15000, due:1000},
   {name:"archive",fn:pollArchive,  period:15000, due:5000},
   {name:"nearby", fn:async()=>renderNearby(), period:15000, due:8000},   // local render, no request
