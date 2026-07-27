@@ -26,10 +26,29 @@
 // BATT_CURVE wholesale once a discharge from a full charge has been logged;
 // the shape below 3968 mV is solid and should be kept.
 
-// Highest voltage seen on a completed charge (constant-voltage plateau).
-#define BATT_FULL_MV        4180
-// Fraction of total capacity that sits below 3968 mV, where the measurement
-// starts. From a generic Li-ion curve at 3.97 V; the one modelled number here.
+// Measured constant-voltage plateau of a completed charge: a textbook CC/CV
+// curve that rose at 26 mV/min, tapered, then sat at 4355-4359 mV for 55
+// minutes without drifting. Set just under the band so anything in it is 100%.
+//
+// 4.36 V is NOT a standard 4.20 V LiPo. Either this is a high-voltage (LiHV)
+// cell, which terminate at exactly 4.35 V, or ADC_MULTIPLIER (2.11) reads about
+// 3.8% high and the pack is an ordinary 4.20 V one. Landing within 9 mV of a
+// standard HV spec points at the former, but a multimeter across the terminals
+// is the only way to settle it.
+//
+// It does not affect the percentage either way: both anchors — this plateau and
+// the voltage the node dies at — are measured in the same indicated units, so a
+// systematic scale error cancels out of the ratio. It would only matter for the
+// absolute voltage shown beside the percentage.
+#define BATT_FULL_MV        4350
+
+// Fraction of total capacity below 3968 mV, where the logged discharge starts.
+// The one modelled number here, taken from a generic Li-ion curve at 3.97 V.
+// CAUTION: that generic curve assumes a 4.20 V cell. If this pack really is
+// LiHV, more capacity sits above 3.97 V than it accounts for and the true
+// figure is lower — meaning the percentage reads optimistically in the upper
+// range. Logging one discharge from a full charge replaces this with measured
+// data and removes the estimated segment entirely.
 #define BATT_WINDOW_PCT     73
 
 struct BattPoint { uint16_t mv; uint8_t pct_of_window; };
