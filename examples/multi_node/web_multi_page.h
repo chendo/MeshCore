@@ -112,9 +112,15 @@ tbody.directonly tr:not(.directrow){display:none}
       <button class="sec" style="padding:2px 8px" onclick="copyText($('dash-pubkey').textContent)">copy</button></div>
     <div class="row"><span class="mut" style="width:110px">Radio</span><span id="dash-radio">-</span></div>
   </div>
-  <div class="card"><h3>Nodes nearby <span class="mut" id="nearby-count" style="font-weight:400;font-size:11px"></span></h3>
-    <div style="overflow-x:auto"><table><thead><tr><th>name</th><th>kind</th><th>key</th><th>heard</th><th>last advert</th><th>dist</th></tr></thead>
-    <tbody id="dash-nearby"><tr><td colspan=6 class=mut>listening for adverts...</td></tr></tbody></table></div>
+  <div class="card"><h3>Nodes in radio reach <span class="mut" id="nearby-count" style="font-weight:400;font-size:11px"></span></h3>
+    <div class="mut" style="font-size:11px;margin-bottom:6px">
+      learned from routing paths &mdash; <b>we hear</b> counts frames where the node was the
+      last forwarder (so its SNR is our link to it); <b>hears us</b> counts times it relayed
+      one of ours, and only 2-byte hash matches count &mdash; 1 byte is 1-in-256 and shown as "?"
+    </div>
+    <div style="overflow-x:auto"><table><thead><tr><th>node</th><th>hops</th><th>we hear</th>
+      <th>hears us</th><th>SNR</th><th>relays</th><th>dist</th><th>last</th></tr></thead>
+    <tbody id="dash-nearby"><tr><td colspan=8 class=mut>listening...</td></tr></tbody></table></div>
   </div>
   <div class="card"><h3>Identities <button class="sec" style="float:right;padding:2px 8px" onclick="loadStatsTab()">&#8635;</button>
     <span class="mut" style="font-weight:400;font-size:11px">every identity, from the shared radio itself</span></h3>
@@ -1477,21 +1483,33 @@ function renderDashTiles(d){
 }
 // nodes nearby (System page): contacts ranked by how "close" they are —
 // direct first, then by advert hop depth, then by advert recency
+// The real "nodes nearby": who is within radio reach, from the arbiter's peer
+// table, enriched with names/locations from cached adverts. Relays alone only
+// prove we can hear them; "hears us" is the other, independent direction.
+function peerName(hex){
+  const c=contacts.find(c=>c.prefix.startsWith(hex)||hex.startsWith(c.prefix.slice(0,hex.length)));
+  return c||null;
+}
 function renderNearby(){
-  if(!contacts.length){ return; }
-  const nowS=Math.floor(Date.now()/1000);
-  const sorted=[...contacts].sort((a,b)=>b.lastAdvert-a.lastAdvert);   // most recently heard first
-  const shown=sorted.slice(0,12);
-  $("dash-nearby").innerHTML=shown.map(c=>{
-    const heard=c.outPathLen===0?"<span class=ok>direct</span>":
-      (c.pk in advHops)?(advHops[c.pk]===0?"<span class=ok>direct RF</span>":advHops[c.pk]+" hops"):
-      "<span class=mut>via mesh</span>";
-    const hasLoc=(c.lat||c.lon);
-    return "<tr><td>"+esc(c.name||"?")+"</td><td>"+(KINDS[c.type]||c.type)+"</td><td class=mut>"+
-      c.prefix.slice(0,8)+"</td><td>"+heard+"</td><td>"+age(nowS-c.lastAdvert)+"</td><td>"+
-      (hasLoc&&selfLoc&&(selfLoc[0]||selfLoc[1])?distKm(selfLoc,[c.lat,c.lon])+" km":"-")+"</td></tr>";
+  const peers=(lastDebug&&lastDebug.peers)||[];
+  if(!peers.length){ return; }
+  const rows=[...peers].sort((a,b)=>(b.heard_us-a.heard_us)||(b.direct-a.direct));
+  $("dash-nearby").innerHTML=rows.slice(0,20).map(p=>{
+    const c=peerName(p.h);
+    const nm=c?esc(c.name||"?"):"<span class=mut>"+p.h+"</span>";
+    const dist=(c&&(c.lat||c.lon)&&selfLoc&&(selfLoc[0]||selfLoc[1]))?distKm(selfLoc,[c.lat,c.lon])+" km":"-";
+    // a 1-byte-only entry can never be confirmed, so say so rather than showing 0
+    const hu=p.heard_us>0?"<span class=ok>"+p.heard_us+"</span>":
+             (p.hu1>0?"<span class=mut title='1-byte matches only \u2014 not proof'>"+p.hu1+"?</span>":"-");
+    const hop=p.hops?(p.hops===1?"<span class=ok>1</span>":p.hops):"-";
+    return "<tr><td>"+nm+" <span class=mut style='font-size:10px'>"+p.h+"</span></td><td>"+hop+
+      "</td><td>"+(p.direct||"-")+"</td><td>"+hu+"</td><td>"+
+      (p.snr!==null&&p.snr!==undefined?snrSpan(Math.round(p.snr*4)):"-")+"</td><td class=mut>"+p.relays+
+      "</td><td>"+dist+"</td><td class=mut>"+age(p.direct_age_s!==null&&p.direct_age_s!==undefined?p.direct_age_s:p.age_s)+"</td></tr>";
   }).join("");
-  $("nearby-count").textContent="("+shown.length+" of "+contacts.length+" known — full list in Mesh)";
+  const conf=(lastDebug&&lastDebug.peers_confirmed)||0;
+  $("nearby-count").innerHTML="("+rows.length+" seen \u00b7 <span class=ok>"+conf+
+    " confirmed to hear us</span>)";
 }
 async function loadDash(){
   renderNearby();

@@ -119,11 +119,51 @@ static void saveNeighboursSnapshot() {
   }
 }
 
+// Persist the peer table, but only the nodes that are actually near: one or two
+// hops. Everything further is reachable through the mesh rather than by radio,
+// changes constantly, and would churn the flash for information the routing
+// layer already has. Written as: prefix,width,hops,direct,heard_us,epoch,snr4
+static void savePeersSnapshot() {
+  SharedRadioCore* c = multiCore();
+  if (c == nullptr) return;
+  static uint32_t last_sig = 0;
+
+  // Signature over the near set only, so the file is rewritten when that set
+  // meaningfully changes rather than on every tick.
+  uint32_t sig = 0;
+  int near = 0;
+  for (int i = 0; i < c->numPeers(); i++) {
+    const SharedRadioCore::PeerEntry* p = c->peer(i);
+    if (p == nullptr || p->min_hops == 0 || p->min_hops > 2) continue;
+    near++;
+    sig = sig * 31 + (p->hash[0] << 8) + p->width + (p->heard_us ? 0x1000 : 0);
+  }
+  if (near == 0 || sig == last_sig) return;
+  last_sig = sig;
+
+  File f = multiSysFS()->open("/peers.csv", "w", true);
+  if (!f) return;
+  uint32_t epoch = rtc_clock.getCurrentTime();
+  for (int i = 0; i < c->numPeers(); i++) {
+    const SharedRadioCore::PeerEntry* p = c->peer(i);
+    if (p == nullptr || p->min_hops == 0 || p->min_hops > 2) continue;
+    char hex[8]; hex[0] = 0;
+    for (int b = 0; b < p->width; b++) snprintf(hex + b*2, 3, "%02x", p->hash[b]);
+    int snr4 = p->snr_n ? (int)(p->snr4_sum / (int32_t)p->snr_n) : 0;
+    f.printf("%s,%u,%u,%lu,%lu,%lu,%d\n", hex, (unsigned)p->width, (unsigned)p->min_hops,
+             (unsigned long)p->direct_rx, (unsigned long)p->heard_us,
+             (unsigned long)(epoch - (millis() - p->last_ms) / 1000), snr4);
+  }
+  f.close();
+  s_nbr_writes++;
+}
+
 void multiWebTick() {
   uint32_t now = millis();
   if (now >= s_next_nbr_save_ms) {
     s_next_nbr_save_ms = now + 5 * 60000;
     saveNeighboursSnapshot();
+    savePeersSnapshot();
   }
   if (now < s_next_sample_ms) return;
   s_next_sample_ms = now + 60000;
@@ -249,7 +289,38 @@ static esp_err_t handleDebug(httpd_req_t* req) {
       out += '}';
     }
   }
-  out += "],\"nvs\":{";
+  out += "],\"peers\":[";
+  // Who is in radio reach, from routing paths (see SharedRadioCore peer table).
+  // direct = we heard its transmission; heard_us = it forwarded ours (2-byte
+  // confirmed); hu1 = same at 1 byte, provisional and never a confirmation.
+  { SharedRadioCore* c = multiCore();
+    int n = c ? c->numPeers() : 0;
+    bool first = true;
+    for (int i = 0; i < n; i++) {
+      const SharedRadioCore::PeerEntry* p = c->peer(i);
+      if (p == nullptr || p->relays == 0) continue;
+      if (!first) out += ',';
+      first = false;
+      char hex[8]; hex[0] = 0;
+      for (int b = 0; b < p->width; b++) snprintf(hex + b*2, 3, "%02x", p->hash[b]);
+      out += "{\"h\":\""; out += hex;
+      out += "\",\"w\":"; out += String(p->width);
+      out += ",\"direct\":"; out += String(p->direct_rx);
+      out += ",\"relays\":"; out += String(p->relays);
+      out += ",\"heard_us\":"; out += String(p->heard_us);
+      out += ",\"hu1\":"; out += String(p->heard_us_1b);
+      out += ",\"hops\":"; out += String(p->min_hops);
+      out += ",\"snr\":";
+      out += p->snr_n ? String((p->snr4_sum / (float)p->snr_n) / 4.0f, 1) : String("null");
+      out += ",\"age_s\":"; out += String((millis() - p->last_ms) / 1000);
+      out += ",\"direct_age_s\":";
+      out += p->last_direct_ms ? String((millis() - p->last_direct_ms) / 1000) : String("null");
+      out += '}';
+    }
+  }
+  out += "],\"peers_confirmed\":";
+  { SharedRadioCore* c = multiCore(); out += String(c ? c->confirmedPeerCount() : 0); }
+  out += ",\"nvs\":{";
   { nvs_stats_t st;
     if (nvs_get_stats(nullptr, &st) == ESP_OK) {
       out += "\"used\":"; out += String(st.used_entries);
