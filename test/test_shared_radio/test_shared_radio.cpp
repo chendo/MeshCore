@@ -611,7 +611,10 @@ std::vector<uint8_t> floodWithPath(std::vector<std::vector<uint8_t>> hops, uint8
 const uint8_t SELF_KEY[32] = {0x30, 0x70, 0x30, 0x70};   // our pubkey prefix
 }
 
-TEST(RelayConfirm, AOneByteMatchConfirmsOurTransmit) {
+// A 1-byte hash collides once every 256 packets, so seeing "our" hash in a path
+// at that width is not evidence anyone relayed us. It is tallied, but it must
+// not confirm the transmit.
+TEST(RelayConfirm, AOneByteMatchIsCountedButDoesNotConfirm) {
   Fixture f;
   g_fake_millis = 1000;
   f.core.setPortIdentity(f.ia, SELF_KEY);
@@ -620,12 +623,11 @@ TEST(RelayConfirm, AOneByteMatchConfirmsOurTransmit) {
   ASSERT_TRUE(f.a.startSendRaw(ours.data(), ours.size()));
   f.a.onSendFinished();
   EXPECT_EQ(1u, f.core.floodsSent(f.ia));
-  EXPECT_EQ(0u, f.core.floodsConfirmed(f.ia));
 
   g_fake_millis += 3000;
-  f.deliver(floodWithPath({{0x30}}, 1));          // relayed, carrying our hash
-  EXPECT_EQ(1u, f.core.floodsConfirmed(f.ia)) << "a neighbour passed our packet on";
-  EXPECT_EQ(1u, f.core.confirmsByWidth(1));
+  f.deliver(floodWithPath({{0x30}}, 1));          // 1-byte "match" of our hash
+  EXPECT_EQ(0u, f.core.floodsConfirmed(f.ia)) << "1 byte is a coincidence, not proof";
+  EXPECT_EQ(1u, f.core.confirmsByWidth(1)) << "still tallied for diagnostics";
   EXPECT_EQ(0u, f.core.confirmsByWidth(2));
 }
 
@@ -667,7 +669,7 @@ TEST(RelayConfirm, EachTransmitIsCreditedOnlyOnce) {
   uint8_t buf[MAX_TRANS_UNIT];
   for (int i = 0; i < 4; i++) {                    // four neighbours relay it
     g_fake_millis += 1000;
-    f.deliver(floodWithPath({{0x30}}, 1));
+    f.deliver(floodWithPath({{0x30, 0x70}}, 2));   // 2-byte: a real confirmation
     take(f.a, buf); take(f.b, buf); take(f.c, buf);
   }
   EXPECT_EQ(1u, f.core.floodsConfirmed(f.ia))
@@ -700,4 +702,103 @@ TEST(RelayConfirm, DirectSendsAreNotTrackedOnlyFloods) {
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
+}
+
+// ------------------------------------------------------------------ peer table
+// Every forwarder appends its hash to the END of the path, so position carries
+// meaning: the last entry transmitted the frame we received, and the entry
+// following one of ours received our transmission.
+
+TEST(Peers, TheFinalHopIsANodeWeCanHear) {
+  Fixture f;
+  f.deliver(floodWithPath({{0xAA, 0x01}, {0xBB, 0x02}}, 2));
+
+  ASSERT_EQ(2, f.core.numPeers());
+  const auto* mid = f.core.peer(0);
+  const auto* last = f.core.peer(1);
+  EXPECT_EQ(0u, mid->direct_rx) << "a mid-path hop says nothing about its link to us";
+  EXPECT_EQ(1u, mid->relays);
+  EXPECT_EQ(1u, last->direct_rx) << "the final hop is the one whose radio we heard";
+  EXPECT_EQ(1u, last->snr_n);
+}
+
+TEST(Peers, DistanceComesFromPositionFromTheEnd) {
+  Fixture f;
+  f.deliver(floodWithPath({{0xAA, 1}, {0xBB, 2}, {0xCC, 3}}, 2));
+  ASSERT_EQ(3, f.core.numPeers());
+  EXPECT_EQ(3, f.core.peer(0)->min_hops);
+  EXPECT_EQ(2, f.core.peer(1)->min_hops);
+  EXPECT_EQ(1, f.core.peer(2)->min_hops) << "the last forwarder is one hop away";
+}
+
+TEST(Peers, OnlyATwoByteMatchProvesTheyHeardUs) {
+  Fixture f;
+  f.core.setPortIdentity(f.ia, SELF_KEY);          // 0x30 0x70 ...
+
+  // 2-byte path: ours, then theirs -> they forwarded our transmission
+  f.deliver(floodWithPath({{0x30, 0x70}, {0xBB, 0x02}}, 2));
+  const auto* p = f.core.peer(f.core.numPeers() - 1);
+  EXPECT_EQ(1u, p->heard_us);
+  EXPECT_EQ(0u, p->heard_us_1b);
+  EXPECT_EQ(1, f.core.confirmedPeerCount());
+
+  // same shape at 1 byte must NOT count as a confirmation
+  Fixture g;
+  g.core.setPortIdentity(g.ia, SELF_KEY);
+  g.deliver(floodWithPath({{0x30}, {0xCC}}, 1));
+  const auto* q = g.core.peer(g.core.numPeers() - 1);
+  EXPECT_EQ(0u, q->heard_us) << "1 byte is 1-in-256, not proof";
+  EXPECT_EQ(1u, q->heard_us_1b);
+  EXPECT_EQ(0, g.core.confirmedPeerCount());
+}
+
+TEST(Peers, WeAreNotOurOwnPeer) {
+  Fixture f;
+  f.core.setPortIdentity(f.ia, SELF_KEY);
+  f.deliver(floodWithPath({{0x30, 0x70}, {0xBB, 0x02}}, 2));
+  for (int i = 0; i < f.core.numPeers(); i++) {
+    EXPECT_FALSE(f.core.peer(i)->hash[0] == 0x30 && f.core.peer(i)->hash[1] == 0x70);
+  }
+}
+
+// The originator picks the hash width, so the same node arrives at 1 and 2
+// bytes. A narrower sighting must fold into the entry it uniquely matches
+// rather than creating a phantom second node.
+TEST(Peers, ANarrowerSightingMergesIntoTheKnownNode) {
+  Fixture f;
+  f.deliver(floodWithPath({{0xAB, 0xCD}}, 2));
+  ASSERT_EQ(1, f.core.numPeers());
+  EXPECT_EQ(2, f.core.peer(0)->width);
+
+  f.deliver(floodWithPath({{0xAB}}, 1));           // same node, 1-byte path
+  EXPECT_EQ(1, f.core.numPeers()) << "must not become a second peer";
+  EXPECT_EQ(2u, f.core.peer(0)->direct_rx);
+  EXPECT_EQ(2, f.core.peer(0)->width) << "the wider prefix is kept";
+}
+
+TEST(Peers, AWiderSightingRefinesAKnownPrefix) {
+  Fixture f;
+  f.deliver(floodWithPath({{0xAB}}, 1));
+  ASSERT_EQ(1, f.core.numPeers());
+  EXPECT_EQ(1, f.core.peer(0)->width);
+
+  f.deliver(floodWithPath({{0xAB, 0xCD}}, 2));
+  ASSERT_EQ(1, f.core.numPeers());
+  EXPECT_EQ(2, f.core.peer(0)->width);
+  EXPECT_EQ(0xCD, f.core.peer(0)->hash[1]);
+}
+
+// If a 1-byte prefix matches two known nodes there is no way to tell which one
+// sent it, so it must be attributed to neither.
+TEST(Peers, AnAmbiguousPrefixIsAttributedToNobody) {
+  Fixture f;
+  f.deliver(floodWithPath({{0xAB, 0x11}}, 2));
+  f.deliver(floodWithPath({{0xAB, 0x22}}, 2));
+  ASSERT_EQ(2, f.core.numPeers());
+  uint32_t before0 = f.core.peer(0)->direct_rx, before1 = f.core.peer(1)->direct_rx;
+
+  f.deliver(floodWithPath({{0xAB}}, 1));           // matches both
+  EXPECT_EQ(2, f.core.numPeers()) << "must not invent a third node";
+  EXPECT_EQ(before0, f.core.peer(0)->direct_rx);
+  EXPECT_EQ(before1, f.core.peer(1)->direct_rx);
 }

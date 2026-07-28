@@ -60,6 +60,7 @@ void SharedRadioCore::pump() {
     enqueueRx(tmp, len, _real->getLastSNR(), _real->getLastRSSI(), 0);
     pktLogAdd(-1, tmp, len, (int8_t)(_real->getLastSNR() * 4), (int16_t)_real->getLastRSSI());
     checkRelayConfirmation(tmp, len);   // did someone relay something we sent?
+    notePeersInPath(tmp, len, (int8_t)(_real->getLastSNR() * 4));   // who is in reach?
   }
 
   // RADIO HEALTH WATCHDOG.
@@ -278,12 +279,96 @@ void SharedRadioCore::checkRelayConfirmation(const uint8_t* frame, int len) {
         TxRecord& r = _tx_ring[(_tx_ring_head + k) % TX_RING];
         if (r.port != p || r.confirmed) continue;
         if ((uint32_t)(now - r.t_ms) > CONFIRM_WINDOW_MS) break;   // older ones are older still
-        r.confirmed = true;
-        _flood_confirmed[p] = _flood_confirmed[p] + 1;
+        // A 1-byte hash collides once every 256 packets, so on its own it is
+        // not proof that anyone relayed us. Count it, but only credit the
+        // transmit (and the confirmed total) on a 2-byte-or-wider match.
         _confirm_width[sz - 1] = _confirm_width[sz - 1] + 1;
+        if (sz >= 2) {
+          r.confirmed = true;
+          _flood_confirmed[p] = _flood_confirmed[p] + 1;
+        }
         return;
       }
       return;   // our hash is present but no recent send of ours to credit
+    }
+  }
+}
+
+int SharedRadioCore::findPeer(const uint8_t* hash, uint8_t width) const {
+  int found = -1;
+  for (int i = 0; i < _num_peers; i++) {
+    uint8_t cmp = width < _peers[i].width ? width : _peers[i].width;
+    if (memcmp(hash, _peers[i].hash, cmp) != 0) continue;
+    if (found >= 0) return -2;          // prefix matches several known peers
+    found = i;
+  }
+  return found;
+}
+
+void SharedRadioCore::notePeersInPath(const uint8_t* frame, int len, int8_t snr4) {
+  if (frame == nullptr || len < 2) return;
+
+  uint8_t route = frame[0] & 0x03;
+  int o = 1;
+  if (route == 0 || route == 3) o += 4;          // transport codes
+  if (o >= len) return;
+  uint8_t pl = frame[o++];
+  uint8_t hops = pl & 63;
+  uint8_t sz = (pl >> 6) + 1;
+  if (hops == 0 || sz > 3 || o + hops * sz > len) return;
+
+  uint32_t now = millis();
+  for (uint8_t h = 0; h < hops; h++) {
+    const uint8_t* hop = &frame[o + h * sz];
+
+    // Skip our own hashes: we are not our own peer.
+    bool self = false;
+    for (int p = 0; p < _num_ports && !self; p++) {
+      if ((_port_hash_set & (1u << p)) == 0) continue;
+      if (memcmp(hop, _port_hash[p], sz) == 0) self = true;
+    }
+    if (self) continue;
+
+    int idx = findPeer(hop, sz);
+    if (idx == -2) continue;                     // ambiguous, attribute nothing
+    if (idx < 0) {
+      if (_num_peers >= MAX_PEERS) continue;     // table full; keep what we have
+      idx = _num_peers++;
+      PeerEntry& n = _peers[idx];
+      memset(&n, 0, sizeof(n));
+      memcpy(n.hash, hop, sz);
+      n.width = sz;
+    } else if (sz > _peers[idx].width) {
+      memcpy(_peers[idx].hash, hop, sz);         // a wider sighting refines it
+      _peers[idx].width = sz;
+    }
+
+    PeerEntry& e = _peers[idx];
+    e.relays++;
+    e.last_ms = now;
+
+    // Distance is position from the END: the last forwarder is one hop away.
+    uint8_t dist = (uint8_t)(hops - h);
+    if (e.min_hops == 0 || dist < e.min_hops) e.min_hops = dist;
+
+    if (h + 1 == hops) {          // final hop: this frame came off ITS radio
+      e.direct_rx++;
+      e.last_direct_ms = now;
+      e.snr4_sum += snr4;         // only these sightings describe our link to it
+      e.snr_n++;
+    }
+
+    // Did it forward something WE transmitted? Only the entry immediately
+    // after one of ours proves that. A 1-byte match is 1-in-256 and is kept
+    // apart from the confirmed count.
+    if (h > 0) {
+      const uint8_t* prev = &frame[o + (h - 1) * sz];
+      for (int p = 0; p < _num_ports; p++) {
+        if ((_port_hash_set & (1u << p)) == 0) continue;
+        if (memcmp(prev, _port_hash[p], sz) != 0) continue;
+        if (sz >= 2) e.heard_us++; else e.heard_us_1b++;
+        break;
+      }
     }
   }
 }
