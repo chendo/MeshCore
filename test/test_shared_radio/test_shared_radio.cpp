@@ -802,3 +802,78 @@ TEST(Peers, AnAmbiguousPrefixIsAttributedToNobody) {
   EXPECT_EQ(before0, f.core.peer(0)->direct_rx);
   EXPECT_EQ(before1, f.core.peer(1)->direct_rx);
 }
+
+// ---------------------------------------------------------- advert identity
+namespace {
+const uint8_t ADVERT_HDR = (4 << 2) | 1;   // ADVERT, flood route
+// [hdr][path_len][path][pub 32][ts 4][sig 64][flags][lat 4][lon 4][name]
+std::vector<uint8_t> advert(std::vector<uint8_t> pub, const char* name,
+                            int32_t lat_e6, int32_t lon_e6,
+                            std::vector<std::vector<uint8_t>> hops = {}, uint8_t sz = 2) {
+  std::vector<uint8_t> f{ADVERT_HDR};
+  f.push_back((uint8_t)(((sz - 1) << 6) | hops.size()));
+  for (auto& h : hops) for (uint8_t i = 0; i < sz; i++) f.push_back(h[i]);
+  std::vector<uint8_t> p(100, 0);
+  for (size_t i = 0; i < pub.size() && i < 32; i++) p[i] = pub[i];
+  f.insert(f.end(), p.begin(), p.end());
+  f.push_back(0x10 | 0x80);                                   // has latlon + name
+  for (int i = 0; i < 4; i++) f.push_back((lat_e6 >> (8*i)) & 0xFF);
+  for (int i = 0; i < 4; i++) f.push_back((lon_e6 >> (8*i)) & 0xFF);
+  for (const char* c = name; *c; c++) f.push_back((uint8_t)*c);
+  return f;
+}
+}
+
+TEST(PeerIdentity, ADirectAdvertRegistersANodeThatNeverForwards) {
+  Fixture f;
+  // empty path => we received the originator's own transmission
+  f.deliver(advert({0xDE, 0xAD, 0xBE}, "Leaf Node", -37762516, 144990310));
+
+  ASSERT_EQ(1, f.core.numPeers());
+  const auto* p = f.core.peer(0);
+  EXPECT_EQ(1, p->min_hops) << "an unforwarded advert comes straight off its radio";
+  EXPECT_EQ(1u, p->direct_rx);
+  EXPECT_STREQ("Leaf Node", p->name);
+  EXPECT_EQ(-37762516, p->lat_e6);
+  EXPECT_EQ(144990310, p->lon_e6);
+  EXPECT_EQ(0xDE, p->pub[0]);
+}
+
+TEST(PeerIdentity, AnAdvertNamesANodeAlreadyKnownOnlyAsAHash) {
+  Fixture f;
+  f.deliver(floodWithPath({{0xDE, 0xAD}}, 2));       // seen forwarding, anonymous
+  ASSERT_EQ(1, f.core.numPeers());
+  EXPECT_STREQ("", f.core.peer(0)->name);
+
+  f.deliver(advert({0xDE, 0xAD, 0xBE}, "VIC-Preston", 1, 2));
+  EXPECT_EQ(1, f.core.numPeers()) << "identity attaches to the existing peer";
+  EXPECT_STREQ("VIC-Preston", f.core.peer(0)->name);
+}
+
+TEST(PeerIdentity, ARelayedAdvertPlacesTheOriginatorBeyondItsForwarders) {
+  Fixture f;
+  f.deliver(advert({0x11, 0x22, 0x33}, "Far", 0, 0, {{0xAA, 0x01}}, 2));
+  // originator -> one forwarder -> us
+  const SharedRadioCore::PeerEntry* orig = nullptr;
+  for (int i = 0; i < f.core.numPeers(); i++)
+    if (f.core.peer(i)->hash[0] == 0x11) orig = f.core.peer(i);
+  ASSERT_NE(nullptr, orig);
+  EXPECT_EQ(2, orig->min_hops);
+  EXPECT_EQ(0u, orig->direct_rx) << "we heard the forwarder, not the originator";
+}
+
+TEST(PeerIdentity, DistantNodesDoNotConsumeSlots) {
+  Fixture f;
+  // three forwarders => originator is 4 hops out, past the near cutoff
+  f.deliver(advert({0x99, 0x88, 0x77}, "Distant", 0, 0,
+                   {{0xA1,1},{0xB2,2},{0xC3,3}}, 2));
+  for (int i = 0; i < f.core.numPeers(); i++)
+    EXPECT_NE(0x99, f.core.peer(i)->hash[0]) << "only near nodes earn an entry";
+}
+
+TEST(PeerIdentity, OurOwnAdvertIsIgnored) {
+  Fixture f;
+  f.core.setPortIdentity(f.ia, SELF_KEY);
+  f.deliver(advert({0x30, 0x70, 0x30, 0x70}, "Us", 1, 1));
+  EXPECT_EQ(0, f.core.numPeers());
+}

@@ -240,6 +240,13 @@ public:
     int32_t  snr4_sum;         // running mean of SNR*4, direct sightings only
     uint32_t snr_n;
     uint8_t  min_hops;         // closest distance seen (1 = direct); 0 unknown
+    // Identity, harvested from ADVERTs. The path only ever carries truncated
+    // hashes, so a node stays anonymous until it adverts (or one of its adverts
+    // reaches us) — at which point the pubkey prefix, name and location can be
+    // pinned to it and remembered across reboots.
+    uint8_t  pub[6];           // pubkey prefix; all-zero when still unknown
+    int32_t  lat_e6, lon_e6;   // 0 when not advertised
+    char     name[20];
   };
   int numPeers() const { return _num_peers; }
   const PeerEntry* peer(int i) const {
@@ -367,6 +374,11 @@ private:
   // Walks a received path and updates the peer table. Returns nothing: every
   // conclusion is recorded per-peer, because a path carries several.
   void notePeersInPath(const uint8_t* frame, int len, int8_t snr4);
+  // An ADVERT names its originator outright. Pins identity to the matching peer,
+  // and — when the advert arrived with an empty path, meaning we received the
+  // originator's own transmission — registers a direct peer that may never
+  // forward anything and so would otherwise stay invisible.
+  void noteAdvert(const uint8_t* frame, int len, int8_t snr4);
   // Exactly one entry matching `hash` to min(width, entry width) bytes, or
   // -1 for none and -2 when the prefix is too short to disambiguate.
   int  findPeer(const uint8_t* hash, uint8_t width) const;

@@ -61,6 +61,7 @@ void SharedRadioCore::pump() {
     pktLogAdd(-1, tmp, len, (int8_t)(_real->getLastSNR() * 4), (int16_t)_real->getLastRSSI());
     checkRelayConfirmation(tmp, len);   // did someone relay something we sent?
     notePeersInPath(tmp, len, (int8_t)(_real->getLastSNR() * 4));   // who is in reach?
+    noteAdvert(tmp, len, (int8_t)(_real->getLastSNR() * 4));        // ...and who they are
   }
 
   // RADIO HEALTH WATCHDOG.
@@ -370,6 +371,77 @@ void SharedRadioCore::notePeersInPath(const uint8_t* frame, int len, int8_t snr4
         break;
       }
     }
+  }
+}
+
+void SharedRadioCore::noteAdvert(const uint8_t* frame, int len, int8_t snr4) {
+  if (frame == nullptr || len < 3) return;
+  if (((frame[0] >> 2) & 0x0F) != 4) return;          // PAYLOAD_TYPE_ADVERT
+
+  uint8_t route = frame[0] & 0x03;
+  int o = 1;
+  if (route == 0 || route == 3) o += 4;
+  if (o >= len) return;
+  uint8_t pl = frame[o++];
+  uint8_t hops = pl & 63;
+  uint8_t sz = (pl >> 6) + 1;
+  if (sz > 3 || o + hops * sz > len) return;
+  o += hops * sz;
+
+  // payload: [pub_key 32][timestamp 4][signature 64][app_data]
+  if (o + 100 > len) return;
+  const uint8_t* pub = &frame[o];
+
+  // never record ourselves
+  for (int p = 0; p < _num_ports; p++) {
+    if ((_port_hash_set & (1u << p)) == 0) continue;
+    if (memcmp(pub, _port_hash[p], 4) == 0) return;
+  }
+
+  // An empty path means we received the originator's own transmission, so it is
+  // one hop away. Otherwise it sits beyond the forwarders that did relay it.
+  uint8_t dist = (uint8_t)(hops + 1);
+
+  int idx = findPeer(pub, 3);
+  if (idx == -2) return;                              // ambiguous, leave it alone
+  if (idx < 0) {
+    if (dist > 2 || _num_peers >= MAX_PEERS) return;  // only near nodes are worth a slot
+    idx = _num_peers++;
+    PeerEntry& n = _peers[idx];
+    memset(&n, 0, sizeof(n));
+    memcpy(n.hash, pub, 3);
+    n.width = 3;
+  }
+  PeerEntry& e = _peers[idx];
+  if (e.min_hops == 0 || dist < e.min_hops) e.min_hops = dist;
+  e.last_ms = millis();
+  if (hops == 0) {                                    // heard it on our own radio
+    e.direct_rx++;
+    e.last_direct_ms = e.last_ms;
+    e.snr4_sum += snr4;
+    e.snr_n++;
+  }
+
+  memcpy(e.pub, pub, sizeof(e.pub));
+
+  const uint8_t* ad = &frame[o + 100];
+  int ad_len = len - (o + 100);
+  if (ad_len <= 0) return;
+  uint8_t fl = ad[0];
+  int i = 1;
+  if ((fl & 0x10) && ad_len >= i + 8) {
+    memcpy(&e.lat_e6, &ad[i], 4);
+    memcpy(&e.lon_e6, &ad[i + 4], 4);
+    i += 8;
+  }
+  if (fl & 0x20) i += 2;
+  if (fl & 0x40) i += 2;
+  if ((fl & 0x80) && ad_len > i) {
+    int n = ad_len - i;
+    if (n > (int)sizeof(e.name) - 1) n = sizeof(e.name) - 1;
+    memcpy(e.name, &ad[i], n);
+    e.name[n] = 0;
+    for (int k = 0; k < n; k++) if ((uint8_t)e.name[k] < 0x20) { e.name[k] = 0; break; }
   }
 }
 

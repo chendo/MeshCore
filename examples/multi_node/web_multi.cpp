@@ -150,9 +150,13 @@ static void savePeersSnapshot() {
     char hex[8]; hex[0] = 0;
     for (int b = 0; b < p->width; b++) snprintf(hex + b*2, 3, "%02x", p->hash[b]);
     int snr4 = p->snr_n ? (int)(p->snr4_sum / (int32_t)p->snr_n) : 0;
-    f.printf("%s,%u,%u,%lu,%lu,%lu,%d\n", hex, (unsigned)p->width, (unsigned)p->min_hops,
-             (unsigned long)p->direct_rx, (unsigned long)p->heard_us,
-             (unsigned long)(epoch - (millis() - p->last_ms) / 1000), snr4);
+    char pk[13]; pk[0] = 0;
+    if (p->pub[0] || p->pub[1]) for (int b = 0; b < 6; b++) snprintf(pk + b*2, 3, "%02x", p->pub[b]);
+    // name last: it may contain anything except the newline we split on
+    f.printf("%s,%u,%u,%lu,%lu,%lu,%d,%s,%ld,%ld,%s\n", hex, (unsigned)p->width,
+             (unsigned)p->min_hops, (unsigned long)p->direct_rx, (unsigned long)p->heard_us,
+             (unsigned long)(epoch - (millis() - p->last_ms) / 1000), snr4,
+             pk, (long)p->lat_e6, (long)p->lon_e6, p->name);
   }
   f.close();
   s_nbr_writes++;
@@ -313,6 +317,15 @@ static esp_err_t handleDebug(httpd_req_t* req) {
       out += ",\"snr\":";
       out += p->snr_n ? String((p->snr4_sum / (float)p->snr_n) / 4.0f, 1) : String("null");
       out += ",\"age_s\":"; out += String((millis() - p->last_ms) / 1000);
+      if (p->name[0]) { out += ",\"name\":\""; jsonEscapeAppend(out, p->name); out += '"'; }
+      if (p->pub[0] || p->pub[1]) {
+        char pk[13]; for (int b = 0; b < 6; b++) snprintf(pk + b*2, 3, "%02x", p->pub[b]);
+        out += ",\"pub\":\""; out += pk; out += '"';
+      }
+      if (p->lat_e6 || p->lon_e6) {
+        out += ",\"lat\":"; out += String(p->lat_e6 / 1e6, 6);
+        out += ",\"lon\":"; out += String(p->lon_e6 / 1e6, 6);
+      }
       out += ",\"direct_age_s\":";
       out += p->last_direct_ms ? String((millis() - p->last_direct_ms) / 1000) : String("null");
       out += '}';

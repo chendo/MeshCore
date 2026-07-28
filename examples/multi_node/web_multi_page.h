@@ -943,6 +943,27 @@ async function geoRender(){
     if(haveSelf) L.polyline([selfLoc,p],{color:"#5c6875",weight:1.2,
       dashArray:c.outPathLen===255?"4,6":null}).addTo(g);
   }
+  // Radio neighbours from the peer table, drawn over the contact layer. These
+  // are the nodes we can actually reach by radio rather than through the mesh,
+  // so they get solid links and their own colours: blue = one hop (we have
+  // heard its own transmission), amber = two.
+  const peers=(lastDebug&&lastDebug.peers)||[];
+  for(const p of peers){
+    if(!p.hops||p.hops>2) continue;
+    const id=peerIdent(p);
+    if(!(id.lat||id.lon)) continue;
+    const q=[id.lat,id.lon]; pts.push(q);
+    const one=p.hops===1;
+    const col=one?"#4da3ff":"#e0b34d";
+    const conf=p.heard_us>0?"<br><b>confirmed to hear us</b> ("+p.heard_us+"x)":
+               (p.hu1>0?"<br><span style='color:#8b98a5'>"+p.hu1+" x 1-byte match only \u2014 unconfirmed</span>":"");
+    L.circleMarker(q,{radius:one?9:7,color:col,weight:3,fillOpacity:0.25}).bindPopup(
+      "<b>"+esc(id.name||p.h)+"</b><br>"+p.hops+" hop"+(p.hops>1?"s":"")+
+      " \u00b7 we heard it "+p.direct+"x"+
+      (p.snr!==null&&p.snr!==undefined?"<br>SNR "+p.snr+" dB":"")+conf+
+      (haveSelf?"<br>~"+distKm(selfLoc,q)+" km":"")).addTo(g);
+    if(haveSelf) L.polyline([selfLoc,q],{color:col,weight:one?2.6:1.8,opacity:0.85}).addTo(g);
+  }
   if(pts.length){ geoMap.fitBounds(pts,{padding:[40,40]}); }
   else $("trace-status").textContent="no nodes with a location yet — locations come from adverts";
   setTimeout(()=>geoMap.invalidateSize(),150);
@@ -1486,18 +1507,42 @@ function renderDashTiles(d){
 // The real "nodes nearby": who is within radio reach, from the arbiter's peer
 // table, enriched with names/locations from cached adverts. Relays alone only
 // prove we can hear them; "hears us" is the other, independent direction.
-function peerName(hex){
-  const c=contacts.find(c=>c.prefix.startsWith(hex)||hex.startsWith(c.prefix.slice(0,hex.length)));
-  return c||null;
+// Resolve a peer to an identity. The firmware only learns a name when it
+// happens to catch that node's advert; the browser's contact list is built from
+// every advert the companion has ever synced, so it fills the long tail. Match
+// on the firmware-supplied pubkey first (exact), then fall back to the path
+// hash prefix (which can be as short as one byte, hence the length guard).
+function peerName(p){
+  const hex=typeof p==="string"?p:p.h;
+  const pub=(typeof p==="object"&&p.pub)?p.pub:null;
+  if(pub){
+    const c=contacts.find(c=>c.pk.startsWith(pub)||pub.startsWith(c.prefix));
+    if(c) return c;
+  }
+  if(hex.length>=4){
+    const c=contacts.find(c=>c.prefix.startsWith(hex));
+    if(c) return c;
+  }
+  return null;
+}
+// name/location for a peer, firmware first then the browser's advert cache
+function peerIdent(p){
+  const c=peerName(p);
+  return {
+    name: p.name || (c&&c.name) || "",
+    lat:  (p.lat!==undefined?p.lat:(c?c.lat:0))||0,
+    lon:  (p.lon!==undefined?p.lon:(c?c.lon:0))||0,
+    kind: c?(KINDS[c.type]||"?"):""
+  };
 }
 function renderNearby(){
   const peers=(lastDebug&&lastDebug.peers)||[];
   if(!peers.length){ return; }
   const rows=[...peers].sort((a,b)=>(b.heard_us-a.heard_us)||(b.direct-a.direct));
   $("dash-nearby").innerHTML=rows.slice(0,20).map(p=>{
-    const c=peerName(p.h);
-    const nm=c?esc(c.name||"?"):"<span class=mut>"+p.h+"</span>";
-    const dist=(c&&(c.lat||c.lon)&&selfLoc&&(selfLoc[0]||selfLoc[1]))?distKm(selfLoc,[c.lat,c.lon])+" km":"-";
+    const id=peerIdent(p);
+    const nm=id.name?esc(id.name):"<span class=mut>"+p.h+"</span>";
+    const dist=((id.lat||id.lon)&&selfLoc&&(selfLoc[0]||selfLoc[1]))?distKm(selfLoc,[id.lat,id.lon])+" km":"-";
     // a 1-byte-only entry can never be confirmed, so say so rather than showing 0
     const hu=p.heard_us>0?"<span class=ok>"+p.heard_us+"</span>":
              (p.hu1>0?"<span class=mut title='1-byte matches only \u2014 not proof'>"+p.hu1+"?</span>":"-");
