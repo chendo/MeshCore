@@ -44,6 +44,15 @@ public:
 
   void onMessageRecv(const ContactInfo& from, mesh::Packet* pkt, uint32_t sender_timestamp,
                      const char* text) override {
+    // Anyone who actually talks to us has earned their slot. The stock eviction
+    // picks the oldest non-favourite by lastmod, and lastmod is refreshed by
+    // adverts — so without this, a client who messaged once and then went quiet
+    // is evicted ahead of a repeater that adverts every hour and will never
+    // message us at all. Marking them favourite pins them.
+    if (diagEnabled()) {
+      ContactInfo* c = lookupContactByPubKey(from.id.pub_key, PUB_KEY_SIZE);
+      if (c != nullptr) c->flags |= 0x01;          // favourite: never auto-evicted
+    }
     char reply[DIAG_REPLY_MAX];
     if (diagEnabled() && diagBuildReply(text, pkt, getRTCClock(), reply, sizeof(reply))) {
       uint32_t ack, timeout;
@@ -51,6 +60,23 @@ public:
       return;
     }
     CompanionMesh::onMessageRecv(from, pkt, sender_timestamp, text);
+  }
+
+  // Only chat clients are worth a contact slot on a diagnostics identity.
+  // Repeaters advert every 47-68 minutes and will never send us a message, so
+  // auto-adding them does nothing except consume the table and crowd out the
+  // users the service exists for — 46 of 46 contacts were repeaters before this.
+  bool shouldAutoAddContactType(uint8_t contact_type) const override {
+    if (!diagEnabled()) return CompanionMesh::shouldAutoAddContactType(contact_type);
+    return contact_type == ADV_TYPE_CHAT;
+  }
+
+  // With the table restricted to chat clients, recycling the least recently
+  // active one is the right call when it fills: those that have messaged us are
+  // pinned above, so what gets dropped is a client that only ever adverted.
+  bool shouldOverwriteWhenFull() const override {
+    if (!diagEnabled()) return CompanionMesh::shouldOverwriteWhenFull();
+    return true;
   }
 };
 
