@@ -18,6 +18,7 @@
 #undef MyMesh
 
 #include "identity_module.h"
+#include "diag_service.h"
 #include "identity_backup.h"
 #include "multi_web.h"
 #include <target.h>
@@ -29,6 +30,29 @@
 #endif
 
 #include "mux_serial.h"
+
+// The main chat identity answers the same public "!" commands as the optional
+// slots, so the diagnostics service works without enabling an extra identity.
+// A recognised command is answered and NOT queued: the responder has dealt with
+// it, and a paired phone should not buzz for every stranger's ping. Anything
+// else falls through untouched, so normal messaging is unaffected.
+class DiagCompanionMesh : public CompanionMesh {
+public:
+  DiagCompanionMesh(mesh::Radio& radio, mesh::RNG& rng, mesh::RTCClock& rtc,
+                    SimpleMeshTables& tables, DataStore& store)
+    : CompanionMesh(radio, rng, rtc, tables, store, NULL) {}
+
+  void onMessageRecv(const ContactInfo& from, mesh::Packet* pkt, uint32_t sender_timestamp,
+                     const char* text) override {
+    char reply[DIAG_REPLY_MAX];
+    if (diagEnabled() && diagBuildReply(text, pkt, getRTCClock(), reply, sizeof(reply))) {
+      uint32_t ack, timeout;
+      sendMessage(from, getRTCClock()->getCurrentTimeUnique(), 0, reply, ack, timeout);
+      return;
+    }
+    CompanionMesh::onMessageRecv(from, pkt, sender_timestamp, text);
+  }
+};
 
 static CompanionMesh*   g_comp = nullptr;
 static StdRNG           comp_rng;
@@ -43,7 +67,7 @@ static void comp_setup(MultiFS* fs, mesh::Radio* port) {
   comp_store = new DataStore(*fs, rtc_clock);
   comp_serial.init(40 * 1024);          // response buffer (PSRAM) — fits a full contact sync
   comp_web_mutex = xSemaphoreCreateMutex();
-  g_comp = new CompanionMesh(*port, comp_rng, rtc_clock, comp_tables, *comp_store, NULL);
+  g_comp = new DiagCompanionMesh(*port, comp_rng, rtc_clock, comp_tables, *comp_store);
   // The companion loads/creates its identity inside begin() (via DataStore),
   // so we can't intervene mid-flight: instead pre-heal the file from the NVS
   // mirror if it's missing, and mirror whatever it ends up using afterwards.
