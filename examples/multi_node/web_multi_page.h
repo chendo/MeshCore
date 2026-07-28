@@ -1579,7 +1579,10 @@ function renderNearby(){
   renderGps();
   const peers=(lastDebug&&lastDebug.peers)||[];
   if(!peers.length){ return; }
-  const rows=[...peers].sort((a,b)=>(b.heard_us-a.heard_us)||(b.direct-a.direct));
+  // Ordered by how many of their transmissions we have actually received, which
+  // is the honest measure of "in reach" — relays only prove they are busy, and
+  // heard-us is the opposite direction of the link.
+  const rows=[...peers].sort((a,b)=>(b.direct-a.direct)||(b.heard_us-a.heard_us)||(b.relays-a.relays));
   $("dash-nearby").innerHTML=rows.slice(0,20).map(p=>{
     const id=peerIdent(p);
     const nm=id.name?esc(id.name):"<span class=mut>"+p.h+"</span>";

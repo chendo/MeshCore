@@ -31,6 +31,7 @@ uint32_t multiPortPoolFull(int port_idx);
 int multiGpsStatusJson(char* out, size_t cap);
 // "GPS" / "unset ..." — where the RTC was last set from
 const char* multiClockSource();
+uint32_t multiClockSyncedAgo();   // seconds since the last successful sync; 0 = never
 void multiGetRadioParams(float* freq, float* bw, uint8_t* sf, uint8_t* cr);
 namespace fs { class FS; }
 fs::FS* multiSysFS();   // composition prefs area of the shared partition

@@ -214,6 +214,31 @@ static uint32_t g_gps_search_start_ms = 0;           // when the current hunt be
 static uint32_t g_gps_skips_low_batt = 0;
 static const char* g_gps_last_result = "not attempted yet";
 
+// ---- clock source, shared by GPS and NTP ------------------------------------
+// Both discipline the same RTC, so which one last set it — and when — has to be
+// tracked in one place. Anything reporting the time (the panel, the public
+// !time responder) needs to say where it came from and how stale that is; a
+// clock nobody has checked in a day means something different from one checked
+// a minute ago, even though both read plausibly.
+static const char* g_clock_src = "unset";       // "GPS" | "NTP" | "unset"
+static uint32_t g_clock_last_epoch = 0;         // epoch AT the last successful sync
+static uint32_t g_clock_last_ms = 0;            // millis() at that moment
+
+// ---- NTP -------------------------------------------------------------------
+// The GPS receiver has never once achieved a fix on this node, while WiFi is up
+// essentially all the time, so NTP is the primary source where it is available
+// and GPS is the fallback for a deployment with no network. SNTP itself only
+// sets the ESP32 SYSTEM clock; MeshCore timestamps everything from rtc_clock,
+// so the value has to be copied across explicitly — and routed through the same
+// drift bookkeeping as GPS so the crystal's error stays measurable.
+static const uint32_t NTP_RETRY_MS = 15000;      // while waiting for a first answer
+static uint32_t g_ntp_interval_h = 6;
+static uint32_t g_ntp_next_ms = 20000;           // first attempt shortly after boot
+static bool     g_ntp_started = false;
+static uint32_t g_ntp_syncs = 0;
+static const char* g_ntp_last_result = "not attempted yet";
+static char g_ntp_server[64] = "pool.ntp.org";   // overridable: some LANs block outbound NTP
+
 // ---- clock drift history ----------------------------------------------------
 // Every GPS sync measures how far the RTC had wandered since the previous one.
 // Kept in RTC slow memory: it survives OTA/software reboots (NOT a power cycle)
@@ -267,6 +292,48 @@ static void formatEpochUtc(uint32_t epoch, char* out, size_t cap) {
            tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
 }
 
+static void ntpSyncTick() {
+  if (WiFi.status() != WL_CONNECTED) {
+    if (g_ntp_started) { g_ntp_started = false; g_ntp_last_result = "waiting for wifi"; }
+    return;
+  }
+  uint32_t now = millis();
+  if (!g_ntp_started) {
+    // Start (or restart after a reconnect) the SNTP client. Two public fallbacks
+    // behind the configured server so a single unreachable host isn't fatal.
+    configTzTime("UTC0", g_ntp_server, "time.cloudflare.com", "time.google.com");
+    g_ntp_started = true;
+    g_ntp_last_result = "querying...";
+    g_ntp_next_ms = now + NTP_RETRY_MS;
+    return;
+  }
+  if (now < g_ntp_next_ms) return;
+
+  time_t sys = time(nullptr);
+  if (sys < 1700000000L) {          // SNTP hasn't answered yet (or at all)
+    g_ntp_last_result = "no answer yet";
+    g_ntp_next_ms = now + NTP_RETRY_MS;
+    return;
+  }
+
+  // measure the RTC's error BEFORE correcting it, exactly as the GPS path does,
+  // so drift stays measurable whichever source disciplined it last
+  uint32_t before = rtc_clock.getCurrentTime();
+  int32_t offset = (int32_t)((uint32_t)sys - before);
+  uint32_t elapsed = g_clock_last_epoch ? ((uint32_t)sys - g_clock_last_epoch) : 0;
+  if (offset != 0 || elapsed == 0) driftRecord((uint32_t)sys, offset, elapsed);
+
+  rtc_clock.setCurrentTime((uint32_t)sys);
+  g_clock_src = "NTP";
+  g_clock_last_epoch = (uint32_t)sys;
+  g_clock_last_ms = now;
+  g_ntp_syncs++;
+  g_ntp_last_result = "synced";
+  Serial.printf("[ntp] clock synced to %lu (RTC was %+ld s out)\n",
+                (unsigned long)sys, (long)offset);
+  g_ntp_next_ms = now + g_ntp_interval_h * 3600000UL;
+}
+
 static void gpsSyncStart() {
   gpsPower(true);
   g_gps_deadline_ms = millis() + GPS_FIX_TIMEOUT_MS;
@@ -301,11 +368,14 @@ static void gpsSyncTick() {
       // the interval since the last sync, is the crystal's real drift rate
       uint32_t before = rtc_clock.getCurrentTime();
       int32_t offset = (int32_t)((uint32_t)ts - before);
-      uint32_t elapsed = g_gps_last_sync_epoch ? ((uint32_t)ts - g_gps_last_sync_epoch) : 0;
+      uint32_t elapsed = g_clock_last_epoch ? ((uint32_t)ts - g_clock_last_epoch) : 0;
       driftRecord((uint32_t)ts, offset, elapsed);
 
       rtc_clock.setCurrentTime((uint32_t)ts);
       g_gps_last_sync_epoch = (uint32_t)ts;
+      g_clock_src = "GPS";
+      g_clock_last_epoch = (uint32_t)ts;
+      g_clock_last_ms = millis();
       g_gps_last_result = "synced from GPS";
       if (elapsed) {
         Serial.printf("[gps] clock synced to %lu (RTC was %+ld s over %lu s = %.1f ppm)\n",
@@ -488,6 +558,16 @@ public:
       return;
     }
     // public diagnostics responder on the chat identities (see diag_service.h)
+    if (strncmp(command, "set ntp ", 8) == 0) {
+      strncpy(g_ntp_server, command + 8, sizeof(g_ntp_server) - 1);
+      g_ntp_server[sizeof(g_ntp_server) - 1] = 0;
+      g_wifi_nvs.begin("multiwifi", false);
+      g_wifi_nvs.putString("ntp", g_ntp_server);
+      g_wifi_nvs.end();
+      g_ntp_started = false;            // restart the client against the new host
+      snprintf(reply, reply_size, "OK - ntp server=%s (re-querying now)", g_ntp_server);
+      return;
+    }
     if (strncmp(command, "set diag ", 9) == 0) {
       bool on = (strncmp(command + 9, "on", 2) == 0);
       diagSetEnabled(on);
@@ -669,7 +749,8 @@ int multiGpsStatusJson(char* out, size_t cap) {
     "{\"enabled\":%s,\"powered\":%s,\"lock\":%s,\"sats\":%ld,"
     "\"every_h\":%lu,\"next_s\":%lu,\"last_sync\":%lu,\"syncs\":%lu,"
     "\"skips_low_batt\":%lu,\"drift_ppm\":%.2f,\"searching_s\":%lu,\"state\":\"%s\","
-    "\"clock_source\":\"%s\",\"epoch\":%lu",
+    "\"clock_source\":\"%s\",\"epoch\":%lu,"
+    "\"synced_ago_s\":%lu,\"ntp_server\":\"%s\",\"ntp_syncs\":%lu,\"ntp_state\":\"%s\"",
     g_gps_sync_hours > 0 ? "true" : "false",
     powered ? "true" : "false",
     valid ? "true" : "false",
@@ -679,8 +760,10 @@ int multiGpsStatusJson(char* out, size_t cap) {
     (unsigned long)g_gps_skips_low_batt, (double)ppm,
     (unsigned long)(g_gps_search_start_ms ? (now - g_gps_search_start_ms) / 1000 : 0),
     g_gps_last_result,
-    g_gps_last_sync_epoch ? "gps" : "manual/unset",
-    (unsigned long)rtc_clock.getCurrentTime());
+    g_clock_src,
+    (unsigned long)rtc_clock.getCurrentTime(),
+    (unsigned long)multiClockSyncedAgo(), g_ntp_server,
+    (unsigned long)g_ntp_syncs, g_ntp_last_result);
 
   if (valid && n > 0 && (size_t)n < cap) {
     n += snprintf(out + n, cap - n, ",\"lat\":%.6f,\"lon\":%.6f,\"alt\":%ld",
@@ -691,8 +774,11 @@ int multiGpsStatusJson(char* out, size_t cap) {
 }
 
 // Where the clock last came from, for anything that needs to say so out loud.
-const char* multiClockSource() {
-  return g_gps_last_sync_epoch ? "GPS" : "unset (never disciplined)";
+const char* multiClockSource() { return g_clock_src; }
+// Seconds since that sync; 0 means it has never been disciplined at all.
+uint32_t multiClockSyncedAgo() {
+  if (g_clock_last_ms == 0) return 0;
+  return (uint32_t)((millis() - g_clock_last_ms) / 1000);
 }
 
 // accessors for the unified web panel (web_multi.cpp)
@@ -1038,6 +1124,9 @@ void setup() {
 
   g_wifi_nvs.begin("multiwifi", true);
   g_gps_sync_hours = g_wifi_nvs.getUInt("gpssync", 4);   // GPS clock discipline interval
+  { String n = g_wifi_nvs.getString("ntp", "");
+    if (n.length() > 0) { strncpy(g_ntp_server, n.c_str(), sizeof(g_ntp_server) - 1);
+                          g_ntp_server[sizeof(g_ntp_server) - 1] = 0; } }
   g_wifi_nvs.end();
   driftInit();
 
@@ -1126,7 +1215,8 @@ void loop() {
   serviceConsoleRequest();        // run web/serial commands in THIS task, not the server's
   serviceDeferredCall();          // ...and web reads of live mesh state, likewise
   applySlotRequests();            // hot enable/disable of chat identities
-  gpsSyncTick();                  // scheduled GPS clock discipline
+  gpsSyncTick();                  // scheduled GPS clock discipline (fallback)
+  ntpSyncTick();                  // ...and NTP, which is primary when wifi is up
   multiWebTick();                 // stats history sampler (unified panel)
   serviceSerial();
 

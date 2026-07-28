@@ -65,8 +65,19 @@ bool diagBuildReply(const char* text, mesh::Packet* pkt, mesh::RTCClock* rtc,
     uint32_t now = rtc ? rtc->getCurrentTime() : 0;
     char utc[24];
     fmtUtc(now, utc, sizeof(utc));
-    snprintf(reply, reply_cap, "%s (epoch %lu), clock from %s",
-             utc, (unsigned long)now, multiClockSource());
+    uint32_t ago = multiClockSyncedAgo();
+    // Staleness matters as much as the value: a clock nobody has checked in a
+    // day means something different from one checked a minute ago, and both
+    // read plausibly. Say so, and say plainly when it was never set at all.
+    if (ago == 0) {
+      snprintf(reply, reply_cap, "%s -- WARNING: clock never disciplined, treat as unreliable", utc);
+    } else if (ago < 3600) {
+      snprintf(reply, reply_cap, "%s, set from %s %lum ago", utc, multiClockSource(),
+               (unsigned long)(ago / 60));
+    } else {
+      snprintf(reply, reply_cap, "%s, set from %s %luh %lum ago", utc, multiClockSource(),
+               (unsigned long)(ago / 3600), (unsigned long)((ago % 3600) / 60));
+    }
     return true;
   }
 
