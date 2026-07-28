@@ -34,6 +34,7 @@
 #endif
 
 class MicroNMEALocationProvider : public LocationProvider {
+    uint32_t _raw_bytes = 0;   // chars read off the GPS UART since boot
     char _nmeaBuffer[100];
     MicroNMEA nmea;
     mesh::RTCClock* _clock;
@@ -120,6 +121,7 @@ public :
         return alt;
     }
     long satellitesCount() override { return nmea.getNumSatellites(); }
+    uint32_t rawBytesRx() const override { return _raw_bytes; }
     bool isValid() override { return nmea.isValid(); }
 
     long getTimestamp() override { 
@@ -135,6 +137,7 @@ public :
 
         while (_gps_serial->available()) {
             char c = _gps_serial->read();
+            _raw_bytes++;
             #ifdef GPS_NMEA_DEBUG
             Serial.print(c);
             #endif

@@ -278,6 +278,20 @@ static float driftPpm() {
   return (float)s.offset_s * 1000000.0f / (float)s.elapsed_s;
 }
 
+// The M5 has a physical GPS slide switch on its side wired to PIN_GPS_SWITCH.
+// The variant configures the pin as an input and then never reads it, so the
+// firmware has been blind to it: with the switch off the module is dead at the
+// hardware level and no amount of software enabling brings it back. That is
+// indistinguishable from "no sky view" unless the pin is checked — the M1
+// variant reads the same switch and documents HIGH as ON, so follow that.
+static bool gpsSwitchOn() {
+#ifdef PIN_GPS_SWITCH
+  return digitalRead(PIN_GPS_SWITCH) == HIGH;
+#else
+  return true;      // no switch on this board: nothing to veto
+#endif
+}
+
 static void gpsPower(bool on) {
   sensors.setSettingValue("gps", on ? "1" : "0");
 }
@@ -343,6 +357,18 @@ static void gpsSyncStart() {
 
 static void gpsSyncTick() {
   uint32_t now = millis();
+
+  if (!gpsSwitchOn()) {
+    // Hardware switch is off. Nothing can be received, so do not sit there
+    // burning receiver current pretending to search.
+    if (g_gps_deadline_ms != 0) {
+      gpsPower(false);
+      g_gps_deadline_ms = 0;
+      g_gps_search_start_ms = 0;
+    }
+    g_gps_last_result = "hardware switch is OFF";
+    return;
+  }
 
   if (g_gps_deadline_ms == 0) {                       // idle: is a sync due?
     if (g_gps_sync_hours > 0 && now >= g_gps_next_ms) {
@@ -746,7 +772,7 @@ int multiGpsStatusJson(char* out, size_t cap) {
   float ppm = driftPpm();
 
   int n = snprintf(out, cap,
-    "{\"enabled\":%s,\"powered\":%s,\"lock\":%s,\"sats\":%ld,"
+    "{\"enabled\":%s,\"powered\":%s,\"lock\":%s,\"sats\":%ld,\"switch_on\":%s,\"rx_bytes\":%lu,"
     "\"every_h\":%lu,\"next_s\":%lu,\"last_sync\":%lu,\"syncs\":%lu,"
     "\"skips_low_batt\":%lu,\"drift_ppm\":%.2f,\"searching_s\":%lu,\"state\":\"%s\","
     "\"clock_source\":\"%s\",\"epoch\":%lu,"
@@ -755,6 +781,8 @@ int multiGpsStatusJson(char* out, size_t cap) {
     powered ? "true" : "false",
     valid ? "true" : "false",
     sats,
+    gpsSwitchOn() ? "true" : "false",
+    (unsigned long)(gps ? gps->rawBytesRx() : 0),
     (unsigned long)g_gps_sync_hours, (unsigned long)next_s,
     (unsigned long)g_gps_last_sync_epoch, (unsigned long)g_drift_count,
     (unsigned long)g_gps_skips_low_batt, (double)ppm,
