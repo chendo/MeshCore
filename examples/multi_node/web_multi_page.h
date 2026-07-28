@@ -1516,8 +1516,10 @@ function renderDashTiles(d){
 function renderGps(){
   const g=lastDebug&&lastDebug.gps;
   if(!g){ return; }
+  const hunting=g.searching_s?(" for "+age(g.searching_s)):"";
   const lock=g.lock?"<span class=ok>fix</span>":
-             (g.powered?"<span style='color:#e0b34d'>searching</span>":"<span class=mut>idle (powered down)</span>");
+             (g.powered?"<span style='color:#e0b34d'>searching</span>"+hunting
+                       :"<span class=mut>idle (powered down)</span>");
   const sats=g.sats>0?g.sats:0;
   const bars=(n)=>{ let h=""; for(let i=1;i<=8;i++)
       h+="<span style='display:inline-block;width:4px;margin-right:2px;height:"+(4+i*1.4)+

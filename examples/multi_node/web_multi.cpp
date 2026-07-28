@@ -574,6 +574,12 @@ static esp_err_t handleCompArchive(httpd_req_t* req) {
 
 static esp_err_t handlePage(httpd_req_t* req) {
   httpd_resp_set_type(req, "text/html; charset=utf-8");
+  // The page ships as one file with the JS inline, so a cached copy means a
+  // browser keeps running the PREVIOUS firmware's panel after an OTA — new
+  // fields silently never appear, and the only clue is that nothing renders.
+  // No validators are served, so a browser is free to heuristically cache a
+  // bare 200 indefinitely. Say no.
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
   return httpd_resp_send(req, MULTI_PAGE, HTTPD_RESP_USE_STRLEN);
 }
 

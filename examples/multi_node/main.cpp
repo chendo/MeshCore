@@ -196,13 +196,20 @@ static RealTxPower g_txpwr;
 // of GPS current every SYNC_HOURS, which is negligible, and the node's clock
 // stays accurate enough to be useful to its peers (every advert it sends
 // carries this timestamp).
-static const uint32_t GPS_FIX_TIMEOUT_MS = 150000;   // give up on a cold fix
+static const uint32_t GPS_FIX_TIMEOUT_MS = 150000;   // one hunting window
+// While the pack is above GPS_MIN_BATT_MV the receiver STAYS ON and keeps
+// hunting across windows instead of giving up for hours. A cold fix indoors,
+// or under cover, routinely takes far longer than a single window — abandoning
+// after one is why this node never once managed to discipline its clock. The
+// battery gate still applies on every window, so a discharging pack ends the
+// hunt rather than being drained by it.
 static const uint16_t GPS_MIN_BATT_MV = 4000;        // don't spend charge on a sync when low
 static const uint32_t GPS_BATT_RETRY_MS = 1800000;   // re-check battery in 30 min
 static uint32_t g_gps_sync_hours = 4;                // 0 = never
 static uint32_t g_gps_next_ms = 60000;               // first attempt a minute after boot
 static uint32_t g_gps_deadline_ms = 0;               // non-zero while GPS is powered for a sync
 static uint32_t g_gps_last_sync_epoch = 0;
+static uint32_t g_gps_search_start_ms = 0;           // when the current hunt began
 static uint32_t g_gps_skips_low_batt = 0;
 static const char* g_gps_last_result = "not attempted yet";
 
@@ -262,6 +269,7 @@ static void formatEpochUtc(uint32_t epoch, char* out, size_t cap) {
 static void gpsSyncStart() {
   gpsPower(true);
   g_gps_deadline_ms = millis() + GPS_FIX_TIMEOUT_MS;
+  g_gps_search_start_ms = millis();
   g_gps_last_result = "acquiring fix...";
 }
 
@@ -308,17 +316,28 @@ static void gpsSyncTick() {
       }
       gpsPower(false);
       g_gps_deadline_ms = 0;
+      g_gps_search_start_ms = 0;
       g_gps_next_ms = now + g_gps_sync_hours * 3600000UL;
       return;
     }
   }
 
-  if (now >= g_gps_deadline_ms) {                     // no fix in time
-    g_gps_last_result = "no fix before timeout";
-    Serial.println("[gps] no fix before timeout, powering GPS down");
+  if (now >= g_gps_deadline_ms) {                     // window elapsed, still no fix
+    uint16_t mv = board.getBattMilliVolts();
+    if (mv == 0 || mv >= GPS_MIN_BATT_MV) {
+      // Power to spare: stay on and keep hunting. Only the battery ends this.
+      g_gps_deadline_ms = now + GPS_FIX_TIMEOUT_MS;
+      g_gps_last_result = "searching (powered, battery ok)";
+      return;
+    }
+    g_gps_skips_low_batt++;
+    g_gps_last_result = "gave up: battery fell below threshold";
+    Serial.printf("[gps] battery %umV below threshold after %lus of searching, powering down\n",
+                  (unsigned)mv, (unsigned long)((now - g_gps_search_start_ms) / 1000));
     gpsPower(false);
     g_gps_deadline_ms = 0;
-    g_gps_next_ms = now + (g_gps_sync_hours > 0 ? g_gps_sync_hours * 3600000UL : 3600000UL);
+    g_gps_search_start_ms = 0;
+    g_gps_next_ms = now + GPS_BATT_RETRY_MS;
   }
 }
 
@@ -635,7 +654,7 @@ int multiGpsStatusJson(char* out, size_t cap) {
   int n = snprintf(out, cap,
     "{\"enabled\":%s,\"powered\":%s,\"lock\":%s,\"sats\":%ld,"
     "\"every_h\":%lu,\"next_s\":%lu,\"last_sync\":%lu,\"syncs\":%lu,"
-    "\"skips_low_batt\":%lu,\"drift_ppm\":%.2f,\"state\":\"%s\","
+    "\"skips_low_batt\":%lu,\"drift_ppm\":%.2f,\"searching_s\":%lu,\"state\":\"%s\","
     "\"clock_source\":\"%s\",\"epoch\":%lu",
     g_gps_sync_hours > 0 ? "true" : "false",
     powered ? "true" : "false",
@@ -644,6 +663,7 @@ int multiGpsStatusJson(char* out, size_t cap) {
     (unsigned long)g_gps_sync_hours, (unsigned long)next_s,
     (unsigned long)g_gps_last_sync_epoch, (unsigned long)g_drift_count,
     (unsigned long)g_gps_skips_low_batt, (double)ppm,
+    (unsigned long)(g_gps_search_start_ms ? (now - g_gps_search_start_ms) / 1000 : 0),
     g_gps_last_result,
     g_gps_last_sync_epoch ? "gps" : "manual/unset",
     (unsigned long)rtc_clock.getCurrentTime());
