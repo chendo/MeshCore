@@ -618,6 +618,44 @@ int multiIdSourceReport(char* out, size_t cap) {
   return (int)o;
 }
 
+// GPS + clock state as JSON for the panel. The receiver is powered down between
+// scheduled syncs, so "no fix" is the normal idle state rather than a fault —
+// the panel needs enough context to tell those apart.
+int multiGpsStatusJson(char* out, size_t cap) {
+  LocationProvider* gps = sensors.getLocationProvider();
+  uint32_t now = millis();
+  bool powered = (g_gps_deadline_ms != 0);
+  bool valid = (gps != nullptr && gps->isValid());
+  long sats = gps ? gps->satellitesCount() : 0;
+  uint32_t next_s = (g_gps_sync_hours == 0) ? 0
+                    : (g_gps_next_ms > now ? (g_gps_next_ms - now) / 1000 : 0);
+  driftInit();
+  float ppm = driftPpm();
+
+  int n = snprintf(out, cap,
+    "{\"enabled\":%s,\"powered\":%s,\"lock\":%s,\"sats\":%ld,"
+    "\"every_h\":%lu,\"next_s\":%lu,\"last_sync\":%lu,\"syncs\":%lu,"
+    "\"skips_low_batt\":%lu,\"drift_ppm\":%.2f,\"state\":\"%s\","
+    "\"clock_source\":\"%s\",\"epoch\":%lu",
+    g_gps_sync_hours > 0 ? "true" : "false",
+    powered ? "true" : "false",
+    valid ? "true" : "false",
+    sats,
+    (unsigned long)g_gps_sync_hours, (unsigned long)next_s,
+    (unsigned long)g_gps_last_sync_epoch, (unsigned long)g_drift_count,
+    (unsigned long)g_gps_skips_low_batt, (double)ppm,
+    g_gps_last_result,
+    g_gps_last_sync_epoch ? "gps" : "manual/unset",
+    (unsigned long)rtc_clock.getCurrentTime());
+
+  if (valid && n > 0 && (size_t)n < cap) {
+    n += snprintf(out + n, cap - n, ",\"lat\":%.6f,\"lon\":%.6f,\"alt\":%ld",
+                  gps->getLatitude() / 1e6, gps->getLongitude() / 1e6, gps->getAltitude());
+  }
+  if (n > 0 && (size_t)n < cap) n += snprintf(out + n, cap - n, "}");
+  return n;
+}
+
 // accessors for the unified web panel (web_multi.cpp)
 SharedRadioCore* multiCore() { return g_core; }
 // ---- console execution is confined to the loop task -------------------------

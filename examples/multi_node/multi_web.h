@@ -27,6 +27,8 @@ bool multiRunInLoop(MultiLoopFn fn, void* arg, uint32_t timeout_ms);
 bool multiOnLoopTask();
 // receives this identity dropped because its packet pool was empty (by port index)
 uint32_t multiPortPoolFull(int port_idx);
+// GPS receiver + clock discipline state, as a JSON object
+int multiGpsStatusJson(char* out, size_t cap);
 void multiGetRadioParams(float* freq, float* bw, uint8_t* sf, uint8_t* cr);
 namespace fs { class FS; }
 fs::FS* multiSysFS();   // composition prefs area of the shared partition

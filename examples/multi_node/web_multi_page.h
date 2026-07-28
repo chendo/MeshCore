@@ -122,6 +122,9 @@ tbody.directonly tr:not(.directrow){display:none}
       <th>hears us</th><th>SNR</th><th>relays</th><th>dist</th><th>last</th></tr></thead>
     <tbody id="dash-nearby"><tr><td colspan=8 class=mut>listening...</td></tr></tbody></table></div>
   </div>
+  <div class="card"><h3>GPS &amp; clock <span class="mut" id="gps-hdr" style="font-weight:400;font-size:11px"></span></h3>
+    <div id="gps-body" class="mut">-</div>
+  </div>
   <div class="card"><h3>Identities <button class="sec" style="float:right;padding:2px 8px" onclick="loadStatsTab()">&#8635;</button>
     <span class="mut" style="font-weight:400;font-size:11px">every identity, from the shared radio itself</span></h3>
   <div style="overflow-x:auto"><table><thead><tr><th>identity</th><th>state</th><th>last activity</th><th>rx</th><th>tx</th>
@@ -1507,6 +1510,41 @@ function renderDashTiles(d){
 // The real "nodes nearby": who is within radio reach, from the arbiter's peer
 // table, enriched with names/locations from cached adverts. Relays alone only
 // prove we can hear them; "hears us" is the other, independent direction.
+// The receiver is powered down between scheduled syncs, so "no fix" is the
+// normal idle state rather than a fault — the wording has to distinguish
+// "not looking" from "looking and failing".
+function renderGps(){
+  const g=lastDebug&&lastDebug.gps;
+  if(!g){ return; }
+  const lock=g.lock?"<span class=ok>fix</span>":
+             (g.powered?"<span style='color:#e0b34d'>searching</span>":"<span class=mut>idle (powered down)</span>");
+  const sats=g.sats>0?g.sats:0;
+  const bars=(n)=>{ let h=""; for(let i=1;i<=8;i++)
+      h+="<span style='display:inline-block;width:4px;margin-right:2px;height:"+(4+i*1.4)+
+         "px;background:"+(i<=n?(n>=5?"#5fd694":"#e0b34d"):"#243040")+";vertical-align:bottom'></span>";
+    return h; };
+  const drift=g.drift_ppm?(g.drift_ppm.toFixed(1)+" ppm ("+
+      (g.drift_ppm*86400/1e6).toFixed(1)+" s/day)"):"not measured yet";
+  const nextS=g.every_h?(g.next_s>0?age(g.next_s):"due now"):"never (auto-sync off)";
+  const lastSync=g.last_sync?(new Date(g.last_sync*1000).toLocaleString()):"never";
+  $("gps-hdr").innerHTML=g.enabled?("auto-sync every "+g.every_h+" h"):"auto-sync disabled";
+  $("gps-body").innerHTML=
+    "<div class=row><span class=mut style='width:150px'>Status</span><span>"+lock+
+      " &middot; "+esc(g.state)+"</span></div>"+
+    "<div class=row><span class=mut style='width:150px'>Satellites</span><span>"+bars(sats)+
+      " &nbsp;"+sats+"</span></div>"+
+    (g.lat!==undefined?"<div class=row><span class=mut style='width:150px'>Fix position</span><span>"+
+      g.lat.toFixed(5)+", "+g.lon.toFixed(5)+" &middot; "+g.alt+" m</span></div>":"")+
+    "<div class=row><span class=mut style='width:150px'>Clock source</span><span>"+
+      (g.clock_source==="gps"?"<span class=ok>GPS</span>":"<span style='color:#e0b34d'>manual / unset</span>")+
+      "</span></div>"+
+    "<div class=row><span class=mut style='width:150px'>Last GPS sync</span><span>"+esc(lastSync)+
+      " &middot; "+g.syncs+" total</span></div>"+
+    "<div class=row><span class=mut style='width:150px'>Next attempt</span><span>"+nextS+"</span></div>"+
+    "<div class=row><span class=mut style='width:150px'>RTC drift</span><span>"+drift+"</span></div>"+
+    (g.skips_low_batt?"<div class=row><span class=mut style='width:150px'>Skipped</span><span class=mut>"+
+      g.skips_low_batt+" x battery below threshold</span></div>":"");
+}
 // Resolve a peer to an identity. The firmware only learns a name when it
 // happens to catch that node's advert; the browser's contact list is built from
 // every advert the companion has ever synced, so it fills the long tail. Match
@@ -1536,6 +1574,7 @@ function peerIdent(p){
   };
 }
 function renderNearby(){
+  renderGps();
   const peers=(lastDebug&&lastDebug.peers)||[];
   if(!peers.length){ return; }
   const rows=[...peers].sort((a,b)=>(b.heard_us-a.heard_us)||(b.direct-a.direct));

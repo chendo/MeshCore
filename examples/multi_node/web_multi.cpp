@@ -331,7 +331,9 @@ static esp_err_t handleDebug(httpd_req_t* req) {
       out += '}';
     }
   }
-  out += "],\"peers_confirmed\":";
+  out += "],\"gps\":";
+  { char g[512]; g[0] = 0; multiGpsStatusJson(g, sizeof(g)); out += (g[0] == '{') ? g : "null"; }
+  out += ",\"peers_confirmed\":";
   { SharedRadioCore* c = multiCore(); out += String(c ? c->confirmedPeerCount() : 0); }
   out += ",\"nvs\":{";
   { nvs_stats_t st;
