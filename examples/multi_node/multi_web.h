@@ -29,6 +29,8 @@ bool multiOnLoopTask();
 uint32_t multiPortPoolFull(int port_idx);
 // GPS receiver + clock discipline state, as a JSON object
 int multiGpsStatusJson(char* out, size_t cap);
+// "GPS" / "unset ..." — where the RTC was last set from
+const char* multiClockSource();
 void multiGetRadioParams(float* freq, float* bw, uint8_t* sf, uint8_t* cr);
 namespace fs { class FS; }
 fs::FS* multiSysFS();   // composition prefs area of the shared partition

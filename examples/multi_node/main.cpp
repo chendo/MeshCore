@@ -18,6 +18,7 @@
 #include "identity_module.h"
 #include "multi_web.h"
 #include "identity_backup.h"
+#include "diag_service.h"
 
 #ifndef SETUP_AP_SSID
 #define SETUP_AP_SSID "MeshCore-Multi-Setup"
@@ -486,6 +487,19 @@ public:
       snprintf(reply, reply_size, "> %s", (g_core && g_core->loopback()) ? "on" : "off");
       return;
     }
+    // public diagnostics responder on the chat identities (see diag_service.h)
+    if (strncmp(command, "set diag ", 9) == 0) {
+      bool on = (strncmp(command + 9, "on", 2) == 0);
+      diagSetEnabled(on);
+      snprintf(reply, reply_size,
+               "OK - diagnostics service %s (chat identities answer !ping !time !trace !help)",
+               on ? "ON" : "off");
+      return;
+    }
+    if (strcmp(command, "diag") == 0) {
+      snprintf(reply, reply_size, "diagnostics service: %s", diagEnabled() ? "on" : "off");
+      return;
+    }
     if (strncmp(command, "set wifi.powersave ", 19) == 0) {
       if (network.setWifiPowerSave(command + 19)) {
         // authoritative copy in OUR store: the repeater's inert stock
@@ -674,6 +688,11 @@ int multiGpsStatusJson(char* out, size_t cap) {
   }
   if (n > 0 && (size_t)n < cap) n += snprintf(out + n, cap - n, "}");
   return n;
+}
+
+// Where the clock last came from, for anything that needs to say so out loud.
+const char* multiClockSource() {
+  return g_gps_last_sync_epoch ? "GPS" : "unset (never disciplined)";
 }
 
 // accessors for the unified web panel (web_multi.cpp)

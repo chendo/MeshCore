@@ -22,6 +22,7 @@
 
 #include "identity_module.h"
 #include "identity_backup.h"
+#include "diag_service.h"
 #include "multi_web.h"
 #include "mux_serial.h"
 #include <target.h>
@@ -42,6 +43,29 @@ struct ChatSlot {
   bool              tcp_started;
   char              name[8];    // "chat1" ...
   char              fsdir[12];  // "/fs/chat1"
+};
+
+// A chat identity with nobody's phone attached just accumulates messages it can
+// never deliver. When the diagnostics service is on, a "!" command is answered
+// on the spot and NOT queued; anything else falls through to normal behaviour,
+// so a slot that is genuinely paired with an app is unaffected.
+class DiagChatMesh : public SlotChatMesh {
+public:
+  DiagChatMesh(mesh::Radio& radio, mesh::RNG& rng, mesh::RTCClock& rtc,
+               SimpleMeshTables& tables, DataStore& store)
+    : SlotChatMesh(radio, rng, rtc, tables, store, NULL) {}
+
+  void onMessageRecv(const ContactInfo& from, mesh::Packet* pkt, uint32_t sender_timestamp,
+                     const char* text) override {
+    char reply[DIAG_REPLY_MAX];
+    if (diagEnabled() && diagBuildReply(text, pkt, getRTCClock(), reply, sizeof(reply))) {
+      uint32_t ack, timeout;
+      // reply as a normal DM: direct when we know a path back, flood otherwise
+      sendMessage(from, getRTCClock()->getCurrentTimeUnique(), 0, reply, ack, timeout);
+      return;                       // handled — don't queue it for an absent app
+    }
+    SlotChatMesh::onMessageRecv(from, pkt, sender_timestamp, text);
+  }
 };
 
 static ChatSlot s_slots[MULTI_MAX_CHAT_SLOTS];
@@ -78,7 +102,7 @@ static void slot_setup(MultiFS* fs, mesh::Radio* port) {
   s.store = new DataStore(*fs, rtc_clock);
   s.serial.init(16 * 1024);
   s.mutex = xSemaphoreCreateMutex();
-  s.mesh = new SlotChatMesh(*port, s.rng, rtc_clock, s.tables, *s.store, NULL);
+  s.mesh = new DiagChatMesh(*port, s.rng, rtc_clock, s.tables, *s.store);
   { mesh::LocalIdentity pre; multiIdLoad(s.name, fs, pre); }   // heal from mirror if needed
   s.mesh->begin(false);
   multiIdImportSaveMirror(s.name, s.mesh->self_id);
