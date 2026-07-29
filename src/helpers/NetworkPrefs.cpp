@@ -1,4 +1,5 @@
 #include "NetworkPrefs.h"
+#include <algorithm>   // std::min: Arduino only defines a min() macro on some cores
 
 #include <helpers/TxtDataHelpers.h>
 #include <string.h>
@@ -176,7 +177,7 @@ bool NetworkPrefsStore::load(FILESYSTEM* fs, NetworkPrefs& prefs,
   }
 
   NetworkPrefs persisted{};
-  size_t bytes_to_read = min(static_cast<size_t>(file.size()), sizeof(persisted));
+  size_t bytes_to_read = std::min(static_cast<size_t>(file.size()), sizeof(persisted));
   bool ok = bytes_to_read >= sizeof(persisted.magic) &&
             file.read(reinterpret_cast<uint8_t*>(&persisted), bytes_to_read) == bytes_to_read;
   file.close();
@@ -229,6 +230,9 @@ bool NetworkPrefsStore::save(FILESYSTEM* fs, const NetworkPrefs& prefs) {
   }
 #if defined(RP2040_PLATFORM)
   File file = fs->open(kFilename, "w");
+#elif defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  fs->remove(kFilename);
+  File file = fs->open(kFilename, FILE_O_WRITE);   // Adafruit LittleFS: byte mode
 #else
   File file = fs->open(kFilename, "w", true);
 #endif

@@ -1,6 +1,8 @@
 #include "UITask.h"
 #include <Arduino.h>
-#include <WiFi.h>
+#if defined(ESP32)
+  #include <WiFi.h>          // ESP32-only; nRF52/RP2040 builds have no WiFi stack
+#endif
 #include <helpers/CommonCLI.h>
 
 #ifndef USER_BTN_PRESSED
@@ -92,14 +94,18 @@ void UITask::renderCurrScreen() {
     sprintf(tmp, "BW: %03.2f CR: %d", _node_prefs->bw, _node_prefs->cr);
     _display->print(tmp);
 
-    // WiFi IP
+    // WiFi IP (ESP32 only — nRF52/RP2040 have no WiFi stack)
     _display->setCursor(0, 40);
+#if defined(ESP32)
     if (WiFi.status() == WL_CONNECTED) {
       IPAddress ip = WiFi.localIP();
       snprintf(tmp, sizeof(tmp), "IP: %u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
     } else {
       snprintf(tmp, sizeof(tmp), "IP: -");
     }
+#else
+    snprintf(tmp, sizeof(tmp), "IP: n/a");
+#endif
     _display->print(tmp);
   }
 }

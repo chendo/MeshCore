@@ -105,6 +105,13 @@ SPIClass* getBoardSharedArchiveSPI() {
 }
 #endif
 
+#if !defined(ESP32)
+  // HSPI is an ESP32 SPI-bus id. The member is named unconditionally in the
+  // initialiser list below and simply unused off ESP32, where there is no SD
+  // archive at all, so give it a harmless value rather than restructuring.
+  #define HSPI 0
+#endif
+
 ArchiveStorage::ArchiveStorage()
     : _attempted(false), _mounted(false), _mount_failed(false), _supported(false), _card_type(0), _spi_bus(HSPI),
       _cs_pin(0xFF), _sck_pin(0xFF),
@@ -117,6 +124,7 @@ ArchiveStorage::ArchiveStorage()
 
 namespace {
 
+#if defined(ESP32)
 bool mountArchiveSd(SPIClass* spi,
                     uint8_t spi_bus,
                     uint8_t cs_pin,
@@ -135,6 +143,7 @@ bool mountArchiveSd(SPIClass* spi,
   delayMicroseconds(2);
   return SD.begin(cs_pin, *spi, archiveSpiFrequencyHz());
 }
+#endif  // ESP32
 
 }  // namespace
 

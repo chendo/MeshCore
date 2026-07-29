@@ -1,5 +1,9 @@
 #include "NetworkService.h"
 
+// Used by prefs handling on every platform, so it must live outside the
+// ESP-only block below.
+constexpr size_t kNtpServerMaxLen = 64;
+
 #include <helpers/TxtDataHelpers.h>
 #include <string.h>
 #include <time.h>
@@ -16,7 +20,6 @@ constexpr unsigned long kWifiRetryMillis = 15000;
 constexpr unsigned long kWifiConnectTimeoutMillis = 45000;
 constexpr unsigned long kWifiChannelHintTimeoutMillis = 7000;
 constexpr time_t kMinSaneEpoch = 1735689600;  // 2025-01-01T00:00:00Z
-constexpr size_t kNtpServerMaxLen = 64;
 
 bool isValidWifiChannel(uint8_t channel) {
   return channel >= 1 && channel <= 14;
@@ -306,10 +309,12 @@ void NetworkService::reconnectWifi() {
   _last_wifi_attempt = 0;
 }
 
+#if defined(ESP_PLATFORM)
 void NetworkService::restartTimeSync() {
   _sntp_started = false;
   _have_time_sync = false;
 }
+#endif
 
 bool NetworkService::isWifiConnected() const {
 #if defined(ESP_PLATFORM)

@@ -27,6 +27,7 @@
 // Super-loop order MUST be:  meshA.loop(); meshB.loop(); shared_core.pump();
 // so both ports consume the current frame before the next one is fetched.
 
+#include <Arduino.h>   // millis(): reaches us transitively on ESP32, not on nRF52
 #include <Mesh.h>
 #include <MeshCore.h>
 

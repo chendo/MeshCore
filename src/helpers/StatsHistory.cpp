@@ -1,4 +1,7 @@
 #include "StatsHistory.h"
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  #include <InternalFileSystem.h>   // InternalFS, for a bound "no file" File
+#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -104,8 +107,21 @@ void freeHistoryBuffer(void* ptr) {
 #endif
 }
 
+// Adafruit's LittleFS File has no default constructor, unlike the ESP32 and
+// RP2040 FS layers, so "no file" has to be spelled differently per platform.
+static inline File nullArchiveFile(FILESYSTEM* fs) {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  return fs != nullptr ? File(*fs) : File(InternalFS);
+#else
+  (void)fs;
+  return File();
+#endif
+}
+
 File openArchiveRead(FILESYSTEM* fs, const char* filename) {
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM) || defined(RP2040_PLATFORM)
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  return fs->open(filename, FILE_O_READ);   // Adafruit LittleFS: mode is a byte
+#elif defined(RP2040_PLATFORM)
   return fs->open(filename, "r");
 #else
   return fs->open(filename, FILE_READ);
@@ -113,7 +129,9 @@ File openArchiveRead(FILESYSTEM* fs, const char* filename) {
 }
 
 File openArchiveAppend(FILESYSTEM* fs, const char* filename) {
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM) || defined(RP2040_PLATFORM)
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  return fs->open(filename, FILE_O_WRITE);  // Adafruit LittleFS appends on write-open
+#elif defined(RP2040_PLATFORM)
   return fs->open(filename, "a");
 #else
   return fs->open(filename, FILE_APPEND, true);
@@ -138,59 +156,59 @@ File openArchiveWrite(FILESYSTEM* fs, const char* filename) {
 
 File openArchiveReadWithRecovery(ArchiveStorage* archive, const char* filename) {
   if (archive == nullptr) {
-    return File();
+    return nullArchiveFile(archive ? archive->getFS() : nullptr);
   }
   FILESYSTEM* fs = archive->getFS();
   if (fs == nullptr) {
-    return File();
+    return nullArchiveFile(archive ? archive->getFS() : nullptr);
   }
   File file = openArchiveRead(fs, filename);
   if (file) {
     return file;
   }
   if (!archive->recover()) {
-    return File();
+    return nullArchiveFile(archive ? archive->getFS() : nullptr);
   }
   fs = archive->getFS();
-  return fs != nullptr ? openArchiveRead(fs, filename) : File();
+  return fs != nullptr ? openArchiveRead(fs, filename) : nullArchiveFile(fs);
 }
 
 File openArchiveAppendWithRecovery(ArchiveStorage* archive, const char* filename) {
   if (archive == nullptr) {
-    return File();
+    return nullArchiveFile(archive ? archive->getFS() : nullptr);
   }
   FILESYSTEM* fs = archive->getFS();
   if (fs == nullptr) {
-    return File();
+    return nullArchiveFile(archive ? archive->getFS() : nullptr);
   }
   File file = openArchiveAppend(fs, filename);
   if (file) {
     return file;
   }
   if (!archive->recover()) {
-    return File();
+    return nullArchiveFile(archive ? archive->getFS() : nullptr);
   }
   fs = archive->getFS();
-  return fs != nullptr ? openArchiveAppend(fs, filename) : File();
+  return fs != nullptr ? openArchiveAppend(fs, filename) : nullArchiveFile(fs);
 }
 
 File openArchiveWriteWithRecovery(ArchiveStorage* archive, const char* filename) {
   if (archive == nullptr) {
-    return File();
+    return nullArchiveFile(archive ? archive->getFS() : nullptr);
   }
   FILESYSTEM* fs = archive->getFS();
   if (fs == nullptr) {
-    return File();
+    return nullArchiveFile(archive ? archive->getFS() : nullptr);
   }
   File file = openArchiveWrite(fs, filename);
   if (file) {
     return file;
   }
   if (!archive->recover()) {
-    return File();
+    return nullArchiveFile(archive ? archive->getFS() : nullptr);
   }
   fs = archive->getFS();
-  return fs != nullptr ? openArchiveWrite(fs, filename) : File();
+  return fs != nullptr ? openArchiveWrite(fs, filename) : nullArchiveFile(fs);
 }
 
 bool buildUtcDailyLogPath(const char* prefix, uint32_t epoch_secs, char* path, size_t path_size) {
