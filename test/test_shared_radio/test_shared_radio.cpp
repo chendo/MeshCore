@@ -926,3 +926,27 @@ TEST(Observer, WorksStandaloneWithoutAnyRadioOrPorts) {
   EXPECT_EQ(1u, p->direct_rx) << "and it was the final hop, so we heard it";
   EXPECT_EQ(1, o.confirmedPeerCount());
 }
+
+// Relay confirmation must work with no arbiter, since that is the whole reason
+// it moved: a single-identity repeater needs it as much as the multi board.
+TEST(Observer, RelayConfirmationStandalone) {
+  MeshObserver o;
+  o.addSelfKey(SELF_KEY);
+  g_fake_millis = 5000;
+
+  std::vector<uint8_t> ours{FLOOD_HDR, 0x00, 0xAA};
+  o.observeTx(ours.data(), (int)ours.size());
+  EXPECT_EQ(1u, o.floodsSent());
+  EXPECT_EQ(0u, o.floodsConfirmed());
+
+  g_fake_millis += 2000;
+  std::vector<uint8_t> back = floodWithPath({{0x30, 0x70}}, 2);
+  o.observeRx(back.data(), (int)back.size(), 20);
+  EXPECT_EQ(1u, o.floodsConfirmed()) << "our hash came back in a path";
+  EXPECT_EQ(1u, o.confirmsByWidth(2));
+
+  // a direct (non-flood) send can never be relayed, so it isn't tracked
+  std::vector<uint8_t> direct{(uint8_t)((2 << 2) | 2), 0x00, 0xBB};
+  o.observeTx(direct.data(), (int)direct.size());
+  EXPECT_EQ(1u, o.floodsSent()) << "only floods are candidates";
+}

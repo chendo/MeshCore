@@ -66,6 +66,33 @@ public:
   // the packet log stores it).
   void observeRx(const uint8_t* frame, int len, int8_t snr4);
 
+  // Feed every frame WE transmit. Only floods can come back to us relayed, so
+  // only those are tracked. `stream` distinguishes identities on a shared radio;
+  // a single-identity node leaves it at 0.
+  void observeTx(const uint8_t* frame, int len, int stream = 0);
+
+  // ---- relay confirmation ---------------------------------------------------
+  // Proof that a transmission of ours was actually received by somebody: our
+  // hash turns up in the path of a packet we later overhear, meaning a
+  // neighbour took it and passed it on. This is the only direct evidence a node
+  // gets that it is being heard at all — transmit counters only prove we keyed
+  // the radio.
+  //
+  // Only 2-byte-or-wider hashes count. A 1-byte match collides once every 256
+  // packets, which on a busy band is constant, so those are tallied separately
+  // and never credited.
+  static const int MAX_STREAMS = 8;
+  uint32_t floodsSent(int stream = 0) const {
+    return (stream >= 0 && stream < MAX_STREAMS) ? _flood_sent[stream] : 0;
+  }
+  uint32_t floodsConfirmed(int stream = 0) const {
+    return (stream >= 0 && stream < MAX_STREAMS) ? _flood_confirmed[stream] : 0;
+  }
+  // how many confirmations arrived at each hash width (1..4 bytes)
+  uint32_t confirmsByWidth(int bytes) const {
+    return (bytes >= 1 && bytes <= 4) ? _confirm_width[bytes - 1] : 0;
+  }
+
   // ---- what was learned ----
   int numPeers() const { return _num_peers; }
   const PeerEntry* peer(int i) const { return (i >= 0 && i < _num_peers) ? &_peers[i] : nullptr; }
@@ -93,7 +120,8 @@ private:
   int  findPeer(const uint8_t* hash, uint8_t width) const;
   void notePeersInPath(const uint8_t* frame, int len, int8_t snr4);
   void noteAdvert(const uint8_t* frame, int len, int8_t snr4);
-  bool isSelf(const uint8_t* hash, uint8_t width) const;
+  int  selfIndex(const uint8_t* hash, uint8_t width) const;   // -1 if not ours
+  bool isSelf(const uint8_t* hash, uint8_t width) const { return selfIndex(hash, width) >= 0; }
 
   PeerEntry _peers[MAX_PEERS];
   int       _num_peers = 0;
@@ -101,6 +129,19 @@ private:
   static const int MAX_SELF = 8;
   uint8_t _self[MAX_SELF][4];
   int     _num_self = 0;
+
+  // Recent flood transmits awaiting confirmation. A relay may take a while to
+  // come back, so this is a time window rather than a single slot.
+  static const int TX_RING = 16;
+  static const uint32_t CONFIRM_WINDOW_MS = 30000;
+  struct TxRecord { uint32_t t_ms; int8_t stream; bool confirmed; };
+  TxRecord _tx_ring[TX_RING];
+  uint8_t  _tx_ring_head = 0, _tx_ring_count = 0;
+  uint32_t _flood_sent[MAX_STREAMS] = {0};
+  uint32_t _flood_confirmed[MAX_STREAMS] = {0};
+  uint32_t _confirm_width[4] = {0};
+  // credit the most recent unconfirmed flood from `stream`, if one is in window
+  void creditRelay(int stream, uint8_t hash_width);
 
   uint32_t _hops[HOP_BUCKETS] = {0};
   uint32_t _types[16] = {0};

@@ -8,6 +8,10 @@ void MeshObserver::addSelfKey(const uint8_t* pub_key) {
 void MeshObserver::reset() {
   _num_peers = 0;
   _frames = 0;
+  _tx_ring_head = _tx_ring_count = 0;
+  memset(_flood_sent, 0, sizeof(_flood_sent));
+  memset(_flood_confirmed, 0, sizeof(_flood_confirmed));
+  memset(_confirm_width, 0, sizeof(_confirm_width));
   memset(_hops, 0, sizeof(_hops));
   memset(_types, 0, sizeof(_types));
 }
@@ -18,11 +22,46 @@ int MeshObserver::confirmedPeerCount() const {
   return n;
 }
 
-bool MeshObserver::isSelf(const uint8_t* hash, uint8_t width) const {
+int MeshObserver::selfIndex(const uint8_t* hash, uint8_t width) const {
   for (int i = 0; i < _num_self; i++) {
-    if (memcmp(hash, _self[i], width) == 0) return true;
+    if (memcmp(hash, _self[i], width) == 0) return i;
   }
-  return false;
+  return -1;
+}
+
+void MeshObserver::observeTx(const uint8_t* frame, int len, int stream) {
+  if (frame == nullptr || len < 1) return;
+  if (stream < 0 || stream >= MAX_STREAMS) return;
+  // Only floods get relayed onward, so only they can ever be confirmed. Route
+  // types 0 and 1 are the flooded ones.
+  uint8_t route = frame[0] & 0x03;
+  if (route != 0 && route != 1) return;
+
+  _flood_sent[stream]++;
+  if (_tx_ring_count < TX_RING) {
+    _tx_ring[(_tx_ring_head + _tx_ring_count) % TX_RING] = { (uint32_t)millis(), (int8_t)stream, false };
+    _tx_ring_count++;
+  } else {                                  // ring full: drop the oldest
+    _tx_ring[_tx_ring_head] = { (uint32_t)millis(), (int8_t)stream, false };
+    _tx_ring_head = (_tx_ring_head + 1) % TX_RING;
+  }
+}
+
+void MeshObserver::creditRelay(int stream, uint8_t hash_width) {
+  if (hash_width >= 1 && hash_width <= 4) _confirm_width[hash_width - 1]++;
+  // A 1-byte hash collides once every 256 packets, so on its own it is not
+  // evidence anyone relayed us: tallied above, but never credited.
+  if (hash_width < 2) return;
+
+  uint32_t now = millis();
+  for (int k = _tx_ring_count - 1; k >= 0; k--) {
+    TxRecord& r = _tx_ring[(_tx_ring_head + k) % TX_RING];
+    if (r.stream != stream || r.confirmed) continue;
+    if ((uint32_t)(now - r.t_ms) > CONFIRM_WINDOW_MS) break;   // older ones are older still
+    r.confirmed = true;
+    if (stream >= 0 && stream < MAX_STREAMS) _flood_confirmed[stream]++;
+    return;
+  }
 }
 
 int MeshObserver::findPeer(const uint8_t* hash, uint8_t width) const {
@@ -67,7 +106,15 @@ void MeshObserver::notePeersInPath(const uint8_t* frame, int len, int8_t snr4) {
   uint32_t now = millis();
   for (uint8_t h = 0; h < hops; h++) {
     const uint8_t* hop = &frame[o + h * sz];
-    if (isSelf(hop, sz)) continue;               // we are not our own peer
+    // Our own hash only ever enters a path when WE forwarded the packet, so
+    // hearing it come back at ANY position is proof the transmission
+    // propagated — that is the confirmation. Attribution to a specific peer
+    // needs the following entry, and is handled further down.
+    int mine = selfIndex(hop, sz);
+    if (mine >= 0) {
+      creditRelay(mine, sz);
+      continue;                                  // we are not our own peer
+    }
 
     int idx = findPeer(hop, sz);
     if (idx == -2) continue;                     // ambiguous, attribute nothing
@@ -101,7 +148,7 @@ void MeshObserver::notePeersInPath(const uint8_t* frame, int len, int8_t snr4) {
     // Did it forward something WE transmitted? Only the entry immediately after
     // one of ours proves that, and only at 2 bytes or wider.
     if (h > 0 && isSelf(&frame[o + (h - 1) * sz], sz)) {
-      if (sz >= 2) e.heard_us++; else e.heard_us_1b++;
+      if (sz >= 2) e.heard_us++; else e.heard_us_1b++;   // credited above
     }
   }
 }
