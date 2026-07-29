@@ -28,6 +28,7 @@
 // so both ports consume the current frame before the next one is fetched.
 
 #include <Arduino.h>   // millis(): reaches us transitively on ESP32, not on nRF52
+#include "MeshObserver.h"
 #include <Mesh.h>
 #include <MeshCore.h>
 
@@ -203,6 +204,7 @@ public:
     if (idx < 0 || idx >= MAX_PORTS || pub_key == nullptr) return;
     memcpy(_port_hash[idx], pub_key, 4);
     _port_hash_set |= (1u << idx);
+    _obs.addSelfKey(pub_key);   // so it can tell "someone relayed US" from noise
   }
   uint32_t floodsSent(int idx) const { return (idx >= 0 && idx < MAX_PORTS) ? _flood_sent[idx] : 0; }
   uint32_t floodsConfirmed(int idx) const { return (idx >= 0 && idx < MAX_PORTS) ? _flood_confirmed[idx] : 0; }
@@ -210,55 +212,16 @@ public:
     return (bytes >= 1 && bytes <= 4) ? _confirm_width[bytes - 1] : 0;
   }
 
-  // ---- peer table -----------------------------------------------------------
-  // Who is actually within radio reach, learned from the routing paths of the
-  // traffic we overhear. Every forwarder appends its own hash to the end of the
-  // path (Mesh::routeRecvPacket), which makes two different facts recoverable,
-  // and RF links are asymmetric so they genuinely differ:
-  //
-  //   LAST entry in a path  -> that node transmitted the frame WE received, so
-  //                            we can hear IT, and its SNR/RSSI describe that
-  //                            link. Mid-path entries say nothing about their
-  //                            own link to us and must not be read that way.
-  //   entry right AFTER one
-  //   of ours               -> that node received OUR transmission and passed
-  //                            it on, so it can hear US.
-  //
-  // Hash width is chosen by the originator, not by us, so the same node shows
-  // up at 1 and 2 bytes. A 1-byte match is 1-in-256 and is NOT treated as
-  // proof of anything: it is counted separately and only attributed to a known
-  // wider peer when exactly one candidate exists.
-  static const int MAX_PEERS = 48;
-  struct PeerEntry {
-    uint8_t  hash[3];          // widest prefix seen
-    uint8_t  width;            // 1..3 bytes known
-    uint32_t direct_rx;        // seen as LAST hop: we received its transmission
-    uint32_t relays;           // seen anywhere in a path: mesh activity only
-    uint32_t heard_us;         // >=2-byte hash right after ours: CONFIRMED
-    uint32_t heard_us_1b;      // same at 1 byte: provisional, never confirmation
-    uint32_t last_ms;          // any sighting
-    uint32_t last_direct_ms;   // last time it was the final hop
-    int32_t  snr4_sum;         // running mean of SNR*4, direct sightings only
-    uint32_t snr_n;
-    uint8_t  min_hops;         // closest distance seen (1 = direct); 0 unknown
-    // Identity, harvested from ADVERTs. The path only ever carries truncated
-    // hashes, so a node stays anonymous until it adverts (or one of its adverts
-    // reaches us) — at which point the pubkey prefix, name and location can be
-    // pinned to it and remembered across reboots.
-    uint8_t  pub[6];           // pubkey prefix; all-zero when still unknown
-    int32_t  lat_e6, lon_e6;   // 0 when not advertised
-    char     name[20];
-  };
-  int numPeers() const { return _num_peers; }
-  const PeerEntry* peer(int i) const {
-    return (i >= 0 && i < _num_peers) ? &_peers[i] : nullptr;
-  }
-  // peers that have demonstrably received one of our transmissions (2-byte+)
-  int confirmedPeerCount() const {
-    int n = 0;
-    for (int i = 0; i < _num_peers; i++) if (_peers[i].heard_us > 0) n++;
-    return n;
-  }
+  // ---- observability --------------------------------------------------------
+  // The peer table, hop and packet-type histograms live in MeshObserver, which
+  // knows nothing about arbitration — a single-identity node uses the same code
+  // with a plain receive hook. The arbiter just feeds it every frame it pumps.
+  MeshObserver& observer() { return _obs; }
+  const MeshObserver& observer() const { return _obs; }
+  typedef MeshObserver::PeerEntry PeerEntry;
+  int numPeers() const { return _obs.numPeers(); }
+  const PeerEntry* peer(int i) const { return _obs.peer(i); }
+  int confirmedPeerCount() const { return _obs.confirmedPeerCount(); }
 
   // ---- per-identity liveness -----------------------------------------------
   // Every identity funnels through a port, so the arbiter can report what each
@@ -370,19 +333,7 @@ private:
   volatile uint32_t _flood_confirmed[MAX_PORTS] = {0};
   volatile uint32_t _confirm_width[4] = {0};
 
-  PeerEntry _peers[MAX_PEERS];
-  int       _num_peers = 0;
-  // Walks a received path and updates the peer table. Returns nothing: every
-  // conclusion is recorded per-peer, because a path carries several.
-  void notePeersInPath(const uint8_t* frame, int len, int8_t snr4);
-  // An ADVERT names its originator outright. Pins identity to the matching peer,
-  // and — when the advert arrived with an empty path, meaning we received the
-  // originator's own transmission — registers a direct peer that may never
-  // forward anything and so would otherwise stay invisible.
-  void noteAdvert(const uint8_t* frame, int len, int8_t snr4);
-  // Exactly one entry matching `hash` to min(width, entry width) bytes, or
-  // -1 for none and -2 when the prefix is too short to disambiguate.
-  int  findPeer(const uint8_t* hash, uint8_t width) const;
+  MeshObserver _obs;
   volatile uint32_t _port_rx[MAX_PORTS] = {0};
   volatile uint32_t _port_tx[MAX_PORTS] = {0};
   volatile uint32_t _port_last_ms[MAX_PORTS] = {0};

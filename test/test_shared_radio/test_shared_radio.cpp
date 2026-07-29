@@ -877,3 +877,52 @@ TEST(PeerIdentity, OurOwnAdvertIsIgnored) {
   f.deliver(advert({0x30, 0x70, 0x30, 0x70}, "Us", 1, 1));
   EXPECT_EQ(0, f.core.numPeers());
 }
+
+// ------------------------------------------------------- observer histograms
+// Hop depth and payload type are the cheapest useful observability there is:
+// they say whether we sit among close neighbours or on the edge of a deep mesh,
+// and what kind of traffic actually passes.
+
+TEST(Observer, HopDepthOfReceivedTrafficIsBucketed) {
+  Fixture f;
+  f.deliver(floodWithPath({}, 2));                       // 0 hops: straight off a radio
+  f.deliver(floodWithPath({{0xAA, 1}}, 2));              // 1 hop
+  f.deliver(floodWithPath({{0xAA, 1}, {0xBB, 2}}, 2));   // 2 hops
+  f.deliver(floodWithPath({{0xAA, 1}, {0xBB, 2}}, 2));   // 2 hops again
+
+  const MeshObserver& o = f.core.observer();
+  EXPECT_EQ(1u, o.hopCount(0));
+  EXPECT_EQ(1u, o.hopCount(1));
+  EXPECT_EQ(2u, o.hopCount(2));
+  EXPECT_EQ(0u, o.hopCount(3));
+}
+
+TEST(Observer, PayloadTypesAreCounted) {
+  Fixture f;
+  f.deliver(floodWithPath({{0xAA, 1}}, 2));   // FLOOD_HDR is TXT_MSG (type 2)
+  f.deliver(floodWithPath({{0xBB, 2}}, 2));
+  f.deliver(advert({0xDE, 0xAD, 0xBE}, "N", 1, 2));   // ADVERT (type 4)
+
+  const MeshObserver& o = f.core.observer();
+  EXPECT_EQ(2u, o.typeCount(2));
+  EXPECT_EQ(1u, o.typeCount(4));
+  EXPECT_EQ(0u, o.typeCount(9));
+  EXPECT_EQ(3u, o.framesObserved());
+}
+
+// The observer must work with no arbiter at all — that is the whole point of
+// lifting it out, so a single-identity repeater can use the same code.
+TEST(Observer, WorksStandaloneWithoutAnyRadioOrPorts) {
+  MeshObserver o;
+  o.addSelfKey(SELF_KEY);
+
+  std::vector<uint8_t> f = floodWithPath({{0x30, 0x70}, {0xCC, 0x01}}, 2);
+  o.observeRx(f.data(), (int)f.size(), 20);
+
+  ASSERT_EQ(1, o.numPeers()) << "our own hash must not become a peer";
+  const auto* p = o.peer(0);
+  EXPECT_EQ(0xCC, p->hash[0]);
+  EXPECT_EQ(1u, p->heard_us) << "it relayed a packet carrying our hash";
+  EXPECT_EQ(1u, p->direct_rx) << "and it was the final hop, so we heard it";
+  EXPECT_EQ(1, o.confirmedPeerCount());
+}

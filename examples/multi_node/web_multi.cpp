@@ -340,6 +340,19 @@ static esp_err_t handleDebug(httpd_req_t* req) {
     out += ",\"used\":"; out += String((unsigned long)u);
     out += ",\"free\":"; out += String((unsigned long)(t > u ? t - u : 0));
     out += "}"; }
+  // hop-depth and payload-type spread of everything we hear (MeshObserver)
+  out += ",\"obs\":{\"frames\":";
+  { SharedRadioCore* c = multiCore();
+    if (c == nullptr) { out += "0,\"hops\":[],\"types\":[]}"; }
+    else {
+      const MeshObserver& o = c->observer();
+      out += String(o.framesObserved());
+      out += ",\"hops\":[";
+      for (int i = 0; i < MeshObserver::HOP_BUCKETS; i++) { if (i) out += ','; out += String(o.hopCount(i)); }
+      out += "],\"types\":[";
+      for (int i = 0; i < 16; i++) { if (i) out += ','; out += String(o.typeCount(i)); }
+      out += "]}";
+    } }
   out += ",\"gps\":";
   { char g[512]; g[0] = 0; multiGpsStatusJson(g, sizeof(g)); out += (g[0] == '{') ? g : "null"; }
   out += ",\"peers_confirmed\":";
