@@ -698,13 +698,83 @@ public:
       else if (strncmp(command, "repeater set prv.key ", 21) == 0) { pk = command + 21; role = "repeater"; target = (fs::FS*)&fs_rep; }
       else if (strncmp(command, "room set prv.key ", 17) == 0) { pk = command + 17; role = "room"; target = (fs::FS*)&fs_room; }
       if (pk != nullptr) {
-        if (multiIdImport(role, target, pk)) {
+        const char* why = multiIdImportReason(role, target, pk);
+        if (why == nullptr) {
           snprintf(reply, reply_size, "OK - %s identity set (filesystem + mirror); reboot to apply", role);
         } else {
-          snprintf(reply, reply_size, "Error - bad private key");
+          // include the length we actually received: a truncated or padded
+          // command looks identical to a bad key from the caller's side
+          snprintf(reply, reply_size, "Error - %s (%s, got %u hex chars)",
+                   why, role, (unsigned)strlen(pk));
         }
         return;
       }
+    }
+    // Read-only listing of the shared partition, biggest first. Nothing else
+    // could show what a 94%-full filesystem was actually holding, which is how
+    // it silently broke every write on the node.
+    if (strcmp(command, "files") == 0) {
+      struct Ent { char name[40]; uint32_t size; };
+      static const int MAXF = 40;
+      static Ent ents[MAXF];   // static: runWebCommand is loop-task only,
+      int n = 0; uint32_t total = 0; int extra = 0;   // and this frame is shared
+      File root = fs_shared.open("/");
+      if (root) {
+        for (File f = root.openNextFile(); f; f = root.openNextFile()) {
+          total += f.size();
+          if (n < MAXF) {
+            strncpy(ents[n].name, f.path(), sizeof(ents[0].name) - 1);
+            ents[n].name[sizeof(ents[0].name) - 1] = 0;
+            ents[n].size = f.size();
+            n++;
+          } else extra++;
+        }
+      }
+      for (int i = 1; i < n; i++) {          // insertion sort, biggest first
+        Ent k = ents[i]; int j = i - 1;
+        while (j >= 0 && ents[j].size < k.size) { ents[j+1] = ents[j]; j--; }
+        ents[j+1] = k;
+      }
+      uint32_t fs_total = 0, fs_used = 0;
+      multiFsStats(&fs_total, &fs_used);
+      size_t o = snprintf(reply, reply_size, "%lu files, %lu bytes; fs %lu/%lu used\n",
+                          (unsigned long)(n + extra), (unsigned long)total,
+                          (unsigned long)fs_used, (unsigned long)fs_total);
+      for (int i = 0; i < n && o + 48 < reply_size; i++) {
+        o += snprintf(reply + o, reply_size - o, "%7lu %s\n",
+                      (unsigned long)ents[i].size, ents[i].name);
+      }
+      if (extra && o + 24 < reply_size) snprintf(reply + o, reply_size - o, "(+%d more)\n", extra);
+      return;
+    }
+    // Reclaim the per-contact advert blobs left behind by the old uncapped
+    // store (see DataStore.cpp). These hold raw advert packets purely so the
+    // app can offer "Share contact" — losing them costs nothing but that, and
+    // on this node they had eaten 94% of the partition.
+    if (strcmp(command, "purge blobs") == 0) {
+      const char* dirs[] = { "/comp/bl", "/rep/bl", "/room/bl",
+                             "/chat1/bl", "/chat2/bl", "/chat3/bl", "/chat4/bl", "/chat5/bl" };
+      uint32_t freed = 0; int removed = 0;
+      for (unsigned d = 0; d < sizeof(dirs)/sizeof(dirs[0]); d++) {
+        File dir = fs_shared.open(dirs[d]);
+        if (!dir) continue;
+        // collect first: deleting while iterating the directory is not safe
+        static char victims[64][48];   // 3KB — must not sit on the stack
+        int nv = 0;
+        for (File f = dir.openNextFile(); f && nv < 64; f = dir.openNextFile()) {
+          strncpy(victims[nv], f.path(), sizeof(victims[0]) - 1);
+          victims[nv][sizeof(victims[0]) - 1] = 0;
+          freed += f.size();
+          nv++;
+        }
+        dir.close();
+        for (int i = 0; i < nv; i++) if (fs_shared.remove(victims[i])) removed++;
+      }
+      uint32_t t = 0, u = 0; multiFsStats(&t, &u);
+      snprintf(reply, reply_size,
+               "removed %d blob files (%lu bytes of content); fs now %lu/%lu used",
+               removed, (unsigned long)freed, (unsigned long)u, (unsigned long)t);
+      return;
     }
     if (strcmp(command, "identities full") == 0) {   // full 64-hex pubkeys (contact sharing/QR)
       size_t o = 0;
@@ -799,6 +869,14 @@ int multiGpsStatusJson(char* out, size_t cap) {
   }
   if (n > 0 && (size_t)n < cap) n += snprintf(out + n, cap - n, "}");
   return n;
+}
+
+// Usage of the ONE shared SPIFFS partition. The composition mounts its own
+// fs::SPIFFSFS instance (label "fs"), not the global SPIFFS singleton, so
+// anything asking the singleton gets zeroes and learns nothing.
+void multiFsStats(uint32_t* total, uint32_t* used) {
+  if (total) *total = (uint32_t)fs_shared.totalBytes();
+  if (used)  *used  = (uint32_t)fs_shared.usedBytes();
 }
 
 // Where the clock last came from, for anything that needs to say so out loud.

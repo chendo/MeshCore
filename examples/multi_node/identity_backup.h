@@ -136,29 +136,38 @@ static void multiIdImportSaveMirror(const char* role, mesh::LocalIdentity& id) {
 // Accepts EITHER a 128-hex private key (the format the stock 'set prv.key'
 // and the phone app use — the public key is derived from it) or the 192-hex
 // pub||prv blob written by the mirror.
-static bool multiIdImport(const char* role, fs::FS* fs, const char* hex) {
-  if (hex == nullptr) return false;
+// Returns nullptr on success, otherwise WHY it failed. A single boolean was
+// hiding which stage broke: a rejected key, a hex parse failure and a
+// filesystem write failure all surfaced as "bad private key", which sent us
+// looking at a key that was provably fine.
+static const char* multiIdImportReason(const char* role, fs::FS* fs, const char* hex) {
+  if (hex == nullptr) return "no key supplied";
   size_t n = strlen(hex);
   mesh::LocalIdentity id;
 
   if (n == PRV_KEY_SIZE * 2) {                 // 128 hex: private key only
     uint8_t prv[PRV_KEY_SIZE];
-    if (!mesh::Utils::fromHex(prv, PRV_KEY_SIZE, hex)) return false;
-    if (!mesh::LocalIdentity::validatePrivateKey(prv)) return false;
+    if (!mesh::Utils::fromHex(prv, PRV_KEY_SIZE, hex)) return "not valid hex";
+    if (!mesh::LocalIdentity::validatePrivateKey(prv)) return "key rejected by ed25519 validation";
     id.readFrom(prv, PRV_KEY_SIZE);            // derives the public key
   } else if (n == MULTI_ID_BLOB * 2) {         // 192 hex: pub||prv blob
     uint8_t blob[MULTI_ID_BLOB];
-    if (!mesh::Utils::fromHex(blob, MULTI_ID_BLOB, hex)) return false;
-    if (!mesh::LocalIdentity::validatePrivateKey(blob + PUB_KEY_SIZE)) return false;
+    if (!mesh::Utils::fromHex(blob, MULTI_ID_BLOB, hex)) return "not valid hex";
+    if (!mesh::LocalIdentity::validatePrivateKey(blob + PUB_KEY_SIZE)) return "key rejected by ed25519 validation";
     id = multiIdFromBlob(blob);
   } else {
-    return false;
+    return "wrong length";
   }
 
+  if (fs == nullptr) return "no filesystem for that role";
   IdentityStore store(*fs, "/identity");
   store.begin();
-  if (!store.save("_main", id)) return false;
+  if (!store.save("_main", id)) return "filesystem write failed";
 
   multiIdSaveMirrorForce(role, id);   // deliberate change: the mirror must follow
-  return true;
+  return nullptr;
+}
+
+static bool multiIdImport(const char* role, fs::FS* fs, const char* hex) {
+  return multiIdImportReason(role, fs, hex) == nullptr;
 }

@@ -14,6 +14,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <FS.h>
+#include <SPIFFS.h>
 #include <esp_heap_caps.h>
 #include <nvs.h>                           // NVS health (identity mirror lives here)
 #include <target.h>                        // board (battery millivolts), rtc_clock
@@ -331,7 +332,15 @@ static esp_err_t handleDebug(httpd_req_t* req) {
       out += '}';
     }
   }
-  out += "],\"gps\":";
+  // Shared SPIFFS usage. A full filesystem makes every write fail silently —
+  // identity saves, neighbour and peer snapshots — and nothing else reports it.
+  out += "],\"fs\":{\"total\":";
+  { uint32_t t = 0, u = 0; multiFsStats(&t, &u);
+    out += String((unsigned long)t);
+    out += ",\"used\":"; out += String((unsigned long)u);
+    out += ",\"free\":"; out += String((unsigned long)(t > u ? t - u : 0));
+    out += "}"; }
+  out += ",\"gps\":";
   { char g[512]; g[0] = 0; multiGpsStatusJson(g, sizeof(g)); out += (g[0] == '{') ? g : "null"; }
   out += ",\"peers_confirmed\":";
   { SharedRadioCore* c = multiCore(); out += String(c ? c->confirmedPeerCount() : 0); }
