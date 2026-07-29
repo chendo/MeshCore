@@ -57,7 +57,7 @@ void MeshObserver::creditRelay(int stream, uint8_t hash_width) {
   for (int k = _tx_ring_count - 1; k >= 0; k--) {
     TxRecord& r = _tx_ring[(_tx_ring_head + k) % TX_RING];
     if (r.stream != stream || r.confirmed) continue;
-    if ((uint32_t)(now - r.t_ms) > CONFIRM_WINDOW_MS) break;   // older ones are older still
+    if ((uint32_t)(now - r.t_ms) > _confirm_window_ms) break;   // older ones are older still
     r.confirmed = true;
     if (stream >= 0 && stream < MAX_STREAMS) _flood_confirmed[stream]++;
     return;

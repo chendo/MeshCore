@@ -93,6 +93,21 @@ public:
     return (bytes >= 1 && bytes <= 4) ? _confirm_width[bytes - 1] : 0;
   }
 
+  // How recently we must have transmitted for a returning echo to be credited
+  // to it. Our hash sits in the path of EVERY packet we ever forwarded, so a
+  // wide window credits whichever transmit happens to be newest rather than the
+  // one that actually came back — with a busy repeater forwarding continuously,
+  // that is close to guesswork.
+  //
+  // The protocol sets the floor: a relay waits nextInt(0, 5*airtime*factor)
+  // before retransmitting (Mesh::getRetransmitDelay and the repeater's
+  // override), which at SF7/62.5kHz on a ~130-byte frame is up to about 2s for
+  // a single hop. 5s covers that with margin and is tight enough that the
+  // correlation means something.
+  static const uint32_t CONFIRM_WINDOW_DEFAULT_MS = 5000;
+  void setConfirmWindow(uint32_t ms) { _confirm_window_ms = ms; }
+  uint32_t confirmWindow() const { return _confirm_window_ms; }
+
   // ---- what was learned ----
   int numPeers() const { return _num_peers; }
   const PeerEntry* peer(int i) const { return (i >= 0 && i < _num_peers) ? &_peers[i] : nullptr; }
@@ -133,7 +148,7 @@ private:
   // Recent flood transmits awaiting confirmation. A relay may take a while to
   // come back, so this is a time window rather than a single slot.
   static const int TX_RING = 16;
-  static const uint32_t CONFIRM_WINDOW_MS = 30000;
+  uint32_t _confirm_window_ms = CONFIRM_WINDOW_DEFAULT_MS;
   struct TxRecord { uint32_t t_ms; int8_t stream; bool confirmed; };
   TxRecord _tx_ring[TX_RING];
   uint8_t  _tx_ring_head = 0, _tx_ring_count = 0;

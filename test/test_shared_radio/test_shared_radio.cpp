@@ -950,3 +950,44 @@ TEST(Observer, RelayConfirmationStandalone) {
   o.observeTx(direct.data(), (int)direct.size());
   EXPECT_EQ(1u, o.floodsSent()) << "only floods are candidates";
 }
+
+// A returning echo is only meaningful if we transmitted recently. Our hash sits
+// in the path of every packet we ever forwarded, so a wide window credits
+// whichever transmit is newest rather than the one that actually came back.
+TEST(Observer, ConfirmationWindowIsTight) {
+  MeshObserver o;
+  o.addSelfKey(SELF_KEY);
+  EXPECT_EQ(5000u, o.confirmWindow()) << "default must cover one relay hop, not minutes";
+
+  g_fake_millis = 10000;
+  std::vector<uint8_t> ours{FLOOD_HDR, 0x00, 0xAA};
+  o.observeTx(ours.data(), (int)ours.size());
+
+  g_fake_millis += 4000;                                  // inside the window
+  std::vector<uint8_t> back = floodWithPath({{0x30, 0x70}}, 2);
+  o.observeRx(back.data(), (int)back.size(), 20);
+  EXPECT_EQ(1u, o.floodsConfirmed()) << "4s after our send: plausibly ours";
+
+  // a second send, then an echo that arrives long after it
+  o.observeTx(ours.data(), (int)ours.size());
+  g_fake_millis += 20000;                                 // well outside
+  o.observeRx(back.data(), (int)back.size(), 20);
+  EXPECT_EQ(1u, o.floodsConfirmed())
+      << "20s later cannot be attributed to that transmit";
+  // still tallied as a width observation, just not credited
+  EXPECT_EQ(2u, o.confirmsByWidth(2));
+}
+
+TEST(Observer, ConfirmationWindowIsTunable) {
+  MeshObserver o;
+  o.addSelfKey(SELF_KEY);
+  o.setConfirmWindow(1000);                               // the tight end of 1-5s
+  g_fake_millis = 10000;
+  std::vector<uint8_t> ours{FLOOD_HDR, 0x00, 0xAA};
+  o.observeTx(ours.data(), (int)ours.size());
+
+  g_fake_millis += 2500;
+  std::vector<uint8_t> back = floodWithPath({{0x30, 0x70}}, 2);
+  o.observeRx(back.data(), (int)back.size(), 20);
+  EXPECT_EQ(0u, o.floodsConfirmed()) << "2.5s is outside a 1s window";
+}
