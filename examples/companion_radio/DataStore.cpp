@@ -7,6 +7,18 @@
   #define MAX_BLOBRECS 20
 #endif
 
+// Advert blobs (raw advert packets kept so the app can offer "Share contact")
+// are stored in ONE pre-allocated, fixed-record file with oldest-entry
+// eviction, on every platform.
+//
+// The alternative, previously used on ESP32, wrote one file per contact with no
+// cap. Every node ever heard left a permanent ~130-byte file, and SPIFFS costs
+// roughly 600 bytes per object, so on a live repeater 269 files holding 45 KB
+// of payload had consumed 163 KB of a 173 KB partition. A full SPIFFS fails
+// every write silently — identities, neighbour snapshots, prefs — which is a
+// far worse outcome than losing the oldest share-blob.
+#define BLOB_STORE_CAPPED 1
+
 DataStore::DataStore(FILESYSTEM& fs, mesh::RTCClock& clock) : _fs(&fs), _fsExtra(nullptr), _clock(&clock),
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
     identity_store(fs, "")
@@ -53,6 +65,8 @@ void DataStore::begin() {
 
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   _ContactsChannelsTotalBlocks = _getContactsChannelsFS()->_getFS()->cfg->block_count;
+#endif
+#if BLOB_STORE_CAPPED
   checkAdvBlobFile();
   #if defined(EXTRAFS) || defined(QSPIFLASH)
   migrateToSecondaryFS();
@@ -419,7 +433,7 @@ void DataStore::saveChannels(DataStoreHost* host) {
   }
 }
 
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+#if BLOB_STORE_CAPPED
 
 #define MAX_ADVERT_PKT_LEN   (2 + 32 + PUB_KEY_SIZE + 4 + SIGNATURE_SIZE + MAX_ADVERT_DATA_SIZE)
 
@@ -572,7 +586,14 @@ uint8_t DataStore::getBlobByKey(const uint8_t key[], int key_len, uint8_t dest_b
 bool DataStore::putBlobByKey(const uint8_t key[], int key_len, const uint8_t src_buf[], uint8_t len) {
   if (len < PUB_KEY_SIZE+4+SIGNATURE_SIZE || len > MAX_ADVERT_PKT_LEN) return false;
   checkAdvBlobFile();
+  // read+write without truncating: the record is found by scan, then rewritten
+  // in place. FILE_O_WRITE is an Adafruit LittleFS constant; "r+" is the
+  // equivalent on the ESP32 and RP2040 FS layers.
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   File file = _getContactsChannelsFS()->open("/adv_blobs", FILE_O_WRITE);
+#else
+  File file = _getContactsChannelsFS()->open("/adv_blobs", "r+");
+#endif
   if (file) {
     uint32_t pos = 0, found_pos = 0;
     uint32_t min_timestamp = 0xFFFFFFFF;

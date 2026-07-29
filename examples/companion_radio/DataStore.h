@@ -20,8 +20,9 @@ class DataStore {
   IdentityStore identity_store;
 
   void loadPrefsInt(const char *filename, NodePrefs& prefs, double& node_lat, double& node_lon);
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+// the capped advert-blob store is used on every platform (see DataStore.cpp)
   void checkAdvBlobFile();
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
 #endif
 
 public:
