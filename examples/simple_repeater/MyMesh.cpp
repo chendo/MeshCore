@@ -816,6 +816,9 @@ const char *MyMesh::getLogDateTime() {
 }
 
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
+#if WITH_MESH_OBSERVER
+  _obs.observeRx(raw, len, (int8_t)(snr * 4));   // peers, hops, types, relay confirms
+#endif
 #if MESH_PACKET_LOGGING
   Serial.print(getLogDateTime());
   Serial.print(" RAW: ");
@@ -855,6 +858,11 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 }
 
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
+#if WITH_MESH_OBSERVER
+  // only the header byte matters here: observeTx uses it to spot floods, which
+  // are the only transmissions that can come back to us relayed
+  { uint8_t hdr = pkt->header; _obs.observeTx(&hdr, 1); }
+#endif
 #ifdef WITH_BRIDGE
   if (_prefs.bridge_pkt_src == 0) {
     bridge.sendPacket(pkt);
@@ -1610,6 +1618,53 @@ void MyMesh::formatPacketStatsReply(char *reply, size_t reply_size) {
   StatsFormatHelper::formatPacketStats(reply, reply_size, radio_driver, getNumSentFlood(), getNumSentDirect(),
                                        getNumRecvFlood(), getNumRecvDirect());
 }
+
+#if WITH_MESH_OBSERVER
+void MyMesh::formatObserverReply(char *reply, size_t reply_size, const char* what) {
+  size_t o = 0;
+  if (strcmp(what, "hops") == 0) {
+    // how far away the traffic we hear originates; bucket 0 came straight off
+    // the sender's radio, so it is the count of genuinely direct receives
+    o += snprintf(reply, reply_size, "hops seen (of %lu frames):",
+                  (unsigned long)_obs.framesObserved());
+    for (int h = 0; h < MeshObserver::HOP_BUCKETS && o + 10 < reply_size; h++) {
+      uint32_t n = _obs.hopCount(h);
+      if (n) o += snprintf(reply + o, reply_size - o, " %d:%lu", h, (unsigned long)n);
+    }
+  } else if (strcmp(what, "types") == 0) {
+    static const char* T[16] = {"REQ","RESP","TXT","ACK","ADV","GTXT","GDAT","ANON",
+                                "PATH","TRACE","MPART","CTRL","?","?","?","RAW"};
+    o += snprintf(reply, reply_size, "types:");
+    for (int t = 0; t < 16 && o + 12 < reply_size; t++) {
+      uint32_t n = _obs.typeCount(t);
+      if (n) o += snprintf(reply + o, reply_size - o, " %s:%lu", T[t], (unsigned long)n);
+    }
+  } else if (strcmp(what, "heard") == 0) {
+    // relay confirmation: proof our transmissions are actually being received
+    uint32_t sent = _obs.floodsSent(), conf = _obs.floodsConfirmed();
+    snprintf(reply, reply_size,
+             "floods sent %lu, confirmed relayed %lu (%lu%%); by hash width 2B:%lu 1B:%lu(ignored); window %lums",
+             (unsigned long)sent, (unsigned long)conf,
+             (unsigned long)(sent ? conf * 100 / sent : 0),
+             (unsigned long)_obs.confirmsByWidth(2), (unsigned long)_obs.confirmsByWidth(1),
+             (unsigned long)_obs.confirmWindow());
+  } else {   // peers
+    o += snprintf(reply, reply_size, "%d peers, %d confirmed hearing us:",
+                  _obs.numPeers(), _obs.confirmedPeerCount());
+    // nearest and most-heard first: those are the ones that describe our links
+    for (int pass = 1; pass <= 2 && o + 24 < reply_size; pass++) {
+      for (int i = 0; i < _obs.numPeers() && o + 24 < reply_size; i++) {
+        const MeshObserver::PeerEntry* p = _obs.peer(i);
+        if (p == nullptr || p->min_hops != pass || p->direct_rx == 0) continue;
+        int snr4 = p->snr_n ? (int)(p->snr4_sum / (int32_t)p->snr_n) : 0;
+        o += snprintf(reply + o, reply_size - o, " %02x%02x/%dh/%lurx/%+d",
+                      p->hash[0], p->width > 1 ? p->hash[1] : 0, p->min_hops,
+                      (unsigned long)p->direct_rx, snr4 / 4);
+      }
+    }
+  }
+}
+#endif
 
 void MyMesh::formatMemoryReply(char *reply, size_t reply_size) {
   StatsFormatHelper::formatMemoryStats(reply, reply_size);

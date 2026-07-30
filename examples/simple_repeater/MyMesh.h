@@ -1,6 +1,9 @@
 #pragma once
 
 #include <Arduino.h>
+#if WITH_MESH_OBSERVER
+  #include <helpers/MeshObserver.h>
+#endif
 #include <Mesh.h>
 #include <RTClib.h>
 #include <target.h>
@@ -229,6 +232,15 @@ protected:
   bool allowPacketForward(const mesh::Packet* packet) override;
   const char* getLogDateTime() override;
   void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override;
+#if WITH_MESH_OBSERVER
+  // Passive metrics fed from the raw receive/transmit hooks above. Costs a few
+  // KB of RAM and nothing on air; off unless the build asks for it.
+  MeshObserver _obs;
+public:
+  MeshObserver& observer() { return _obs; }
+  void formatObserverReply(char *reply, size_t reply_size, const char* what) override;
+private:
+#endif
 
   void logRx(mesh::Packet* pkt, int len, float score) override;
   void logTx(mesh::Packet* pkt, int len) override;
