@@ -3022,7 +3022,39 @@ bool MyMesh::appendJsonSensors(char* reply, size_t reply_size, size_t& offset, c
 #endif
 }
 
+#if WITH_BLE_CLI
+void MyMesh::startBLE(SerialBLEInterface& ble, const char* name_prefix, char* name) {
+  _ble = &ble;
+  // Six digits, never zero-padded away, and never the shipped 123456.
+  _ble_pin = 100000 + (uint32_t)getRNG()->nextInt(0, 900000);
+  ble.begin(name_prefix, name, _ble_pin);
+  ble.enable();
+  Serial.printf("[ble] pairing PIN for this boot: %06lu\n", (unsigned long)_ble_pin);
+}
+
+void MyMesh::bleLoop() {
+  if (_ble == nullptr || !_ble->isConnected()) return;
+  uint8_t frame[MAX_FRAME_SIZE + 1];
+  size_t n = _ble->checkRecvFrame(frame);
+  if (n == 0 || _ble->isWriteBusy()) return;
+  if (n > MAX_FRAME_SIZE) n = MAX_FRAME_SIZE;
+  frame[n] = 0;                       // the CLI wants a C string
+
+  // A non-zero timestamp deliberately withholds the commands CommonCLI gates to
+  // local serial only — erase, log, set freq, set prv.key. BLE reaches tens of
+  // metres, so those stay behind physical USB access even though pairing is
+  // encrypted and MITM-protected.
+  char reply[MAX_FRAME_SIZE];
+  reply[0] = 0;
+  handleCommand(++_ble_seq, (char *) frame, reply);
+  if (reply[0]) _ble->writeFrame((const uint8_t *) reply, strlen(reply));
+}
+#endif
+
 void MyMesh::loop() {
+#if WITH_BLE_CLI
+  bleLoop();
+#endif
 #ifdef WITH_BRIDGE
   bridge.loop();
 #endif

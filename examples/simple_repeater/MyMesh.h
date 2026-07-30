@@ -4,6 +4,10 @@
 #if WITH_MESH_OBSERVER
   #include <helpers/MeshObserver.h>
 #endif
+#if WITH_BLE_CLI
+  #include <helpers/BaseSerialInterface.h>
+  #include <helpers/nrf52/SerialBLEInterface.h>
+#endif
 #include <Mesh.h>
 #include <RTClib.h>
 #include <target.h>
@@ -239,6 +243,24 @@ protected:
 public:
   MeshObserver& observer() { return _obs; }
   void formatObserverReply(char *reply, size_t reply_size, const char* what) override;
+private:
+#endif
+#if WITH_BLE_CLI
+  // A local, high-bandwidth diagnostic port. Metrics over LoRa are capped at a
+  // ~160-byte reply and cost airtime on a congested band; over BLE they cost
+  // nothing and can be as verbose as useful. Reuses the companion's
+  // SerialBLEInterface unchanged, which also brings Adafruit's DFU service —
+  // so this is the firmware-update path as well.
+  BaseSerialInterface* _ble = nullptr;
+  uint32_t _ble_pin = 0;
+  uint32_t _ble_seq = 0;      // monotonic, for the CLI's replay guard
+  void bleLoop();
+public:
+  // Attach and start the interface. The PIN is generated per boot, so a stolen
+  // pairing cannot be replayed after a restart and there is no shipped default
+  // to look up.
+  void startBLE(SerialBLEInterface& ble, const char* name_prefix, char* name);
+  uint32_t blePin() const { return _ble_pin; }
 private:
 #endif
 

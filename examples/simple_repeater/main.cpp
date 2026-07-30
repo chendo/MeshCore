@@ -1,4 +1,7 @@
 #include <Arduino.h>   // needed for PlatformIO
+#if WITH_BLE_CLI
+  #include <helpers/nrf52/SerialBLEInterface.h>
+#endif
 #include <Mesh.h>
 
 #include "MyMesh.h"
@@ -100,6 +103,16 @@ void setup() {
 #endif
 
   the_mesh.begin(fs, &archive);
+#if WITH_BLE_CLI
+  // Local diagnostic + firmware-update port. The interface is the companion's,
+  // unchanged, which is also what provides the BLE DFU service.
+  {
+    static SerialBLEInterface ble;
+    static char ble_name[32];
+    strncpy(ble_name, "@@MAC", sizeof(ble_name) - 1);   // resolved to the MAC by begin()
+    the_mesh.startBLE(ble, "Hydra-", ble_name);
+  }
+#endif
 
 #ifdef DISPLAY_CLASS
   ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);
