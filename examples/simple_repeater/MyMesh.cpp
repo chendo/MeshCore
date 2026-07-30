@@ -1639,6 +1639,13 @@ void MyMesh::formatObserverReply(char *reply, size_t reply_size, const char* wha
       uint32_t n = _obs.typeCount(t);
       if (n) o += snprintf(reply + o, reply_size - o, " %s:%lu", T[t], (unsigned long)n);
     }
+  } else if (strcmp(what, "ble") == 0) {
+#if WITH_BLE_CLI
+    snprintf(reply, reply_size, "ble PIN %06lu (new every boot), connected=%s",
+             (unsigned long)_ble_pin, (_ble && _ble->isConnected()) ? "yes" : "no");
+#else
+    snprintf(reply, reply_size, "no BLE in this firmware");
+#endif
   } else if (strcmp(what, "heard") == 0) {
     // relay confirmation: proof our transmissions are actually being received
     uint32_t sent = _obs.floodsSent(), conf = _obs.floodsConfirmed();
