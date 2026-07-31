@@ -1314,7 +1314,14 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 }
 
 void MyMesh::begin(FILESYSTEM *fs, ArchiveStorage* archive) {
-  mesh::Mesh::begin();
+
+#if WITH_MESH_OBSERVER
+  // The observer cannot recognise a relay of OUR OWN transmission without
+  // knowing our key: it looks for our hash in the paths of packets we overhear.
+  // Missing this made "heard" report 0 confirmed out of 3740 floods sent, and
+  // let our own hash occupy a slot in the peer table.
+  _obs.addSelfKey(self_id.pub_key);
+#endif  mesh::Mesh::begin();
   _fs = fs;
   _archive = archive;
   last_millis = millis();
