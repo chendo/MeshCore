@@ -1371,6 +1371,10 @@ void MyMesh::begin(FILESYSTEM *fs, ArchiveStorage* archive) {
   // Missing this made "heard" report 0 confirmed out of 3740 floods sent, and
   // let our own hash occupy a slot in the peer table.
   _obs.addSelfKey(self_id.pub_key);
+  // Without this the observer holds no clock, so every advert's timestamp is
+  // discarded and clock_n never leaves zero -- the skew column in "peers" has
+  // been empty for this reason, not because nothing was heard.
+  _obs.setClock(getRTCClock());
 #endif
   _fs = fs;
   _archive = archive;
