@@ -1696,10 +1696,23 @@ void MyMesh::formatObserverReply(char *reply, size_t reply_size, const char* wha
       uint32_t n = _obs.typeCount(t);
       if (n) o += snprintf(reply + o, reply_size - o, " %s:%lu", T[t], (unsigned long)n);
     }
-  } else if (strcmp(what, "ble") == 0) {
+  } else if (memcmp(what, "ble", 3) == 0 && (what[3] == 0 || what[3] == ' ')) {
 #if WITH_BLE_CLI
-    snprintf(reply, reply_size, "ble PIN %06lu (new every boot), connected=%s",
-             (unsigned long)_ble_pin, (_ble && _ble->isConnected()) ? "yes" : "no");
+    // "ble on" / "ble off" stop the diagnostic port advertising and drop any
+    // connection, so its radio cost can be measured against the bridge's.
+    // Runtime only, deliberately not persisted: NodePrefs is a fixed on-disk
+    // layout shared with deployed nodes, and a power measurement does not
+    // justify changing it. Note the BRIDGE is separate and much the larger
+    // consumer -- it scans continuously. Turn both off for a true baseline:
+    //   ble off   +   set bridge.enabled off
+    const char* arg = (what[3] == ' ') ? &what[4] : "";
+    if (_ble != nullptr && (strcmp(arg, "on") == 0 || strcmp(arg, "off") == 0)) {
+      if (arg[1] == 'n') _ble->enable(); else _ble->disable();
+    }
+    snprintf(reply, reply_size, "ble %s, PIN %06lu (new every boot), connected=%s%s",
+             (_ble && _ble->isEnabled()) ? "on" : "off",
+             (unsigned long)_ble_pin, (_ble && _ble->isConnected()) ? "yes" : "no",
+             (_ble && _ble->isEnabled()) ? "" : " [bridge is separate: set bridge.enabled off]");
 #else
     snprintf(reply, reply_size, "no BLE in this firmware");
 #endif
