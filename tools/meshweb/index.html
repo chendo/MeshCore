@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MeshCore repeaters</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-0: #f4f4f2;
+    --surface-1: #fcfcfb;
+    --line:      #e2e2dd;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #82817b;
+    --series-1:  #2a78d6;
+    --track:     #e8eef7;
+    --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --surface-0: #121211; --surface-1: #1a1a19; --line: #34342f;
+      --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8e84;
+      --series-1: #3987e5; --track: #232931;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-0: #121211; --surface-1: #1a1a19; --line: #34342f;
+    --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8e84;
+    --series-1: #3987e5; --track: #232931;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--surface-0); color: var(--text-primary);
+    font: 14px/1.45 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 20px 16px 64px; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+  h1 { font-size: 19px; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--text-muted); font-size: 12.5px; }
+  .tabs { display: flex; gap: 6px; margin: 14px 0 18px; flex-wrap: wrap; }
+  .tab {
+    padding: 6px 13px; border-radius: 999px; border: 1px solid var(--line);
+    background: var(--surface-1); color: var(--text-secondary); cursor: pointer; font-size: 13px;
+  }
+  .tab[aria-selected="true"] { background: var(--series-1); border-color: var(--series-1); color: #fff; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+
+  .card {
+    background: var(--surface-1); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px 16px; margin-bottom: 14px;
+  }
+  .card h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--text-muted); margin: 0 0 12px; font-weight: 600;
+  }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+
+  /* stat tiles -- a single number is not a chart */
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 10px; }
+  .tile { background: var(--surface-0); border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; }
+  .tile .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); }
+  .tile .v { font-size: 20px; font-variant-numeric: tabular-nums; margin-top: 3px; letter-spacing: -0.02em; }
+  .tile .u { font-size: 11.5px; color: var(--text-muted); margin-left: 2px; }
+
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); font-weight: 600; }
+  tbody tr:last-child td { border-bottom: none; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  .scroll { overflow-x: auto; }
+
+  /* horizontal bars: one measure, so one hue -- length carries the magnitude */
+  .bars { display: grid; grid-template-columns: auto 1fr auto; gap: 3px 10px; align-items: center; }
+  .bars .lbl { font-size: 12px; color: var(--text-secondary); }
+  .bars .val { font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+  .track { background: var(--track); border-radius: 3px; height: 11px; position: relative; }
+  .bar {
+    background: var(--series-1); height: 100%;
+    border-radius: 0 4px 4px 0;   /* rounded data-end, anchored at the baseline */
+    min-width: 2px;
+  }
+  .bars > div[title] { cursor: default; }
+
+  .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; }
+  .pill .sw { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+  .muted { color: var(--text-muted); }
+  .empty { color: var(--text-muted); font-size: 13px; padding: 6px 0; }
+  .err { color: var(--critical); font-size: 12.5px; }
+
+  input, button, select {
+    font: inherit; background: var(--surface-0); color: var(--text-primary);
+    border: 1px solid var(--line); border-radius: 7px; padding: 7px 10px;
+  }
+  button { cursor: pointer; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  pre.out {
+    background: var(--surface-0); border: 1px solid var(--line); border-radius: 7px;
+    padding: 10px; margin: 10px 0 0; max-height: 220px; overflow: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; white-space: pre-wrap;
+  }
+  details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>MeshCore repeaters</h1>
+    <span class="sub" id="meta">connecting…</span>
+  </header>
+  <div class="tabs" id="tabs" role="tablist"></div>
+  <div id="body"></div>
+</div>
+
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+let STATE = { nodes: [] }, ACTIVE = null;
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+const num = (v, d = 0) => v === undefined || v === null ? "—" : Number(v).toFixed(d);
+
+function dur(secs) {
+  if (secs == null) return "—";
+  const d = Math.floor(secs / 86400), h = Math.floor(secs % 86400 / 3600), m = Math.floor(secs % 3600 / 60);
+  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
+}
+function ago(secs) {
+  if (secs == null) return "—";
+  return secs < 90 ? `${secs}s` : secs < 5400 ? `${Math.round(secs / 60)}m` : `${Math.round(secs / 3600)}h`;
+}
+
+// SNR quality is shown as swatch + WORD -- never colour alone.
+function snrQuality(snr) {
+  if (snr == null) return null;
+  if (snr >= 5)  return { label: "strong", color: "var(--good)" };
+  if (snr >= 0)  return { label: "fair",   color: "var(--warning)" };
+  if (snr >= -7) return { label: "weak",   color: "var(--serious)" };
+  return { label: "marginal", color: "var(--critical)" };
+}
+
+function tile(k, v, u = "") {
+  return `<div class="tile"><div class="k">${esc(k)}</div>
+          <div class="v">${esc(v)}<span class="u">${esc(u)}</span></div></div>`;
+}
+
+function bars(obj, { order = null, unit = "" } = {}) {
+  const keys = order || Object.keys(obj);
+  const max = Math.max(1, ...keys.map(k => obj[k] || 0));
+  const total = keys.reduce((a, k) => a + (obj[k] || 0), 0);
+  if (!total) return `<div class="empty">nothing observed yet</div>`;
+  return `<div class="bars">` + keys.map(k => {
+    const v = obj[k] || 0, pct = (v / max) * 100;
+    const share = total ? (v / total * 100).toFixed(1) : "0";
+    return `<div class="lbl">${esc(k)}</div>
+      <div class="track" title="${esc(k)}: ${v}${unit} — ${share}% of ${total}">
+        <div class="bar" style="width:${pct.toFixed(2)}%"></div>
+      </div>
+      <div class="val">${v}</div>`;
+  }).join("") + `</div>`;
+}
+
+function peerRows(peers, zeroHopOnly) {
+  const rows = peers
+    .filter(p => zeroHopOnly ? (p.d > 0 || p.m === 1) : true)
+    .sort((a, b) => (b.s ?? -99) - (a.s ?? -99) || (b.d || 0) - (a.d || 0));
+  if (!rows.length) {
+    return `<div class="empty">${zeroHopOnly
+      ? "no directly-heard neighbours yet — nothing has been received at zero hops"
+      : "no peers observed yet"}</div>`;
+  }
+  return `<div class="scroll"><table>
+    <thead><tr>
+      <th>hash</th><th>name</th><th>SNR</th><th>direct rx</th>
+      <th>relays</th><th>heard us</th><th>hops</th><th>last direct</th><th>skew</th>
+    </tr></thead><tbody>` + rows.map(p => {
+      const q = snrQuality(p.s);
+      return `<tr>
+        <td class="mono">${esc(p.h)}${p.w < 2 ? '<span class="muted" title="single-byte hash: 1-in-256 collisions, treat with suspicion"> ¹</span>' : ""}</td>
+        <td>${p.nm ? esc(p.nm) : `<span class="muted">${p.p ? esc(p.p.slice(0, 8)) : "unknown"}</span>`}</td>
+        <td>${q ? `<span class="pill"><span class="sw" style="background:${q.color}"></span>${num(p.s,1)} ${q.label}</span>` : '<span class="muted">—</span>'}</td>
+        <td>${p.d ?? 0}</td>
+        <td>${p.r ?? 0}</td>
+        <td>${p.u ? p.u : '<span class="muted">0</span>'}</td>
+        <td>${p.m ? (p.m === 1 ? "direct" : p.m) : '<span class="muted">?</span>'}</td>
+        <td>${ago(p.da)}</td>
+        <td>${p.sk == null ? '<span class="muted">—</span>' : (p.sk > 0 ? "+" : "") + p.sk + "s"}</td>
+      </tr>`;
+    }).join("") + `</tbody></table></div>`;
+}
+
+function renderNode(n) {
+  if (!n.online) {
+    return `<div class="card"><h2>${esc(n.name)}</h2>
+      <div class="err">offline — ${esc(n.error || "no reply")}</div>
+      <div class="muted" style="margin-top:6px">transport: ${esc(n.transport)}</div></div>`;
+  }
+  const r = n.stats_radio || {}, p = n.stats_packets || {}, c = n.stats_core || {};
+  const peers = n.peers || [], ps = n.peers_summary || {};
+  const zero = peers.filter(x => x.d > 0 || x.m === 1);
+  const HOPS = n.hops ? Object.fromEntries(Object.entries(n.hops.bins).map(([k, v]) => [k + (k === "0" ? " (direct)" : ""), v])) : null;
+
+  return `
+  <div class="card">
+    <h2>Radio statistics — ${esc(n.node_name || n.name)}</h2>
+    <div class="tiles">
+      ${tile("noise floor", num(r.noise_floor), "dBm")}
+      ${tile("last RSSI", num(r.last_rssi), "dBm")}
+      ${tile("last SNR", num(r.last_snr, 1), "dB")}
+      ${tile("tx airtime", num(r.tx_air_secs), "s")}
+      ${tile("rx airtime", num(r.rx_air_secs), "s")}
+      ${tile("battery", num(c.battery_mv), "mV")}
+      ${tile("uptime", dur(c.uptime_secs))}
+      ${tile("tx queue", num(c.queue_len))}
+    </div>
+    <div class="muted" style="margin-top:10px;font-size:12.5px">
+      ${n.radio ? `${n.radio.freq.toFixed(3)} MHz · BW ${n.radio.bw} · SF${n.radio.sf} · CR${n.radio.cr}` : "radio config unknown"}
+      · TX ${esc(n.tx_power)} dBm · ${esc(n.ver || "")}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Zero-hop neighbours — ${zero.length} of ${peers.length} observed</h2>
+    <div class="muted" style="margin:-4px 0 10px;font-size:12.5px">
+      Nodes whose transmissions arrived <strong>directly</strong>, with no relay in between.
+      SNR is averaged over direct receptions only. “heard us” counts times the node
+      relayed one of our floods — proof the link works in both directions.
+    </div>
+    ${peerRows(peers, true)}
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2>Hop distribution — ${n.hops ? n.hops.frames : 0} frames</h2>
+      ${HOPS ? bars(HOPS) : `<div class="empty">nothing observed yet</div>`}
+    </div>
+    <div class="card">
+      <h2>Packet types</h2>
+      ${n.types ? bars(n.types) : `<div class="empty">nothing observed yet</div>`}
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2>Packet counters</h2>
+      <div class="tiles">
+        ${tile("received", num(p.recv))}
+        ${tile("sent", num(p.sent))}
+        ${tile("rx errors", num(p.recv_errors))}
+        ${tile("flood tx", num(p.flood_tx))}
+        ${tile("direct tx", num(p.direct_tx))}
+        ${tile("flood rx", num(p.flood_rx))}
+        ${tile("direct rx", num(p.direct_rx))}
+      </div>
+      ${n.heard ? `<div class="muted" style="margin-top:10px;font-size:12.5px">
+        Relay confirmation: ${n.heard.confirmed} of ${n.heard.sent} floods seen relayed
+        (<strong>${n.heard.pct}%</strong>) — evidence our transmissions are actually reaching others.
+      </div>` : ""}
+    </div>
+    <div class="card">
+      <h2>Observer table &amp; BLE bridge</h2>
+      <div class="tiles">
+        ${tile("peers", `${ps.count ?? 0}/${ps.max ?? 0}`)}
+        ${tile("confirmed", num(ps.confirmed))}
+        ${tile("evicted", num(ps.evicted))}
+        ${tile("refused", num(ps.refused))}
+      </div>
+      ${n.bridge ? `<div class="tiles" style="margin-top:10px">
+        ${tile("bridge", n.bridge.state)}
+        ${tile("frames tx", num(n.bridge.tx))}
+        ${tile("frames ok", num(n.bridge.ok))}
+        ${tile("bridge peers", num(n.bridge.peers))}
+      </div>
+      <div class="muted" style="margin-top:8px;font-size:12.5px">
+        dup ${n.bridge.dup} (deliberate repeats) · bad ${n.bridge.bad} (wrong group secret)
+        · other ${n.bridge.other} (foreign 0xFFFF beacons)
+      </div>` : `<div class="empty">no bridge in this build</div>`}
+    </div>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>All observed peers (${peers.length}) — including relay-only sightings</summary>
+      <div style="margin-top:10px">${peerRows(peers, false)}</div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2>Console</h2>
+    <div class="row">
+      <input id="cmd" placeholder="e.g. peers, stats-radio, get radio" style="flex:1;min-width:200px">
+      <button id="send">Send</button>
+    </div>
+    <pre class="out" id="out">Commands run against <strong>${esc(n.name)}</strong> over ${esc(n.transport)}.</pre>
+  </div>`;
+}
+
+function render() {
+  const nodes = STATE.nodes || [];
+  if (!nodes.length) { $("#body").innerHTML = `<div class="card empty">no nodes configured</div>`; return; }
+  if (!ACTIVE || !nodes.find(n => n.name === ACTIVE)) ACTIVE = nodes[0].name;
+
+  $("#tabs").innerHTML = nodes.map(n => `
+    <button class="tab" role="tab" aria-selected="${n.name === ACTIVE}" data-node="${esc(n.name)}">
+      <span class="dot" style="background:${n.online ? "var(--good)" : "var(--critical)"}"></span>${esc(n.name)}
+    </button>`).join("");
+  $("#tabs").querySelectorAll(".tab").forEach(b =>
+    b.onclick = () => { ACTIVE = b.dataset.node; render(); });
+
+  const n = nodes.find(x => x.name === ACTIVE);
+  $("#body").innerHTML = renderNode(n);
+  const age = n.updated ? Math.round(STATE.now - n.updated) : null;
+  $("#meta").textContent = `${nodes.length} node(s) · ${ACTIVE} updated ${age == null ? "—" : age + "s"} ago`;
+
+  const send = $("#send"), cmd = $("#cmd"), out = $("#out");
+  if (send) {
+    const run = async () => {
+      const c = cmd.value.trim(); if (!c) return;
+      out.textContent += `\n$ ${c}\n…`;
+      out.scrollTop = out.scrollHeight;
+      try {
+        const r = await fetch("/api/cmd", { method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ node: ACTIVE, cmd: c }) });
+        const j = await r.json();
+        out.textContent = out.textContent.replace(/…$/, j.reply || "(no reply)");
+      } catch (e) { out.textContent = out.textContent.replace(/…$/, "error: " + e); }
+      out.scrollTop = out.scrollHeight; cmd.value = "";
+    };
+    send.onclick = run;
+    cmd.onkeydown = e => { if (e.key === "Enter") run(); };
+  }
+}
+
+async function tick() {
+  try {
+    STATE = await (await fetch("/api/state")).json();
+    render();
+  } catch (e) {
+    $("#meta").textContent = "backend unreachable — is meshweb.py running?";
+  }
+}
+tick();
+setInterval(tick, 5000);
+</script>
+</body>
+</html>

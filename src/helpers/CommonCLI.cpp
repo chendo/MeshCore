@@ -557,7 +557,8 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     } else if (memcmp(command, "memory", 6) == 0 && (command[6] == 0 || command[6] == ' ')) {
       _callbacks->formatMemoryReply(reply, 160);
     } else if (memcmp(command, "peers", 5) == 0 && (command[5] == 0 || command[5] == ' ')) {
-      _callbacks->formatObserverReply(reply, 160, "peers");
+      // full command, so "peers <n>" can dump one entry machine-readably
+      _callbacks->formatObserverReply(reply, 160, command);
     } else if (memcmp(command, "hops", 4) == 0 && (command[4] == 0 || command[4] == ' ')) {
       _callbacks->formatObserverReply(reply, 160, "hops");
     } else if (memcmp(command, "types", 5) == 0 && (command[5] == 0 || command[5] == ' ')) {

@@ -1725,6 +1725,48 @@ void MyMesh::formatObserverReply(char *reply, size_t reply_size, const char* wha
              (unsigned long)(sent ? conf * 100 / sent : 0),
              (unsigned long)_obs.confirmsByWidth(2), (unsigned long)_obs.confirmsByWidth(1),
              (unsigned long)_obs.confirmWindow());
+  } else if (memcmp(what, "peers ", 6) == 0) {
+    // One peer as JSON, so a host tool can page the whole table out: the human
+    // summary below cannot show more than a handful inside a 160-byte reply,
+    // and the table holds MAX_PEERS. Fields are terse for the same reason, and
+    // anything unknown is omitted rather than sent as a zero.
+    //   i/n index and total, h hash (hex, w bytes wide), d direct receptions,
+    //   r relays seen, u times it relayed US, s mean SNR of direct sightings,
+    //   m min hops (1 = ZERO-HOP, i.e. we hear it directly),
+    //   a/da secs since any/direct sighting, sk clock skew, p pubkey, nm name
+    int idx = atoi(&what[6]);
+    int total = _obs.numPeers();
+    const MeshObserver::PeerEntry* e = _obs.peer(idx);
+    if (e == NULL) {
+      snprintf(reply, reply_size, "{\"i\":%d,\"n\":%d}", idx, total);
+      return;
+    }
+    char hash[8] = {0};
+    for (int b = 0; b < e->width && b < 3; b++) sprintf(&hash[b*2], "%02x", e->hash[b]);
+    unsigned long now = millis();
+    int o = snprintf(reply, reply_size,
+             "{\"i\":%d,\"n\":%d,\"h\":\"%s\",\"w\":%d,\"d\":%lu,\"r\":%lu,\"u\":%lu,\"m\":%d,\"a\":%lu",
+             idx, total, hash, (int)e->width, (unsigned long)e->direct_rx,
+             (unsigned long)e->relays, (unsigned long)e->heard_us, (int)e->min_hops,
+             (unsigned long)((now - e->last_ms) / 1000));
+    if (e->snr_n > 0 && o + 16 < (int)reply_size) {
+      o += snprintf(&reply[o], reply_size - o, ",\"s\":%.1f,\"da\":%lu",
+                    (float)e->snr4_sum / (4.0f * e->snr_n),
+                    (unsigned long)((now - e->last_direct_ms) / 1000));
+    }
+    if (e->clock_n > 0 && o + 14 < (int)reply_size) {
+      o += snprintf(&reply[o], reply_size - o, ",\"sk\":%ld", (long)e->clock_delta_s);
+    }
+    bool has_pub = false;
+    for (int b = 0; b < 6; b++) if (e->pub[b]) has_pub = true;
+    if (has_pub && o + 24 < (int)reply_size) {
+      o += snprintf(&reply[o], reply_size - o, ",\"p\":\"%02x%02x%02x%02x%02x%02x\"",
+                    e->pub[0], e->pub[1], e->pub[2], e->pub[3], e->pub[4], e->pub[5]);
+    }
+    if (e->name[0] && o + (int)strlen(e->name) + 10 < (int)reply_size) {
+      o += snprintf(&reply[o], reply_size - o, ",\"nm\":\"%s\"", e->name);
+    }
+    snprintf(&reply[o], reply_size - o, "}");
   } else {   // peers
     o += snprintf(reply, reply_size, "%d peers, %d confirmed hearing us:",
                   _obs.numPeers(), _obs.confirmedPeerCount());
