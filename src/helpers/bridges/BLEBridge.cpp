@@ -147,14 +147,6 @@ bool BLEBridge::peerAllows(const uint8_t addr[6], uint32_t timestamp, const uint
      advert from an unknown contact. */
   if (slot == nullptr) return true;
 
-  /* Silence the deliberate repeats. BleBroadcast sends each datagram over
-     max_adv_evts advertising events so a duty-cycled scanner cannot miss it
-     entirely, which means the same frame usually arrives two or three times.
-     The tag is an HMAC over the whole frame, so it identifies one uniquely.
-     Caught here, a repeat costs nothing; left to _seen_packets it would first
-     consume a packet buffer and a hash. */
-  if (memcmp(slot->last_tag, tag, TAG_SIZE) == 0) return false;
-
   /* A sender unheard for a long while gets a fresh start -- the escape hatch
      for a node whose clock restarted lower across a reboot. */
   if (millis() - slot->last_seen > PEER_STALE_MS) return true;
@@ -167,7 +159,45 @@ bool BLEBridge::peerAllows(const uint8_t addr[6], uint32_t timestamp, const uint
   return true;
 }
 
-void BLEBridge::peerAccept(const uint8_t addr[6], uint32_t timestamp, const uint8_t *tag) {
+bool BLEBridge::isDuplicate(const uint8_t addr[6], const uint8_t *tag) const {
+  /* The deliberate repeats. BleBroadcast sends each datagram over max_adv_evts
+     advertising events so a duty-cycled scanner cannot miss it entirely, so the
+     same frame normally arrives two or three times. The tag is an HMAC over the
+     whole frame, so it identifies one uniquely. Caught here a repeat costs
+     nothing; left to _seen_packets it would first consume a packet buffer and a
+     hash. Counted separately from a stale frame so the telemetry can tell
+     "working as designed" from "someone is replaying at us". */
+  for (uint8_t i = 0; i < MAX_PEERS; i++) {
+    if (_peers[i].in_use && memcmp(_peers[i].addr, addr, 6) == 0) {
+      return memcmp(_peers[i].last_tag, tag, TAG_SIZE) == 0;
+    }
+  }
+  return false;
+}
+
+uint8_t BLEBridge::numPeers() const {
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < MAX_PEERS; i++) if (_peers[i].in_use) n++;
+  return n;
+}
+
+bool BLEBridge::getPeer(uint8_t idx, uint8_t addr[6], int8_t &rssi, uint32_t &age_ms,
+                        uint32_t &frames) const {
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < MAX_PEERS; i++) {
+    if (!_peers[i].in_use) continue;
+    if (n++ != idx) continue;
+    memcpy(addr, _peers[i].addr, 6);
+    rssi = _peers[i].last_rssi;
+    age_ms = (uint32_t)(millis() - _peers[i].last_seen);
+    frames = _peers[i].frames;
+    return true;
+  }
+  return false;
+}
+
+void BLEBridge::peerAccept(const uint8_t addr[6], uint32_t timestamp, const uint8_t *tag,
+                           int8_t rssi) {
   unsigned long now = millis();
   PeerStamp *slot = nullptr, *victim = nullptr;
 
@@ -190,6 +220,8 @@ void BLEBridge::peerAccept(const uint8_t addr[6], uint32_t timestamp, const uint
 
   slot->last_timestamp = timestamp;
   slot->last_seen = now;
+  slot->last_rssi = rssi;
+  slot->frames++;
   memcpy(slot->last_tag, tag, TAG_SIZE);
 }
 
@@ -206,11 +238,16 @@ void BLEBridge::onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t a
 
   const uint8_t *tag = &payload[signed_len];
 
-  /* Cheap gate first: a stale frame or a repeat is rejected without doing any
-     crypto, and a forged one cannot get past the tag anyway. Note this only
-     READS peer state -- see peerAllows(). */
+  /* Cheap gates first: a repeat or a stale frame is rejected without doing any
+     crypto, and a forged one cannot get past the tag anyway. Both only READ
+     peer state -- see peerAllows(). */
+  if (isDuplicate(addr, tag)) {
+    _num_dup++;
+    return;
+  }
   if (!peerAllows(addr, timestamp, tag)) {
     _num_replayed++;
+    BRIDGE_DEBUG_PRINTLN("BLE: RX stale, ts=%lu\n", (unsigned long)timestamp);
     return;
   }
 
@@ -226,7 +263,8 @@ void BLEBridge::onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t a
   }
 
   /* Authenticated: only now is it safe to move this sender's high-water mark. */
-  peerAccept(addr, timestamp, tag);
+  peerAccept(addr, timestamp, tag, rssi);
+  _num_rx_ok++;
 
 #if WITH_STATUS_LED
   // A bridged packet never reaches logRxRaw -- it is queued straight inbound --

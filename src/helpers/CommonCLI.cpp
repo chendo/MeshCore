@@ -566,6 +566,9 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       _callbacks->formatObserverReply(reply, 160, "heard");
     } else if (memcmp(command, "ble", 3) == 0 && (command[3] == 0 || command[3] == ' ')) {
       _callbacks->formatObserverReply(reply, 160, "ble");
+    } else if (memcmp(command, "bridge", 6) == 0 && (command[6] == 0 || command[6] == ' ')) {
+      const char* what = (command[6] == ' ') ? &command[7] : "";
+      _callbacks->formatBridgeReply(reply, 160, what);
     } else {
       strcpy(reply, "Unknown command");
     }

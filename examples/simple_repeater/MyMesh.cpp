@@ -832,6 +832,41 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 #endif
 }
 
+#if defined(WITH_BLE_BRIDGE)
+void MyMesh::formatBridgeReply(char *reply, size_t reply_size, const char* what) {
+  if (memcmp(what, "peers", 5) == 0) {
+    // Who we are actually bridging with, and how good the link is. RSSI here is
+    // the BLE link to that node, nothing to do with LoRa.
+    uint8_t n = bridge.numPeers();
+    int o = snprintf(reply, reply_size, "%d bridge peer(s):", (int)n);
+    for (uint8_t i = 0; i < n && o + 28 < (int)reply_size; i++) {
+      uint8_t addr[6];
+      int8_t rssi;
+      uint32_t age_ms, frames;
+      if (!bridge.getPeer(i, addr, rssi, age_ms, frames)) break;
+      // BLE addresses are little-endian on the wire; show the high 3 bytes,
+      // which is what identifies a device at a glance.
+      o += snprintf(&reply[o], reply_size - o, " %02X%02X%02X/%ddB/%lupkt/%lus",
+                    addr[5], addr[4], addr[3], (int)rssi,
+                    (unsigned long)frames, (unsigned long)(age_ms / 1000));
+    }
+    if (n == 0) snprintf(reply, reply_size, "no bridge peers heard yet");
+    return;
+  }
+
+  // seen = ok + dup + stale + bad, so the split says WHY frames were not used.
+  // dup is expected and healthy: each datagram is deliberately broadcast over
+  // several advertising events so a duty-cycled scanner cannot miss it.
+  snprintf(reply, reply_size,
+           "ble bridge %s: tx %lu drop %lu | rx seen %lu ok %lu dup %lu stale %lu bad %lu | peers %d",
+           bridge.isTransportUp() ? "up" : (bridge.isRunning() ? "starting" : "off"),
+           (unsigned long)bridge.numSent(), (unsigned long)bridge.numTxDropped(),
+           (unsigned long)bridge.numSeen(), (unsigned long)bridge.numRxOk(),
+           (unsigned long)bridge.numDup(), (unsigned long)bridge.numReplayed(),
+           (unsigned long)bridge.numBadTag(), (int)bridge.numPeers());
+}
+#endif
+
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 #ifdef WITH_BRIDGE
   if (_prefs.bridge_pkt_src == 1) {

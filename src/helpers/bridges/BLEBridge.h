@@ -87,13 +87,26 @@ public:
    *  repeater keep sleeping when the bridge is merely listening. */
   bool hasPendingTx() const { return _transport_up && _bcast.hasPendingWork(); }
 
-  /* Frames seen but rejected. A steadily climbing badTag count means another
-     group is in range on a different secret -- which is the mechanism working,
-     not a fault. Both are also traced when BRIDGE_DEBUG is on. */
-  uint32_t numBadTag() const { return _num_bad_tag; }
+  /* Telemetry. Every frame carrying our company ID is "seen"; it then lands in
+     exactly one of ok / dup / stale / badtag, so the four should sum to seen
+     (minus any malformed runt). A climbing badtag means another group is in
+     range on a different secret -- the mechanism working, not a fault. A large
+     dup count is normal and healthy: each datagram is deliberately broadcast
+     over several advertising events. */
+  bool isTransportUp() const { return _transport_up; }
+  uint32_t numSeen() const { return _bcast.numRecv(); }
+  uint32_t numRxOk() const { return _num_rx_ok; }
+  uint32_t numDup() const { return _num_dup; }
   uint32_t numReplayed() const { return _num_replayed; }
+  uint32_t numBadTag() const { return _num_bad_tag; }
   uint32_t numSent() const { return _bcast.numSent(); }
-  uint32_t numRecv() const { return _bcast.numRecv(); }
+  uint32_t numTxDropped() const { return _bcast.numTxDropped(); }
+
+  uint8_t numPeers() const;
+
+  /** @param age_ms  how long since we last accepted a frame from this peer */
+  bool getPeer(uint8_t idx, uint8_t addr[6], int8_t &rssi, uint32_t &age_ms,
+               uint32_t &frames) const;
 
 private:
   /**
@@ -123,6 +136,8 @@ private:
     uint32_t last_timestamp;   // by THEIR clock
     unsigned long last_seen;   // by ours, for staleness and eviction
     uint8_t last_tag[TAG_SIZE];// fingerprint of the last frame accepted
+    int8_t last_rssi;          // link quality to this bridge peer
+    uint32_t frames;           // accepted from this peer
     bool in_use;
   };
 
@@ -152,7 +167,11 @@ private:
   bool peerAllows(const uint8_t addr[6], uint32_t timestamp, const uint8_t *tag) const;
 
   /** Record an authenticated frame. Only called once the HMAC has verified. */
-  void peerAccept(const uint8_t addr[6], uint32_t timestamp, const uint8_t *tag);
+  void peerAccept(const uint8_t addr[6], uint32_t timestamp, const uint8_t *tag, int8_t rssi);
+
+  /** Distinguishes a suppressed repeat from a genuine stale frame, so the
+   *  telemetry can tell "working as designed" from "something is replaying". */
+  bool isDuplicate(const uint8_t addr[6], const uint8_t *tag) const;
 
   BleBroadcast _bcast;
   uint8_t _key[KEY_SIZE];
@@ -170,6 +189,8 @@ private:
 
   uint32_t _num_bad_tag = 0;
   uint32_t _num_replayed = 0;
+  uint32_t _num_dup = 0;
+  uint32_t _num_rx_ok = 0;
 };
 
 #endif

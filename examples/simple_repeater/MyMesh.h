@@ -261,6 +261,10 @@ protected:
 public:
   MeshObserver& observer() { return _obs; }
   void formatObserverReply(char *reply, size_t reply_size, const char* what) override;
+#endif
+#if defined(WITH_BLE_BRIDGE)
+public:
+  void formatBridgeReply(char *reply, size_t reply_size, const char* what) override;
 private:
 #endif
 #if WITH_BLE_CLI

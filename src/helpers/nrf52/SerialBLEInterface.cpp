@@ -31,6 +31,28 @@ void SerialBLEInterface::onConnect(uint16_t connection_handle) {
     instance->_isDeviceConnected = false;
     instance->clearBuffers();
   }
+
+#if WITH_BLE_CLI
+  // Ask the central to pair as soon as it connects, rather than waiting for it
+  // to trip over an encrypted characteristic and work out what to do.
+  //
+  // The NUS characteristics are SECMODE_ENC_WITH_MITM, so nothing can be read
+  // or written until the link is encrypted. Phone apps handle that themselves,
+  // but a desktop CoreBluetooth central does not: macOS simply fails the
+  // operation with "Encryption is insufficient" and never raises a pairing
+  // prompt, which makes the diagnostic port unusable from a Mac or Linux box.
+  // A security request from this side makes the central prompt for the passkey.
+  //
+  // Gated on WITH_BLE_CLI so the companion builds, where phone pairing already
+  // works, keep their existing behaviour exactly.
+  {
+    BLEConnection* conn = Bluefruit.Connection(connection_handle);
+    if (conn != nullptr && !conn->secured()) {
+      bool ok = conn->requestPairing();
+      BLE_DEBUG_PRINTLN("requestPairing() -> %s", ok ? "sent" : "FAILED");
+    }
+  }
+#endif
 }
 
 void SerialBLEInterface::onDisconnect(uint16_t connection_handle, uint8_t reason) {

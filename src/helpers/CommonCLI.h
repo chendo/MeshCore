@@ -107,6 +107,11 @@ public:
   virtual void formatObserverReply(char *reply, size_t reply_size, const char* what) {
     strcpy(reply, "observer not built into this firmware");
   }
+  // Bridge telemetry. Default-implemented so examples carrying no bridge, or a
+  // bridge with no stats of its own, are unaffected.
+  virtual void formatBridgeReply(char *reply, size_t reply_size, const char* what) {
+    strcpy(reply, "no bridge telemetry in this firmware");
+  }
   virtual void formatMemoryReply(char *reply, size_t reply_size) = 0;
   virtual mesh::LocalIdentity& getSelfId() = 0;
   virtual void saveIdentity(const mesh::LocalIdentity& new_id) = 0;
