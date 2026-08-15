@@ -220,6 +220,25 @@ void MeshObserver::noteAdvert(const uint8_t* frame, int len, int8_t snr4) {
   // one hop away. Otherwise it sits beyond the forwarders that did relay it.
   uint8_t dist = (uint8_t)(hops + 1);
 
+  // Time this advert, and take a clock reading from it, BEFORE the peer-table
+  // rules below get a say. A table slot is only granted to a node within two
+  // hops -- correct for a neighbour table, and fatal here: a repeater indoors
+  // hears mostly distant traffic, and gating on the slot left the estimator
+  // with nothing to work from at all.
+  int32_t  clock_delta = 0;
+  bool     have_clock = false;
+  if (_clock != nullptr) {
+    uint32_t their_ts;
+    memcpy(&their_ts, &frame[o + 32], 4);           // [pub_key 32][timestamp 4]
+    uint32_t ours = _clock->getCurrentTime();
+    if (their_ts >= MIN_SANE_EPOCH && ours >= MIN_SANE_EPOCH) {
+      clock_delta = (int32_t)(their_ts - ours);
+      have_clock = true;
+      noteSighting(pub, their_ts, hops);
+      noteClockSample(pub, hops, clock_delta);
+    }
+  }
+
   int idx = findPeer(pub, 3);
   if (idx == -2) return;                              // ambiguous, leave alone
   if (idx < 0) {
@@ -247,22 +266,10 @@ void MeshObserver::noteAdvert(const uint8_t* frame, int len, int8_t snr4) {
   // only — see PeerEntry::clock_delta_s for why a relayed advert cannot be
   // used. Both sides must believe they know the date, or the subtraction is
   // measuring "never synced" rather than drift.
-  if (_clock != nullptr) {
-    uint32_t their_ts;
-    memcpy(&their_ts, &frame[o + 32], 4);           // [pub_key 32][timestamp 4]
-    uint32_t ours = _clock->getCurrentTime();
-    if (their_ts >= MIN_SANE_EPOCH && ours >= MIN_SANE_EPOCH) {
-      // Time this copy of the advert against any earlier copy, whatever path
-      // each arrived by -- this is what measures the per-hop delay.
-      noteSighting(pub, their_ts, hops);
-      noteClockSample(pub, hops, (int32_t)(their_ts - ours));
-
-      if (hops == 0) {   // the peer table shows skew for neighbours only
-        e.clock_delta_s = (int32_t)(their_ts - ours);
-        e.clock_ms = e.last_ms;
-        e.clock_n++;
-      }
-    }
+  if (have_clock && hops == 0) {   // the peer table shows skew for neighbours only
+    e.clock_delta_s = clock_delta;
+    e.clock_ms = e.last_ms;
+    e.clock_n++;
   }
 
   const uint8_t* ad = &frame[o + 100];
