@@ -1194,9 +1194,15 @@ void MyMesh::formatBridgeReply(char *reply, const char* what) {
   // dup is expected and healthy (each datagram is deliberately broadcast over
   // several advertising events); other is ambient traffic from anyone else
   // using the shared 0xFFFF development company ID.
+  // The secret is not optional -- every frame is tagged and every frame is
+  // checked -- but the DEFAULT is published in this source file, so a node still
+  // carrying it will accept anything anyone in radio range cares to inject.
+  // Say so rather than let a green-looking line imply otherwise.
+  const bool default_secret = (strcmp(_prefs.bridge_secret, "LVSITANOS") == 0);
   snprintf(reply, reply_size,
-           "ble bridge %s: tx %lu drop %lu | rx seen %lu ok %lu dup %lu bad %lu other %lu | peers %d",
+           "ble bridge %s%s: tx %lu drop %lu | rx seen %lu ok %lu dup %lu bad %lu other %lu | peers %d",
            bridge.isTransportUp() ? "up" : (bridge.isRunning() ? "starting" : "off"),
+           default_secret ? " [DEFAULT SECRET - anyone can inject]" : "",
            (unsigned long)bridge.numSent(), (unsigned long)bridge.numTxDropped(),
            (unsigned long)bridge.numSeen(), (unsigned long)bridge.numRxOk(),
            (unsigned long)bridge.numDup(), (unsigned long)bridge.numBadTag(),
