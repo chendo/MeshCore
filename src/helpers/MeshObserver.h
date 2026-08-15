@@ -55,12 +55,88 @@ public:
     uint8_t  pub[6];           // pubkey prefix; all-zero while unknown
     int32_t  lat_e6, lon_e6;   // 0 when not advertised
     char     name[20];
+    // Clock skew. An ADVERT is signed over a timestamp its originator chose,
+    // so an advert heard at ZERO HOPS is a direct reading of that node's clock
+    // against ours — the only time reference the mesh hands us for free.
+    //
+    // Zero hops is not a nicety. A relayed advert still carries the moment it
+    // was created, and a flood takes seconds to minutes to work across the
+    // mesh (and is re-flooded long after), so the same subtraction on a
+    // multi-hop advert measures propagation delay, not skew, and always makes
+    // the far node look slow. Those are discarded rather than averaged in.
+    int32_t  clock_delta_s;    // their clock minus ours; positive => they are ahead
+    uint32_t clock_ms;         // millis() at that reading; 0 = never measured
+    uint32_t clock_n;          // readings taken
+    // The previous reading, kept only so a RATE can be estimated. A crystal is
+    // good to a few seconds a day; a node showing hundreds or thousands is
+    // being reset rather than drifting, and must not get a vote.
+    int32_t  prev_clock_delta_s;
+    uint32_t prev_clock_ms;
   };
+
+  // Below this a clock is simply unset rather than wrong: a node that has
+  // never been disciplined reports something near zero or its build epoch, and
+  // recording a 56-year "skew" for it would say nothing about anyone's drift.
+  static const uint32_t MIN_SANE_EPOCH = 1700000000UL;   // 2023-11-14
+
+  /* Clock consensus -- see clockConsensus(). Thresholds come from a 407-node
+     survey of a real regional mesh:
+       - median offset -12s, MAD 7s, but the mean was -46s and the range
+         -3533..+1239, so any mean-based estimate is unusable;
+       - 21% of nodes were outliers by 3*MAD, and discarding them left the
+         estimate unchanged;
+       - the extremes were not lone bad clocks but whole GROUPS sharing an
+         offset (-227s x6, -211s x5, +335s x4), i.e. sub-networks that agreed
+         with each other and were wrong together;
+       - 10 nodes reported physically impossible rates (up to 58485 s/day). */
+  static const int32_t  MAX_SANE_DRIFT_S_PER_DAY = 50;
+  static const uint32_t CLOCK_VOTE_MAX_AGE_MS = 60UL * 60UL * 1000UL;   // 1 hour
+  static const uint8_t  CLOCK_MIN_SOURCES = 3;
+  /* Both clocks are read to the second, so a drift verdict taken over a short
+     span is mostly quantisation: to call 50 s/day apart from noise the readings
+     must be hours apart, not minutes. Below this span we abstain rather than
+     reject -- a racing clock will be an outlier soon enough anyway. */
+  static const uint32_t DRIFT_MIN_SPAN_MS = 2UL * 60UL * 60UL * 1000UL;
+  /* Floor under the outlier threshold, so a mesh that already agrees to within
+     a second does not reject almost everything for being 1s out. */
+  static const int32_t  CLOCK_CLIP_FLOOR_S = 2;
+
+  struct ClockConsensus {
+    bool     valid;
+    int32_t  offset_s;    // seconds to ADD to our clock to join the consensus
+    uint8_t  n_seen;      // peers that offered a usable reading
+    uint8_t  n_used;      // survivors after outlier rejection
+    uint8_t  agree_pct;   // n_used * 100 / n_seen -- what fraction survived
+    /* Spread of the survivors. agree_pct alone is NOT a confidence measure: a
+       population split evenly between two beliefs 300s apart loses nobody to
+       clipping, so it reports 100% agreement on a median that not one node
+       actually holds. Anything about to act on offset_s must check this too. */
+    int32_t  spread_s;
+  };
+
+  /**
+   * @brief  What the neighbourhood thinks our clock error is.
+   *
+   * Median of per-peer offsets after discarding outliers by median-absolute-
+   * deviation. Readings are zero-hop by construction (a relayed advert measures
+   * propagation delay, not skew), and are additionally filtered by age, by
+   * whether the peer's apparent rate is physically possible, and by collapsing
+   * peers reporting an identical offset -- in the survey a single group of 41
+   * nodes shared one offset, and left uncollapsed it would have voted 41 times.
+   *
+   * Reports only. Deciding whether to act on it is the caller's business.
+   */
+  ClockConsensus clockConsensus() const;
 
   // Register one of OUR public keys, so "did somebody relay us?" can be
   // answered and we never record ourselves as our own peer. Call once per
   // identity; a single-identity node calls it once.
   void addSelfKey(const uint8_t* pub_key);
+
+  // Our own time source, so peers' advert timestamps can be differenced
+  // against something. Optional: leave it unset and clock skew is simply never
+  // recorded — nothing else in the observer depends on it.
+  void setClock(mesh::RTCClock* clk) { _clock = clk; }
 
   // Feed every received frame, with the SNR it arrived at (in quarter-dB, as
   // the packet log stores it).
@@ -108,6 +184,34 @@ public:
   void setConfirmWindow(uint32_t ms) { _confirm_window_ms = ms; }
   uint32_t confirmWindow() const { return _confirm_window_ms; }
 
+  // ---- table pressure -------------------------------------------------------
+  // The table is small and the mesh is not, so once every slot is taken it has
+  // to choose what to forget. Plain LRU is wrong here: it would discard a
+  // neighbour we have PROVEN can hear us in favour of a node we glimpsed once in
+  // somebody else's path. Value decides first; recency only breaks ties.
+  //
+  //   3  heard_us > 0            it relayed something of OURS — two-way, proven
+  //   2  direct + strong SNR     we hear it well, straight off its radio
+  //   1  direct, marginal SNR    we hear it, but the link is weak
+  //   0  relay sightings only    never heard directly; may not even be nearby
+  //
+  // New entries start at tier 0, which makes the bottom of the table probation:
+  // an arrival has to earn a direct sighting before it becomes hard to displace.
+  //
+  // Anything at tier 1 or above is evicted ONLY once it has gone quiet for
+  // STALE_MS. Without that, a table full of good neighbours would be steadily
+  // cannibalised by unproven relay sightings, which is the opposite of useful.
+  // When nothing is eligible the new sighting is refused and counted, so a
+  // wedged table is visible as refusals rather than looking like a quiet mesh.
+  static const int8_t   STRONG_SNR_4 = 0;             // mean SNR*4 >= 0 dB
+  static const uint32_t STALE_MS = 3600000UL;         // an hour with no sighting
+  int peerTier(const PeerEntry& e) const;
+  uint32_t evictions() const { return _evictions; }
+  uint32_t refusedInserts() const { return _refused; }
+  // entries currently held at each hash width; 1-byte ones are collision-prone
+  // and should not be presented as confidently as the rest
+  int widthCount(int bytes) const;
+
   // ---- what was learned ----
   int numPeers() const { return _num_peers; }
   const PeerEntry* peer(int i) const { return (i >= 0 && i < _num_peers) ? &_peers[i] : nullptr; }
@@ -133,6 +237,10 @@ private:
   // Exactly one entry matching `hash` to min(width, entry width) bytes, or
   // -1 for none and -2 when the prefix is too short to disambiguate.
   int  findPeer(const uint8_t* hash, uint8_t width) const;
+  // Slot for a newly-seen node: a free one, else an evictable entry, else -1
+  // (refused). Ages are computed against `now` so the millis() wrap is harmless.
+  int  claimSlot(uint32_t now);
+  int  evictionVictim(uint32_t now) const;
   void notePeersInPath(const uint8_t* frame, int len, int8_t snr4);
   void noteAdvert(const uint8_t* frame, int len, int8_t snr4);
   int  selfIndex(const uint8_t* hash, uint8_t width) const;   // -1 if not ours
@@ -140,10 +248,14 @@ private:
 
   PeerEntry _peers[MAX_PEERS];
   int       _num_peers = 0;
+  uint32_t  _evictions = 0;
+  uint32_t  _refused = 0;
 
   static const int MAX_SELF = 8;
   uint8_t _self[MAX_SELF][4];
   int     _num_self = 0;
+
+  mesh::RTCClock* _clock = nullptr;
 
   // Recent flood transmits awaiting confirmation. A relay may take a while to
   // come back, so this is a time window rather than a single slot.

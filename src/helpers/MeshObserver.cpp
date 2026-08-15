@@ -7,6 +7,7 @@ void MeshObserver::addSelfKey(const uint8_t* pub_key) {
 
 void MeshObserver::reset() {
   _num_peers = 0;
+  _evictions = _refused = 0;
   _frames = 0;
   _tx_ring_head = _tx_ring_count = 0;
   memset(_flood_sent, 0, sizeof(_flood_sent));
@@ -64,6 +65,50 @@ void MeshObserver::creditRelay(int stream, uint8_t hash_width) {
   }
 }
 
+int MeshObserver::peerTier(const PeerEntry& e) const {
+  if (e.heard_us > 0) return 3;                   // it has relayed us: proven
+  if (e.direct_rx > 0) {
+    if (e.snr_n > 0 && e.snr4_sum / (int32_t)e.snr_n >= STRONG_SNR_4) return 2;
+    return 1;
+  }
+  return 0;
+}
+
+int MeshObserver::widthCount(int bytes) const {
+  if (bytes < 1 || bytes > 3) return 0;
+  int n = 0;
+  for (int i = 0; i < _num_peers; i++) if (_peers[i].width == bytes) n++;
+  return n;
+}
+
+int MeshObserver::evictionVictim(uint32_t now) const {
+  int best = -1, best_tier = 0, best_wide = 0;
+  uint32_t best_age = 0;
+  for (int i = 0; i < _num_peers; i++) {
+    const PeerEntry& e = _peers[i];
+    int tier = peerTier(e);
+    uint32_t age = now - e.last_ms;               // unsigned: wrap-safe
+    // Everything we have actually heard is spared until it goes quiet. Only
+    // relay-only sightings can be dropped while still fresh.
+    if (tier > 0 && age < STALE_MS) continue;
+    int wide = (e.width >= 2) ? 1 : 0;            // 1-byte hashes go first
+    if (best < 0 || tier < best_tier ||
+        (tier == best_tier && wide < best_wide) ||
+        (tier == best_tier && wide == best_wide && age > best_age)) {
+      best = i; best_tier = tier; best_wide = wide; best_age = age;
+    }
+  }
+  return best;
+}
+
+int MeshObserver::claimSlot(uint32_t now) {
+  if (_num_peers < MAX_PEERS) return _num_peers++;
+  int victim = evictionVictim(now);
+  if (victim < 0) { _refused++; return -1; }      // all slots held by live peers
+  _evictions++;
+  return victim;
+}
+
 int MeshObserver::findPeer(const uint8_t* hash, uint8_t width) const {
   int found = -1;
   for (int i = 0; i < _num_peers; i++) {
@@ -119,8 +164,8 @@ void MeshObserver::notePeersInPath(const uint8_t* frame, int len, int8_t snr4) {
     int idx = findPeer(hop, sz);
     if (idx == -2) continue;                     // ambiguous, attribute nothing
     if (idx < 0) {
-      if (_num_peers >= MAX_PEERS) continue;     // table full; keep what we have
-      idx = _num_peers++;
+      idx = claimSlot(now);
+      if (idx < 0) continue;                     // every slot held by a live peer
       PeerEntry& n = _peers[idx];
       memset(&n, 0, sizeof(n));
       memcpy(n.hash, hop, sz);
@@ -178,8 +223,9 @@ void MeshObserver::noteAdvert(const uint8_t* frame, int len, int8_t snr4) {
   int idx = findPeer(pub, 3);
   if (idx == -2) return;                              // ambiguous, leave alone
   if (idx < 0) {
-    if (dist > 2 || _num_peers >= MAX_PEERS) return;  // only near nodes earn a slot
-    idx = _num_peers++;
+    if (dist > 2) return;                             // only near nodes earn a slot
+    idx = claimSlot(millis());
+    if (idx < 0) return;                              // nothing evictable
     PeerEntry& n = _peers[idx];
     memset(&n, 0, sizeof(n));
     memcpy(n.hash, pub, 3);
@@ -196,6 +242,29 @@ void MeshObserver::noteAdvert(const uint8_t* frame, int len, int8_t snr4) {
   }
 
   memcpy(e.pub, pub, sizeof(e.pub));
+
+  // Their clock against ours, from this advert's signed timestamp. Zero hops
+  // only — see PeerEntry::clock_delta_s for why a relayed advert cannot be
+  // used. Both sides must believe they know the date, or the subtraction is
+  // measuring "never synced" rather than drift.
+  if (hops == 0 && _clock != nullptr) {
+    uint32_t their_ts;
+    memcpy(&their_ts, &frame[o + 32], 4);           // [pub_key 32][timestamp 4]
+    uint32_t ours = _clock->getCurrentTime();
+    if (their_ts >= MIN_SANE_EPOCH && ours >= MIN_SANE_EPOCH) {
+      // Roll the standing reading down into prev_* once it is far enough back
+      // to be a useful baseline, so the span a drift estimate is taken over
+      // grows to something meaningful instead of tracking one advert interval.
+      if (e.clock_ms != 0 && (e.prev_clock_ms == 0 ||
+          (uint32_t)(e.clock_ms - e.prev_clock_ms) >= DRIFT_MIN_SPAN_MS)) {
+        e.prev_clock_delta_s = e.clock_delta_s;
+        e.prev_clock_ms = e.clock_ms;
+      }
+      e.clock_delta_s = (int32_t)(their_ts - ours);
+      e.clock_ms = e.last_ms;
+      e.clock_n++;
+    }
+  }
 
   const uint8_t* ad = &frame[o + 100];
   int ad_len = len - (o + 100);
@@ -216,4 +285,93 @@ void MeshObserver::noteAdvert(const uint8_t* frame, int len, int8_t snr4) {
     e.name[n] = 0;
     for (int k = 0; k < n; k++) if ((uint8_t)e.name[k] < 0x20) { e.name[k] = 0; break; }
   }
+}
+
+/* Sorted ascending in place. n is bounded by MAX_PEERS and usually under ten,
+   where an insertion sort beats qsort and its comparator indirection. */
+static void sortInPlace(int32_t* a, int n) {
+  for (int i = 1; i < n; i++) {
+    int32_t v = a[i];
+    int j = i - 1;
+    while (j >= 0 && a[j] > v) { a[j + 1] = a[j]; j--; }
+    a[j + 1] = v;
+  }
+}
+
+static int32_t medianOfSorted(const int32_t* a, int n) {
+  if (n <= 0) return 0;
+  if (n & 1) return a[n / 2];
+  // Integer division truncates toward zero, which is what we want: an even
+  // split either side of true time should not manufacture a correction.
+  return (a[n / 2 - 1] + a[n / 2]) / 2;
+}
+
+MeshObserver::ClockConsensus MeshObserver::clockConsensus() const {
+  ClockConsensus c;
+  c.valid = false; c.offset_s = 0; c.n_seen = 0; c.n_used = 0;
+  c.agree_pct = 0; c.spread_s = 0;
+
+  int32_t d[MAX_PEERS];
+  int n = 0;
+  uint32_t now = millis();
+
+  for (int i = 0; i < _num_peers && n < MAX_PEERS; i++) {
+    const PeerEntry& e = _peers[i];
+    if (e.clock_n == 0 || e.clock_ms == 0) continue;                     // never measured
+    if ((uint32_t)(now - e.clock_ms) > CLOCK_VOTE_MAX_AGE_MS) continue;  // stale
+
+    // A rate no crystal can produce means that clock is being SET, not
+    // drifting, and its current value says nothing about what time it is.
+    if (e.prev_clock_ms != 0) {
+      uint32_t span = (uint32_t)(e.clock_ms - e.prev_clock_ms);
+      if (span >= DRIFT_MIN_SPAN_MS) {
+        int64_t per_day = ((int64_t)(e.clock_delta_s - e.prev_clock_delta_s)
+                           * 86400000LL) / (int64_t)span;
+        if (per_day > MAX_SANE_DRIFT_S_PER_DAY ||
+            per_day < -MAX_SANE_DRIFT_S_PER_DAY) continue;
+      }
+    }
+
+    // Collapse a cluster to a single vote. Nodes sharing an upstream sync
+    // source share its error exactly, so counting them individually lets one
+    // wrong sub-network outvote the rest of the mesh on population alone.
+    bool dup = false;
+    for (int j = 0; j < n; j++) if (d[j] == e.clock_delta_s) { dup = true; break; }
+    if (dup) continue;
+
+    d[n++] = e.clock_delta_s;
+  }
+
+  c.n_seen = (uint8_t)n;
+  if (n < CLOCK_MIN_SOURCES) return c;
+
+  sortInPlace(d, n);
+  int32_t med = medianOfSorted(d, n);
+
+  // Median absolute deviation: the spread of the honest majority, and unlike a
+  // standard deviation it does not care how extreme the outliers are.
+  int32_t dev[MAX_PEERS];
+  for (int i = 0; i < n; i++) { int32_t v = d[i] - med; dev[i] = v < 0 ? -v : v; }
+  sortInPlace(dev, n);
+  int32_t mad = medianOfSorted(dev, n);
+
+  // 3 * 1.4826 * MAD is the three-sigma equivalent for a normal core.
+  int32_t limit = (int32_t)(((int64_t)mad * 4448) / 1000);
+  if (limit < CLOCK_CLIP_FLOOR_S) limit = CLOCK_CLIP_FLOOR_S;
+
+  int32_t kept[MAX_PEERS];
+  int k = 0;
+  for (int i = 0; i < n; i++) {          // d is sorted, so kept stays sorted
+    int32_t v = d[i] - med;
+    if (v < 0) v = -v;
+    if (v <= limit) kept[k++] = d[i];
+  }
+  if (k < CLOCK_MIN_SOURCES) return c;
+
+  c.offset_s  = medianOfSorted(kept, k);
+  c.spread_s  = mad;
+  c.n_used    = (uint8_t)k;
+  c.agree_pct = (uint8_t)((k * 100) / n);
+  c.valid     = true;
+  return c;
 }

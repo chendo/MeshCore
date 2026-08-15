@@ -258,9 +258,48 @@ protected:
   // Passive metrics fed from the raw receive/transmit hooks above. Costs a few
   // KB of RAM and nothing on air; off unless the build asks for it.
   MeshObserver _obs;
+
+  /* Clock convergence: steer our clock towards what the zero-hop neighbourhood
+     says the time is. The observer supplies the estimate; the policy for acting
+     on it lives here -- see maybeConvergeClock(). Off until "clocks on". */
+  static const uint32_t CLOCK_CONVERGE_INTERVAL_MS = 5UL * 60UL * 1000UL;
+  static const int32_t  CLOCK_DEADBAND_S = 2;     // agreement to the second is enough
+  static const int32_t  CLOCK_SLEW_MAX_S = 2;     // per interval, either direction
+  static const int32_t  CLOCK_STEP_MIN_S = 30;    // below this, never worth a jump
+  static const uint8_t  CLOCK_STEP_MIN_AGREE = 80;
+  /* A survey of a real 407-node mesh put the false-fire rate of the step gate
+     at 0.2% of rounds with eight sources but 4.3% with four, so a step needs a
+     real quorum. Six is the compromise; raise it to eight if a node is somewhere
+     dense enough to afford it. */
+  static const uint8_t  CLOCK_STEP_MIN_SOURCES = 6;
+  /* And the survivors must actually agree with each other, not merely all
+     survive clipping -- see ClockConsensus::spread_s. A genuine just-rebooted
+     correction has every neighbour saying the same thing to within a second or
+     two; a mesh split between two beliefs does not.
+
+     15s is roughly twice the 7s MAD the survey mesh runs at, which lets a
+     genuinely-wrong node step within about three rounds while still leaving an
+     order of magnitude of margin against the failure this guards: an evenly
+     split population reports 100% agreement on a midpoint nobody holds, and
+     its spread came out at 150s. Sweeping the threshold from 3s to 30s never
+     once let that case through, and never lifted the false-fire rate for a
+     healthy node above 0.05%. */
+  static const int32_t  CLOCK_STEP_MAX_SPREAD_S = 15;
+  static const uint32_t CLOCK_HOLDOVER_MS = 6UL * 60UL * 60UL * 1000UL;
+
+  bool     _clock_converge = false;
+  uint32_t _next_clock_converge_ms = 0;
+  uint32_t _clock_extern_set_ms = 0;
+  bool     _clock_ever_set = false;
+  int32_t  _last_clock_adj_s = 0;
+  uint32_t _clock_steps = 0;
+  uint32_t _clock_slews = 0;
+  void maybeConvergeClock();
+
 public:
   MeshObserver& observer() { return _obs; }
   void formatObserverReply(char *reply, size_t reply_size, const char* what) override;
+  void onClockSetExternally() override;
 #endif
 #if defined(WITH_BLE_BRIDGE)
 public:

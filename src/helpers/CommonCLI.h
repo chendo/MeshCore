@@ -104,6 +104,12 @@ public:
   // Passive observability (MeshObserver): peer table, hop and type histograms,
   // relay confirmation. Default-implemented so examples that do not carry an
   // observer are unaffected.
+  /* The clock was just set by something authoritative -- a person, or a client
+     app that knows the real time. Anything inferring the time from neighbours
+     should stand down for a while afterwards rather than drag a known-good
+     clock back towards a mesh that may be collectively wrong. */
+  virtual void onClockSetExternally() {
+  }
   virtual void formatObserverReply(char *reply, size_t reply_size, const char* what) {
     strcpy(reply, "observer not built into this firmware");
   }

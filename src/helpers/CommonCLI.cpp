@@ -303,10 +303,14 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       // send flood advert
       _callbacks->sendSelfAdvertisement(1500, true);  // longer delay, give CLI response time to be sent first
       strcpy(reply, "OK - Advert sent");
+    } else if (memcmp(command, "clocks", 6) == 0 && (command[6] == 0 || command[6] == ' ')) {
+      // must precede the "clock" matches below, which would otherwise swallow it
+      _callbacks->formatObserverReply(reply, 160, command);   // "clocks", "clocks on|off"
     } else if (memcmp(command, "clock sync", 10) == 0) {
       uint32_t curr = getRTCClock()->getCurrentTime();
       if (sender_timestamp > curr) {
         getRTCClock()->setCurrentTime(sender_timestamp + 1);
+        _callbacks->onClockSetExternally();
         uint32_t now = getRTCClock()->getCurrentTime();
         DateTime dt = DateTime(now);
         sprintf(reply, "OK - clock set: %02d:%02d - %d/%d/%d UTC", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
@@ -325,6 +329,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     } else if (memcmp(command, "time.force ", 11) == 0) {  // force set time (to epoch seconds)
       uint32_t secs = _atoi(&command[11]);
       getRTCClock()->setCurrentTime(secs);
+      _callbacks->onClockSetExternally();
       uint32_t now = getRTCClock()->getCurrentTime();
       DateTime dt = DateTime(now);
       sprintf(reply, "OK - clock force-set: %02d:%02d - %d/%d/%d UTC", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
@@ -333,6 +338,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       uint32_t curr = getRTCClock()->getCurrentTime();
       if (secs > curr) {
         getRTCClock()->setCurrentTime(secs);
+        _callbacks->onClockSetExternally();
         uint32_t now = getRTCClock()->getCurrentTime();
         DateTime dt = DateTime(now);
         sprintf(reply, "OK - clock set: %02d:%02d - %d/%d/%d UTC", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());

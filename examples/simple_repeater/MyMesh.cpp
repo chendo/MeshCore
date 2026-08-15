@@ -1677,6 +1677,63 @@ void MyMesh::formatPacketStatsReply(char *reply, size_t reply_size) {
 }
 
 #if WITH_MESH_OBSERVER
+void MyMesh::onClockSetExternally() {
+  _clock_extern_set_ms = millis();
+  _clock_ever_set = true;
+}
+
+/**
+ * @brief  Steer our clock towards the zero-hop neighbourhood's consensus.
+ *
+ * The estimator lives in MeshObserver; everything here is policy, and it is
+ * deliberately asymmetric. MeshCore itself refuses to move a clock backwards
+ * ("clock sync" and "time" both do), because the replay defences -- a contact's
+ * last_advert_timestamp, a client's last_timestamp -- assume our timestamps
+ * only ever increase. So:
+ *
+ *   behind, and the neighbourhood is emphatic  -> step the whole way at once
+ *   behind slightly, or ahead at all           -> slew, a couple of seconds a time
+ *
+ * Stepping forward is the just-rebooted case, where slewing would take days to
+ * close a gap of minutes. Stepping backward is never allowed: the most we do
+ * when we are ahead is bleed it off slowly, and even that is a small
+ * monotonicity violation, so it is capped hard.
+ */
+void MyMesh::maybeConvergeClock() {
+  if (!_clock_converge || !millisHasNowPassed(_next_clock_converge_ms)) return;
+  _next_clock_converge_ms = futureMillis(CLOCK_CONVERGE_INTERVAL_MS);
+
+  // A clock a person or a client app just set beats anything the neighbourhood
+  // can offer. The survey this is tuned against found whole sub-networks that
+  // agreed with each other and were wrong together by minutes, and a node with
+  // good time surrounded by one of those would otherwise be dragged into it.
+  if (_clock_ever_set &&
+      !millisHasNowPassed(_clock_extern_set_ms + CLOCK_HOLDOVER_MS)) return;
+
+  MeshObserver::ClockConsensus cc = _obs.clockConsensus();
+  if (!cc.valid) return;
+
+  const int32_t off = cc.offset_s;            // seconds to ADD to our clock
+  if (off >= -CLOCK_DEADBAND_S && off <= CLOCK_DEADBAND_S) return;
+
+  int32_t adj;
+  if (off >= CLOCK_STEP_MIN_S && cc.agree_pct >= CLOCK_STEP_MIN_AGREE
+      && cc.n_used >= CLOCK_STEP_MIN_SOURCES
+      && cc.spread_s <= CLOCK_STEP_MAX_SPREAD_S) {
+    adj = off;
+    _clock_steps++;
+  } else {
+    adj = (off > 0) ? CLOCK_SLEW_MAX_S : -CLOCK_SLEW_MAX_S;
+    if (off > 0 && off < adj) adj = off;      // never overshoot into oscillation
+    if (off < 0 && off > adj) adj = off;
+    _clock_slews++;
+  }
+
+  uint32_t now = getRTCClock()->getCurrentTime();
+  getRTCClock()->setCurrentTime((uint32_t)((int64_t)now + adj));
+  _last_clock_adj_s = adj;
+}
+
 void MyMesh::formatObserverReply(char *reply, size_t reply_size, const char* what) {
   size_t o = 0;
   if (strcmp(what, "hops") == 0) {
@@ -1725,6 +1782,33 @@ void MyMesh::formatObserverReply(char *reply, size_t reply_size, const char* wha
              (unsigned long)(sent ? conf * 100 / sent : 0),
              (unsigned long)_obs.confirmsByWidth(2), (unsigned long)_obs.confirmsByWidth(1),
              (unsigned long)_obs.confirmWindow());
+  } else if (memcmp(what, "clocks", 6) == 0) {
+    const char* arg = (what[6] == ' ') ? &what[7] : "";
+    if (memcmp(arg, "on", 2) == 0) {
+      _clock_converge = true;
+      _next_clock_converge_ms = futureMillis(CLOCK_CONVERGE_INTERVAL_MS);
+    } else if (memcmp(arg, "off", 3) == 0) {
+      _clock_converge = false;
+    }
+    uint32_t hold_m = 0;
+    if (_clock_ever_set) {
+      uint32_t since = millis() - _clock_extern_set_ms;
+      if (since < CLOCK_HOLDOVER_MS) hold_m = (CLOCK_HOLDOVER_MS - since) / 60000;
+    }
+    MeshObserver::ClockConsensus cc = _obs.clockConsensus();
+    if (cc.valid) {
+      snprintf(reply, reply_size,
+               "clocks %s: %+ds from %u/%u src (%u%% agree, spread %ds); step %lu slew %lu last %+ds; hold %lum",
+               _clock_converge ? "on" : "off", (int)cc.offset_s, cc.n_used, cc.n_seen,
+               cc.agree_pct, (int)cc.spread_s, (unsigned long)_clock_steps, (unsigned long)_clock_slews,
+               (int)_last_clock_adj_s, (unsigned long)hold_m);
+    } else {
+      snprintf(reply, reply_size,
+               "clocks %s: no consensus (%u usable of %d peers, need %u); step %lu slew %lu; hold %lum",
+               _clock_converge ? "on" : "off", cc.n_seen, _obs.numPeers(),
+               MeshObserver::CLOCK_MIN_SOURCES, (unsigned long)_clock_steps,
+               (unsigned long)_clock_slews, (unsigned long)hold_m);
+    }
   } else if (memcmp(what, "peers ", 6) == 0) {
     // One peer as JSON, so a host tool can page the whole table out: the human
     // summary below cannot show more than a handful inside a 160-byte reply,
@@ -1768,8 +1852,15 @@ void MyMesh::formatObserverReply(char *reply, size_t reply_size, const char* wha
     }
     snprintf(&reply[o], reply_size - o, "}");
   } else {   // peers
-    o += snprintf(reply, reply_size, "%d peers, %d confirmed hearing us:",
-                  _obs.numPeers(), _obs.confirmedPeerCount());
+    // Churn matters as much as the count: a table sitting at its limit reads
+    // the same whether it is calmly tracking the neighbourhood or thrashing.
+    // Evictions say it is turning over; refusals say it is wedged full of live
+    // peers and losing sightings. Widths say how much of it to trust at all.
+    o += snprintf(reply, reply_size,
+                  "%d/%d peers (%dx1B collision-prone), %d confirmed hearing us; evicted %lu, refused %lu:",
+                  _obs.numPeers(), MeshObserver::MAX_PEERS, _obs.widthCount(1),
+                  _obs.confirmedPeerCount(),
+                  (unsigned long)_obs.evictions(), (unsigned long)_obs.refusedInserts());
     // nearest and most-heard first: those are the ones that describe our links
     for (int pass = 1; pass <= 2 && o + 24 < reply_size; pass++) {
       for (int i = 0; i < _obs.numPeers() && o + 24 < reply_size; i++) {
@@ -3183,6 +3274,10 @@ void MyMesh::loop() {
   last_millis = now;
 
   mesh::Mesh::loop();
+
+#if WITH_MESH_OBSERVER
+  maybeConvergeClock();
+#endif
 
   if (next_flood_advert && millisHasNowPassed(next_flood_advert)) {
     mesh::Packet *pkt = createSelfAdvert();
