@@ -120,9 +120,24 @@ private:
      so our broadcast and the connectable CLI/DFU advert cannot both run. We
      guarantee the connectable advert at least CONNECTABLE_MIN_MS of every
      CONNECTABLE_PERIOD_MS, otherwise a busy bridge would make the diagnostic
-     port undiscoverable. */
-  static const uint32_t CONNECTABLE_PERIOD_MS = 2000;
-  static const uint32_t CONNECTABLE_MIN_MS = 300;
+     port undiscoverable.
+     
+     What matters for DISCOVERY is not the reserved fraction but how often a
+     reserved window overlaps the scanner's. A central scans in windows of its
+     own, so one long window every two seconds is easy to keep missing; the same
+     budget split into shorter, more frequent windows is found far sooner. Hence
+     a 1s cycle rather than 2s, and a third of it reserved rather than 15%.
+     Bridge throughput drops to ~2/3 of its ceiling, which is still far above
+     what a repeater generates. Override per build if a node is bridge-heavy and
+     never needs to be connected to. */
+#ifndef BLE_BRIDGE_CONNECTABLE_PERIOD_MS
+  #define BLE_BRIDGE_CONNECTABLE_PERIOD_MS 1000
+#endif
+#ifndef BLE_BRIDGE_CONNECTABLE_MIN_MS
+  #define BLE_BRIDGE_CONNECTABLE_MIN_MS 350
+#endif
+  static const uint32_t CONNECTABLE_PERIOD_MS = BLE_BRIDGE_CONNECTABLE_PERIOD_MS;
+  static const uint32_t CONNECTABLE_MIN_MS = BLE_BRIDGE_CONNECTABLE_MIN_MS;
 
   /* Scan window/interval in 625us units: 40ms of every 50ms, i.e. 80% duty.
      Deliberately not 100% -- the SoftDevice needs slack to service our own

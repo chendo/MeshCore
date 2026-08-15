@@ -228,7 +228,17 @@ void BleBroadcast::loop() {
     _burst_ms_in_window = 0;
   }
   if (_burst_ms_in_window >= CONNECTABLE_PERIOD_MS - CONNECTABLE_MIN_MS) {
-    return;   // yield the rest of this window to connectable advertising
+    /* Yield the rest of this window -- and while standing down, make sure the
+       connectable advert is actually running. finishBurst() only restores it if
+       it observed taking it, so an interleaving where a burst began with
+       Bluefruit's running flag already clear would leave it off indefinitely.
+       SerialBLEInterface's watchdog cannot notice: its isAdvertising() asks
+       whether adv set 0 is CONFIGURED, which is true whichever advert owns it. */
+    if (!_bursting && Bluefruit.Periph.connected() == 0
+        && !Bluefruit.Advertising.isRunning()) {
+      Bluefruit.Advertising.start(0);
+    }
+    return;
   }
 
   if (startBurst(_queue[0])) {
