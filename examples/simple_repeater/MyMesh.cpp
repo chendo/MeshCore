@@ -1719,6 +1719,8 @@ void MyMesh::maybeConvergeClock() {
 
   const int32_t off = cc.offset_s;            // seconds to ADD to our clock
   if (off >= -CLOCK_DEADBAND_S && off <= CLOCK_DEADBAND_S) return;
+  // Sources that disagree this widely are not a measurement of anything.
+  if (cc.spread_s > CLOCK_MAX_SPREAD_TO_ACT_S) return;
 
   int32_t adj;
   if (off >= CLOCK_STEP_MIN_S && cc.agree_pct >= CLOCK_STEP_MIN_AGREE

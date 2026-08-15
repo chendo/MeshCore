@@ -286,6 +286,13 @@ protected:
      healthy node above 0.05%. */
   static const int32_t  CLOCK_STEP_MAX_SPREAD_S = 15;
   static const uint32_t CLOCK_HOLDOVER_MS = 6UL * 60UL * 60UL * 1000UL;
+  /* Slewing needs a quality gate of its own. Production, on a clock set from a
+     laptop minutes earlier, computed +50s from seven scattered multi-hop
+     sources with a spread of 62s: the step gate refused it on agreement, but
+     nothing stopped the slew from walking a known-good clock 50s away two
+     seconds at a time. When the sources disagree by this much the median is not
+     evidence of anything, and the right action is none. */
+  static const int32_t  CLOCK_MAX_SPREAD_TO_ACT_S = 30;
 
   bool     _clock_converge = false;
   uint32_t _next_clock_converge_ms = 0;
