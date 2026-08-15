@@ -176,7 +176,14 @@ bool BLEBridge::checkAndUpdatePeer(const uint8_t addr[6], uint32_t timestamp) {
     return true;
   }
 
-  if (timestamp <= slot->last_timestamp) {
+  /* Strictly OLDER is a replay. Equal is not: the timestamp is RTC seconds, and
+     a busy repeater bridges several distinct packets inside one second --
+     requiring strictly-increasing dropped every one after the first. Observed on
+     hardware, where each accepted frame was followed by a same-second reject.
+     Letting equal timestamps through costs nothing, because an actual duplicate
+     is then caught by _seen_packets in handleReceivedPacket, and a same-second
+     replay by an attacker is that same duplicate. */
+  if (timestamp < slot->last_timestamp) {
     _num_replayed++;
     BRIDGE_DEBUG_PRINTLN("BLE: RX replay/stale, ts=%lu last=%lu\n", (unsigned long)timestamp,
                          (unsigned long)slot->last_timestamp);
