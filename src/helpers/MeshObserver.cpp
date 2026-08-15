@@ -231,11 +231,13 @@ void MeshObserver::noteAdvert(const uint8_t* frame, int len, int8_t snr4) {
     uint32_t their_ts;
     memcpy(&their_ts, &frame[o + 32], 4);           // [pub_key 32][timestamp 4]
     uint32_t ours = _clock->getCurrentTime();
-    if (their_ts >= MIN_SANE_EPOCH && ours >= MIN_SANE_EPOCH) {
-      clock_delta = (int32_t)(their_ts - ours);
-      have_clock = true;
+    if (their_ts >= MIN_SANE_EPOCH) {
       noteSighting(pub, their_ts, hops);
-      noteClockSample(pub, hops, clock_delta);
+      noteClockSample(pub, hops, their_ts);
+      if (ours >= MIN_SANE_EPOCH) {                 // peer-table display only
+        clock_delta = (int32_t)(their_ts - ours);
+        have_clock = true;
+      }
     }
   }
 
@@ -330,7 +332,7 @@ uint16_t MeshObserver::hopDelayMs() const {
   return d > 60000 ? 60000 : (uint16_t)d;      // a minute a hop is already absurd
 }
 
-void MeshObserver::noteClockSample(const uint8_t* pub, uint8_t hops, int32_t delta_s) {
+void MeshObserver::noteClockSample(const uint8_t* pub, uint8_t hops, uint32_t their_ts) {
   uint32_t now = millis();
   int idx = -1, oldest = 0;
   for (int i = 0; i < _num_clock_samples; i++) {
@@ -348,7 +350,7 @@ void MeshObserver::noteClockSample(const uint8_t* pub, uint8_t hops, int32_t del
     ClockSample& s = _clock_samples[idx];
     if (s.ms != 0 && (s.prev_ms == 0 ||
         (uint32_t)(s.ms - s.prev_ms) >= DRIFT_MIN_SPAN_MS)) {
-      s.prev_delta_s = s.delta_s;
+      s.prev_their_ts = s.their_ts;
       s.prev_ms = s.ms;
     }
     // Prefer the shortest path we have heard recently: a zero-hop reading needs
@@ -356,7 +358,7 @@ void MeshObserver::noteClockSample(const uint8_t* pub, uint8_t hops, int32_t del
     if (hops > s.hops && (uint32_t)(now - s.ms) < CLOCK_VOTE_MAX_AGE_MS / 4) return;
   }
   ClockSample& s = _clock_samples[idx];
-  s.delta_s = delta_s;
+  s.their_ts = their_ts;
   s.hops = hops;
   s.ms = now;
 }
@@ -400,6 +402,9 @@ MeshObserver::ClockConsensus MeshObserver::clockConsensus() const {
   uint8_t cnt[CLOCK_SAMPLES];   // nodes collapsed into each distinct value
   int n = 0, nodes = 0;
   uint32_t now = millis();
+  if (_clock == nullptr) return c;
+  uint32_t ours = _clock->getCurrentTime();
+  if (ours < MIN_SANE_EPOCH) return c;   // nothing to compare against yet
 
   for (int i = 0; i < _num_clock_samples && n < CLOCK_SAMPLES; i++) {
     const ClockSample& s = _clock_samples[i];
@@ -409,20 +414,24 @@ MeshObserver::ClockConsensus MeshObserver::clockConsensus() const {
 
     // A rate no crystal can produce means that clock is being SET, not
     // drifting, and its current value says nothing about what time it is.
+    // Measured as their elapsed seconds against our elapsed milliseconds, so
+    // it stays honest even if our own clock was stepped in between.
     if (s.prev_ms != 0) {
       uint32_t span = (uint32_t)(s.ms - s.prev_ms);
       if (span >= DRIFT_MIN_SPAN_MS) {
-        int64_t per_day = ((int64_t)(s.delta_s - s.prev_delta_s)
-                           * 86400000LL) / (int64_t)span;
+        int64_t slip = (int64_t)(s.their_ts - s.prev_their_ts) * 1000LL - (int64_t)span;
+        int64_t per_day = (slip * 86400000LL) / ((int64_t)span * 1000LL);
         if (per_day > MAX_SANE_DRIFT_S_PER_DAY ||
             per_day < -MAX_SANE_DRIFT_S_PER_DAY) continue;
       }
     }
 
-    // A relayed advert was stamped before it started travelling, so it reads
-    // late by however long the trip took. Undo that, then trust it less: the
-    // correction's own error grows with the number of hops folded into it.
-    int32_t corrected = s.delta_s
+    // Their clock has kept running since we heard them, so age the reading
+    // forward before comparing, then undo the trip: a relayed advert was
+    // stamped before it set off, so it reads late by however long that took.
+    // Trust it less afterwards -- the correction's own error grows with hops.
+    uint32_t elapsed_s = (uint32_t)(now - s.ms) / 1000;
+    int32_t corrected = (int32_t)((s.their_ts + elapsed_s) - ours)
                       + (int32_t)(((uint32_t)s.hops * c.hop_delay_ms + 500) / 1000);
     uint8_t weight = (s.hops == 0) ? 4 : (s.hops == 1 ? 2 : 1);
 

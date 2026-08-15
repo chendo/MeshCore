@@ -105,11 +105,18 @@ public:
      the constant used to make it, dominate whatever the reading is worth. */
   static const uint8_t  MAX_CLOCK_HOPS = 8;
 
+  /* Stores what the OTHER node said, never the difference from our own clock.
+     A difference is only meaningful against the clock it was measured with, so
+     the moment ours is stepped -- by a person, or by convergence itself -- every
+     stored difference silently becomes a lie. Keeping the absolute timestamp
+     and subtracting at the point of use makes the estimate immune to that: it
+     is recomputed against whatever our clock reads now. millis() is unaffected
+     by clock sets, so the elapsed-time correction stays valid across them too. */
   struct ClockSample {
     uint8_t  pub4[4];
-    int32_t  delta_s;        // raw: their timestamp minus ours, uncorrected
-    uint32_t ms;             // millis() when taken
-    int32_t  prev_delta_s;   // the reading this one replaced, for a drift estimate
+    uint32_t their_ts;       // their clock's reading when the advert was stamped
+    uint32_t ms;             // millis() when we heard it
+    uint32_t prev_their_ts;  // the reading this one replaced, for a drift estimate
     uint32_t prev_ms;
     uint8_t  hops;           // 0 = straight off their radio
   };
@@ -291,7 +298,7 @@ private:
 
   ClockSample _clock_samples[CLOCK_SAMPLES];
   uint8_t     _num_clock_samples = 0;
-  void noteClockSample(const uint8_t* pub, uint8_t hops, int32_t delta_s);
+  void noteClockSample(const uint8_t* pub, uint8_t hops, uint32_t their_ts);
 
   /* One advert in flight, so later copies of it can be timed against the first.
      Keyed by originator and advert timestamp, which together identify an advert
