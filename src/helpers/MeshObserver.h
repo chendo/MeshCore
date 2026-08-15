@@ -67,17 +67,17 @@ public:
     int32_t  clock_delta_s;    // their clock minus ours; positive => they are ahead
     uint32_t clock_ms;         // millis() at that reading; 0 = never measured
     uint32_t clock_n;          // readings taken
-    // The previous reading, kept only so a RATE can be estimated. A crystal is
-    // good to a few seconds a day; a node showing hundreds or thousands is
-    // being reset rather than drifting, and must not get a vote.
-    int32_t  prev_clock_delta_s;
-    uint32_t prev_clock_ms;
+
   };
 
   // Below this a clock is simply unset rather than wrong: a node that has
   // never been disciplined reports something near zero or its build epoch, and
   // recording a 56-year "skew" for it would say nothing about anyone's drift.
   static const uint32_t MIN_SANE_EPOCH = 1700000000UL;   // 2023-11-14
+  static const uint16_t HOP_DELAY_DEFAULT_MS = 1500;
+  /* Below this many measured pairs the mean is too noisy to beat the computed
+     default, since each pair carries the full spread of one random relay wait. */
+  static const uint32_t HOP_DELAY_MIN_PAIRS = 8;
 
   /* Clock consensus -- see clockConsensus(). Thresholds come from a 407-node
      survey of a real regional mesh:
@@ -92,6 +92,27 @@ public:
   static const int32_t  MAX_SANE_DRIFT_S_PER_DAY = 50;
   static const uint32_t CLOCK_VOTE_MAX_AGE_MS = 60UL * 60UL * 1000UL;   // 1 hour
   static const uint8_t  CLOCK_MIN_SOURCES = 3;
+
+  /* Clock samples live in their own ring rather than in the peer table. A peer
+     slot is only granted to a node within two hops (see noteAdvert), which is
+     the right rule for a NEIGHBOUR table and the wrong one here: a repeater
+     indoors may hear one zero-hop advert in fifty frames, and refusing the
+     other forty-nine leaves the estimator starved. The ring is also a better
+     shape for the job -- what matters is a recent spread of readings, not
+     per-node history. */
+  static const uint8_t  CLOCK_SAMPLES = 24;
+  /* Beyond this the accumulated propagation correction, and the uncertainty in
+     the constant used to make it, dominate whatever the reading is worth. */
+  static const uint8_t  MAX_CLOCK_HOPS = 8;
+
+  struct ClockSample {
+    uint8_t  pub4[4];
+    int32_t  delta_s;        // raw: their timestamp minus ours, uncorrected
+    uint32_t ms;             // millis() when taken
+    int32_t  prev_delta_s;   // the reading this one replaced, for a drift estimate
+    uint32_t prev_ms;
+    uint8_t  hops;           // 0 = straight off their radio
+  };
   /* Both clocks are read to the second, so a drift verdict taken over a short
      span is mostly quantisation: to call 50 s/day apart from noise the readings
      must be hours apart, not minutes. Below this span we abstain rather than
@@ -107,6 +128,8 @@ public:
     uint8_t  n_seen;      // peers that offered a usable reading
     uint8_t  n_used;      // survivors after outlier rejection
     uint8_t  agree_pct;   // n_used * 100 / n_seen -- what fraction survived
+    uint8_t  n_zero_hop;  // how many survivors were heard directly
+    uint16_t hop_delay_ms;// the per-hop correction actually applied
     /* Spread of the survivors. agree_pct alone is NOT a confidence measure: a
        population split evenly between two beliefs 300s apart loses nobody to
        clipping, so it reports 100% agreement on a median that not one node
@@ -127,6 +150,24 @@ public:
    * Reports only. Deciding whether to act on it is the caller's business.
    */
   ClockConsensus clockConsensus() const;
+
+  /**
+   * @brief  Measured one-way propagation delay per relay hop, in milliseconds.
+   *
+   * Not a clock comparison: because this class is fed raw frames BEFORE the
+   * mesh dedups them, it sees the originator's own transmission and then the
+   * relayed copies of that same advert. The gap between those arrivals, over
+   * the hop difference, is the delay itself, measured against our own millis().
+   *
+   * Falls back to HOP_DELAY_DEFAULT_MS until enough pairs have been seen.
+   * For the record, the arithmetic that default comes from: a repeater waits
+   * rng(0, 5*airtime*tx_delay_factor) before relaying and then spends airtime
+   * transmitting, so at the repeater default factor of 0.5 the mean is
+   * 2.25*airtime -- about 1.5s for a 130-byte advert at SF7/BW62.5.
+   */
+  uint16_t hopDelayMs() const;
+  uint32_t hopDelayPairs() const { return _hop_delay_pairs; }
+  int numClockSamples() const { return _num_clock_samples; }
 
   // Register one of OUR public keys, so "did somebody relay us?" can be
   // answered and we never record ourselves as our own peer. Call once per
@@ -247,6 +288,27 @@ private:
   bool isSelf(const uint8_t* hash, uint8_t width) const { return selfIndex(hash, width) >= 0; }
 
   PeerEntry _peers[MAX_PEERS];
+
+  ClockSample _clock_samples[CLOCK_SAMPLES];
+  uint8_t     _num_clock_samples = 0;
+  void noteClockSample(const uint8_t* pub, uint8_t hops, int32_t delta_s);
+
+  /* One advert in flight, so later copies of it can be timed against the first.
+     Keyed by originator and advert timestamp, which together identify an advert
+     independently of the path it arrived by. */
+  struct AdvertSighting {
+    uint8_t  pub4[4];
+    uint32_t advert_ts;
+    uint32_t last_ms;
+    uint8_t  last_hops;
+  };
+  static const uint8_t ADVERT_SIGHTINGS = 16;
+  AdvertSighting _sightings[ADVERT_SIGHTINGS];
+  uint8_t  _num_sightings = 0;
+  uint32_t _hop_delay_sum_ms = 0;
+  uint32_t _hop_delay_hops = 0;
+  uint32_t _hop_delay_pairs = 0;
+  void noteSighting(const uint8_t* pub, uint32_t advert_ts, uint8_t hops);
   int       _num_peers = 0;
   uint32_t  _evictions = 0;
   uint32_t  _refused = 0;

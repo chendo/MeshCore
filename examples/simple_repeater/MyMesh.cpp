@@ -1798,15 +1798,18 @@ void MyMesh::formatObserverReply(char *reply, size_t reply_size, const char* wha
     MeshObserver::ClockConsensus cc = _obs.clockConsensus();
     if (cc.valid) {
       snprintf(reply, reply_size,
-               "clocks %s: %+ds from %u/%u src (%u%% agree, spread %ds); step %lu slew %lu last %+ds; hold %lum",
+               "clocks %s: %+ds from %u/%u src (%u direct, %u%%, spread %ds); hop %ums/%lup; step %lu slew %lu last %+ds; hold %lum",
                _clock_converge ? "on" : "off", (int)cc.offset_s, cc.n_used, cc.n_seen,
-               cc.agree_pct, (int)cc.spread_s, (unsigned long)_clock_steps, (unsigned long)_clock_slews,
+               cc.n_zero_hop, cc.agree_pct, (int)cc.spread_s,
+               cc.hop_delay_ms, (unsigned long)_obs.hopDelayPairs(),
+               (unsigned long)_clock_steps, (unsigned long)_clock_slews,
                (int)_last_clock_adj_s, (unsigned long)hold_m);
     } else {
       snprintf(reply, reply_size,
-               "clocks %s: no consensus (%u usable of %d peers, need %u); step %lu slew %lu; hold %lum",
-               _clock_converge ? "on" : "off", cc.n_seen, _obs.numPeers(),
-               MeshObserver::CLOCK_MIN_SOURCES, (unsigned long)_clock_steps,
+               "clocks %s: no consensus (%u usable of %d samples, need %u); hop %ums/%lup; step %lu slew %lu; hold %lum",
+               _clock_converge ? "on" : "off", cc.n_seen, _obs.numClockSamples(),
+               MeshObserver::CLOCK_MIN_SOURCES, cc.hop_delay_ms,
+               (unsigned long)_obs.hopDelayPairs(), (unsigned long)_clock_steps,
                (unsigned long)_clock_slews, (unsigned long)hold_m);
     }
   } else if (memcmp(what, "peers ", 6) == 0) {
