@@ -129,7 +129,7 @@ void BLEBridge::sendPacket(mesh::Packet *packet) {
 
   if (_bcast.send(frame, (uint8_t)(signed_len + TAG_SIZE))) {
 #if WITH_STATUS_LED
-    StatusLed::txBlink();
+    StatusLed::bleTx();
 #endif
     BRIDGE_DEBUG_PRINTLN("BLE: TX, len=%d\n", (int)packet_len);
   } else {
@@ -137,17 +137,43 @@ void BLEBridge::sendPacket(mesh::Packet *packet) {
   }
 }
 
-bool BLEBridge::checkAndUpdatePeer(const uint8_t addr[6], uint32_t timestamp) {
+bool BLEBridge::peerAllows(const uint8_t addr[6], uint32_t timestamp, const uint8_t *tag) const {
+  const PeerStamp *slot = nullptr;
+  for (uint8_t i = 0; i < MAX_PEERS; i++) {
+    if (_peers[i].in_use && memcmp(_peers[i].addr, addr, 6) == 0) { slot = &_peers[i]; break; }
+  }
+
+  /* First frame from this sender: allow, exactly as BaseChatMesh does for an
+     advert from an unknown contact. */
+  if (slot == nullptr) return true;
+
+  /* Silence the deliberate repeats. BleBroadcast sends each datagram over
+     max_adv_evts advertising events so a duty-cycled scanner cannot miss it
+     entirely, which means the same frame usually arrives two or three times.
+     The tag is an HMAC over the whole frame, so it identifies one uniquely.
+     Caught here, a repeat costs nothing; left to _seen_packets it would first
+     consume a packet buffer and a hash. */
+  if (memcmp(slot->last_tag, tag, TAG_SIZE) == 0) return false;
+
+  /* A sender unheard for a long while gets a fresh start -- the escape hatch
+     for a node whose clock restarted lower across a reboot. */
+  if (millis() - slot->last_seen > PEER_STALE_MS) return true;
+
+  /* Strictly OLDER is a replay. Equal is not: the timestamp is RTC seconds, and
+     a busy repeater bridges several distinct packets inside one second, so
+     requiring strictly-increasing would drop every one after the first. */
+  if (timestamp < slot->last_timestamp) return false;
+
+  return true;
+}
+
+void BLEBridge::peerAccept(const uint8_t addr[6], uint32_t timestamp, const uint8_t *tag) {
   unsigned long now = millis();
-  PeerStamp *slot = nullptr;
-  PeerStamp *victim = nullptr;
+  PeerStamp *slot = nullptr, *victim = nullptr;
 
   for (uint8_t i = 0; i < MAX_PEERS; i++) {
     PeerStamp *p = &_peers[i];
-    if (p->in_use && memcmp(p->addr, addr, 6) == 0) {
-      slot = p;
-      break;
-    }
+    if (p->in_use && memcmp(p->addr, addr, 6) == 0) { slot = p; break; }
     if (!p->in_use) {
       if (victim == nullptr || victim->in_use) victim = p;
     } else if (victim == nullptr || (victim->in_use && p->last_seen < victim->last_seen)) {
@@ -156,43 +182,15 @@ bool BLEBridge::checkAndUpdatePeer(const uint8_t addr[6], uint32_t timestamp) {
   }
 
   if (slot == nullptr) {
-    /* First frame from this sender: bootstrap rather than reject, exactly as
-       BaseChatMesh does for an advert from an unknown contact. */
     slot = victim;
-    if (slot == nullptr) return true;   // table full of fresh peers; fail open
+    if (slot == nullptr) return;          // every slot fresh; nothing sane to evict
     memcpy(slot->addr, addr, 6);
     slot->in_use = true;
-    slot->last_timestamp = timestamp;
-    slot->last_seen = now;
-    return true;
-  }
-
-  /* A sender we have not heard from in a long while gets a fresh start. This is
-     the escape hatch for a node whose clock restarted lower across a reboot --
-     without it, a node with no hardware RTC could be ignored indefinitely. */
-  if (now - slot->last_seen > PEER_STALE_MS) {
-    slot->last_timestamp = timestamp;
-    slot->last_seen = now;
-    return true;
-  }
-
-  /* Strictly OLDER is a replay. Equal is not: the timestamp is RTC seconds, and
-     a busy repeater bridges several distinct packets inside one second --
-     requiring strictly-increasing dropped every one after the first. Observed on
-     hardware, where each accepted frame was followed by a same-second reject.
-     Letting equal timestamps through costs nothing, because an actual duplicate
-     is then caught by _seen_packets in handleReceivedPacket, and a same-second
-     replay by an attacker is that same duplicate. */
-  if (timestamp < slot->last_timestamp) {
-    _num_replayed++;
-    BRIDGE_DEBUG_PRINTLN("BLE: RX replay/stale, ts=%lu last=%lu\n", (unsigned long)timestamp,
-                         (unsigned long)slot->last_timestamp);
-    return false;
   }
 
   slot->last_timestamp = timestamp;
   slot->last_seen = now;
-  return true;
+  memcpy(slot->last_tag, tag, TAG_SIZE);
 }
 
 void BLEBridge::onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t addr[6], int8_t rssi) {
@@ -206,13 +204,19 @@ void BLEBridge::onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t a
   uint32_t timestamp;
   memcpy(&timestamp, &payload[VERSION_SIZE], TIMESTAMP_SIZE);
 
-  /* Replay gate before the HMAC: a stale frame is rejected without doing any
-     crypto, and a forged one cannot get past the tag anyway. */
-  if (!checkAndUpdatePeer(addr, timestamp)) return;
+  const uint8_t *tag = &payload[signed_len];
+
+  /* Cheap gate first: a stale frame or a repeat is rejected without doing any
+     crypto, and a forged one cannot get past the tag anyway. Note this only
+     READS peer state -- see peerAllows(). */
+  if (!peerAllows(addr, timestamp, tag)) {
+    _num_replayed++;
+    return;
+  }
 
   uint8_t expected[TAG_SIZE];
   computeTag(payload, signed_len, expected);
-  if (memcmp(expected, &payload[signed_len], TAG_SIZE) != 0) {
+  if (memcmp(expected, tag, TAG_SIZE) != 0) {
     /* Wrong group secret, or someone playing. This is the same role
        ESPNowBridge's checksum plays: it is what keeps neighbouring bridge
        groups from bleeding into each other. */
@@ -221,10 +225,13 @@ void BLEBridge::onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t a
     return;
   }
 
+  /* Authenticated: only now is it safe to move this sender's high-water mark. */
+  peerAccept(addr, timestamp, tag);
+
 #if WITH_STATUS_LED
   // A bridged packet never reaches logRxRaw -- it is queued straight inbound --
-  // so without this the green LED would stay dark for BLE receive.
-  StatusLed::rxBlink();
+  // so the LoRa hooks never see it. Blue is the bridge's own colour anyway.
+  StatusLed::bleRx();
 #endif
   BRIDGE_DEBUG_PRINTLN("BLE: RX, payload_len=%d rssi=%d\n", (int)packet_len, (int)rssi);
 

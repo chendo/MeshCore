@@ -122,6 +122,7 @@ private:
     uint8_t addr[6];
     uint32_t last_timestamp;   // by THEIR clock
     unsigned long last_seen;   // by ours, for staleness and eviction
+    uint8_t last_tag[TAG_SIZE];// fingerprint of the last frame accepted
     bool in_use;
   };
 
@@ -139,9 +140,19 @@ private:
   /** HMAC-SHA256 over `len` bytes of `frame`, truncated into `tag`. */
   void computeTag(const uint8_t *frame, size_t len, uint8_t tag[TAG_SIZE]);
 
-  /** Replay gate. Returns false if this timestamp is not newer than the last
-   *  one accepted from this sender. */
-  bool checkAndUpdatePeer(const uint8_t addr[6], uint32_t timestamp);
+  /**
+   * Read-only replay gate: false if this frame is older than the last one
+   * accepted from this sender, or is a byte-identical repeat of it.
+   *
+   * Deliberately does NOT mutate peer state. Doing so before the HMAC is
+   * checked would let anyone in radio range spoof a sender's BLE address, claim
+   * a far-future timestamp, and lock that node out even though the frame is
+   * then discarded as forged.
+   */
+  bool peerAllows(const uint8_t addr[6], uint32_t timestamp, const uint8_t *tag) const;
+
+  /** Record an authenticated frame. Only called once the HMAC has verified. */
+  void peerAccept(const uint8_t addr[6], uint32_t timestamp, const uint8_t *tag);
 
   BleBroadcast _bcast;
   uint8_t _key[KEY_SIZE];

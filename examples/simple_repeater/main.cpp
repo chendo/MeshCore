@@ -108,9 +108,9 @@ void setup() {
 
   the_mesh.begin(fs, &archive);
 #if WITH_STATUS_LED
-  // blue = transmit, green = receive, both together = 5s heartbeat,
-  // both at a low glow = running on external power. The RAK3401 has no red
-  // LED, so the pattern carries the meaning rather than the colour.
+  // Colour is the radio, brightness is the direction: green = LoRa, blue = BLE
+  // bridge, dim = receive, bright = transmit. Both dim together every 5s is the
+  // heartbeat. The RAK3401 has only these two LEDs and no red.
   status_led.begin(LED_BLUE, LED_GREEN, LED_STATE_ON);
 #endif
 #if WITH_BLE_CLI
@@ -190,7 +190,7 @@ void loop() {
 
   the_mesh.loop();
 #if WITH_STATUS_LED
-  status_led.loop(board.isExternalPowered());
+  status_led.loop();
 #endif
   sensors.loop();
 #ifdef DISPLAY_CLASS

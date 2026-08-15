@@ -30,25 +30,40 @@ void StatusLed::write(uint8_t pin, uint8_t &cache, uint8_t level) {
   analogWrite(pin, _active_high ? level : (uint8_t)(255 - level));
 }
 
-void StatusLed::notifyTx() {
-  if (!_enabled) return;
-  _blue_until = millis() + ACTIVITY_MS;
+void StatusLed::flash(unsigned long &until, uint8_t &level, uint8_t want_level, uint16_t ms) {
+  unsigned long now = millis();
+  bool still_lit = (long)(now - until) < 0;
+
+  /* A transmit must never be masked by a receive that happens to overlap, so
+     brightness only ever escalates while an LED is still lit. */
+  level = (still_lit && level > want_level) ? level : want_level;
+
+  unsigned long want_until = now + ms;
+  if (!still_lit || (long)(want_until - until) > 0) until = want_until;
 }
 
-void StatusLed::notifyRx() {
-  if (!_enabled) return;
-  _green_until = millis() + ACTIVITY_MS;
+void StatusLed::notifyLoraTx() {
+  if (_enabled) flash(_green_until, _green_level, BRIGHT_LEVEL, BRIGHT_MS);
 }
 
-void StatusLed::txBlink() {
-  if (instance) instance->notifyTx();
+void StatusLed::notifyLoraRx() {
+  if (_enabled) flash(_green_until, _green_level, DIM_LEVEL, DIM_MS);
 }
 
-void StatusLed::rxBlink() {
-  if (instance) instance->notifyRx();
+void StatusLed::notifyBleTx() {
+  if (_enabled) flash(_blue_until, _blue_level, BRIGHT_LEVEL, BRIGHT_MS);
 }
 
-void StatusLed::loop(bool charging) {
+void StatusLed::notifyBleRx() {
+  if (_enabled) flash(_blue_until, _blue_level, DIM_LEVEL, DIM_MS);
+}
+
+void StatusLed::loraTx() { if (instance) instance->notifyLoraTx(); }
+void StatusLed::loraRx() { if (instance) instance->notifyLoraRx(); }
+void StatusLed::bleTx()  { if (instance) instance->notifyBleTx(); }
+void StatusLed::bleRx()  { if (instance) instance->notifyBleRx(); }
+
+void StatusLed::loop() {
   if (!_enabled) return;
 
   unsigned long now = millis();
@@ -60,14 +75,17 @@ void StatusLed::loop(bool charging) {
 
   /* Signed comparison so the deadlines survive millis() wrapping. */
   bool hb = (long)(now - _hb_until) < 0;
-  bool blue = hb || (long)(now - _blue_until) < 0;
-  bool green = hb || (long)(now - _green_until) < 0;
 
-  /* Charging is the resting state, so it only shows through when no event is
-     lighting that LED. An event always wins -- activity must stay visible on a
-     powered node. */
-  uint8_t base = charging ? GLOW_LEVEL : 0;
+  uint8_t blue = ((long)(now - _blue_until) < 0) ? _blue_level : 0;
+  uint8_t green = ((long)(now - _green_until) < 0) ? _green_level : 0;
 
-  write(_pin_blue, _lvl_blue, blue ? FULL_LEVEL : base);
-  write(_pin_green, _lvl_green, green ? FULL_LEVEL : base);
+  /* The heartbeat is a floor, not an override: real activity during the tick
+     still shows at its own brightness. */
+  if (hb) {
+    if (blue < DIM_LEVEL) blue = DIM_LEVEL;
+    if (green < DIM_LEVEL) green = DIM_LEVEL;
+  }
+
+  write(_pin_blue, _lvl_blue, blue);
+  write(_pin_green, _lvl_green, green);
 }

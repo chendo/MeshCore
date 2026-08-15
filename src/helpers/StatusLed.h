@@ -3,22 +3,26 @@
 #include <stdint.h>
 
 /**
- * @brief  Two-LED activity and status indicator.
+ * @brief  Two-LED radio activity indicator.
  *
- * Built for boards that have two single-colour LEDs rather than an RGB one --
- * the RAK3401 has exactly green (P0.35) and blue (P0.36), and no red. Meaning is
- * therefore carried by WHICH LEDs light and in what pattern, not by mixing a
- * colour:
+ * The RAK3401 has exactly two LEDs, green (P0.35) and blue (P0.36), and no red.
+ * Rather than try to mix a colour it cannot make, this uses the two axes it does
+ * have: COLOUR says which radio, BRIGHTNESS says which direction.
  *
- *   transmit    blue only, brief flash
- *   receive     green only, brief flash
- *   heartbeat   BOTH together every 5s -- the only event that lights both, so
- *               it stays legible even during heavy traffic
- *   charging    both held at a low glow between events (USB power present)
+ *              dim = receive        bright = transmit
+ *   blue       BLE bridge RX        BLE bridge TX
+ *   green      LoRa RX              LoRa TX
  *
- * Brightness is real hardware PWM (analogWrite), so the glow does not depend on
- * how often loop() gets called. Nothing else in this firmware uses the nRF52
- * PWM peripherals.
+ *   heartbeat  both dim together, every 5s
+ *
+ * So a node quietly listening to LoRa ticks dim green; one relaying a flood
+ * flashes bright green; and a bridged packet lights blue alongside it, because
+ * bridging happens on the back of a LoRa transmit. Nothing is lit when idle
+ * except the heartbeat.
+ *
+ * Brightness is real hardware PWM (analogWrite), so levels do not depend on how
+ * often loop() gets called. Nothing else in this firmware uses the nRF52 PWM
+ * peripherals.
  */
 class StatusLed {
 public:
@@ -29,36 +33,38 @@ public:
    */
   void begin(uint8_t pin_blue, uint8_t pin_green, uint8_t on_state = 1);
 
-  /** Flash blue. Safe to call at any rate; repeat calls just extend the flash. */
-  void notifyTx();
+  void notifyLoraTx();   // bright green
+  void notifyLoraRx();   // dim green
+  void notifyBleTx();    // bright blue
+  void notifyBleRx();    // dim blue
 
-  /** Flash green. */
-  void notifyRx();
-
-  /**
-   * @param charging  true while the board is on external (USB) power. Note the
-   *                  RAK3401 exposes VBUS presence, not battery charge current,
-   *                  so this means "powered", not strictly "charging".
-   */
-  void loop(bool charging);
+  /** Drive the LEDs. Call every main-loop iteration. */
+  void loop();
 
   bool isEnabled() const { return _enabled; }
 
-  /* Static shims so code that has no reference to the instance -- the mesh log
-     hooks, the BLE bridge -- can still flash it. No-ops when unconfigured. */
-  static void txBlink();
-  static void rxBlink();
+  /* Static shims so code with no reference to the instance -- the mesh log
+     hooks, the BLE bridge -- can flash it. No-ops when unconfigured. */
+  static void loraTx();
+  static void loraRx();
+  static void bleTx();
+  static void bleRx();
 
 private:
-  static const uint16_t ACTIVITY_MS = 40;
-  static const uint16_t HEARTBEAT_ON_MS = 60;
+  /* A dim flash is much harder to notice than a bright one, so it is held a
+     little longer to even out how visible the two are. */
+  static const uint16_t BRIGHT_MS = 40;
+  static const uint16_t DIM_MS = 70;
+
+  static const uint16_t HEARTBEAT_ON_MS = 70;
   static const uint32_t HEARTBEAT_PERIOD_MS = 5000;
 
-  /* Low enough to read as "idle but powered" rather than competing with a
-     flash, high enough to see across a room. */
-  static const uint8_t GLOW_LEVEL = 6;
-  static const uint8_t FULL_LEVEL = 255;
+  /* Low enough to read clearly as "not a transmit", high enough to see across
+     a room. Raise DIM_LEVEL if the receive flashes are too subtle. */
+  static const uint8_t DIM_LEVEL = 24;
+  static const uint8_t BRIGHT_LEVEL = 255;
 
+  void flash(unsigned long &until, uint8_t &level, uint8_t want_level, uint16_t ms);
   void write(uint8_t pin, uint8_t &cache, uint8_t level);
 
   bool _enabled = false;
@@ -69,6 +75,9 @@ private:
      on every loop iteration. 0xFF means "nothing written yet". */
   uint8_t _lvl_blue = 0xFF, _lvl_green = 0xFF;
 
+  /* Deadline and the level to hold until it, per LED. */
   unsigned long _blue_until = 0, _green_until = 0;
+  uint8_t _blue_level = 0, _green_level = 0;
+
   unsigned long _hb_until = 0, _last_hb = 0;
 };
