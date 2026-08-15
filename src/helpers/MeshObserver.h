@@ -74,6 +74,16 @@ public:
   // never been disciplined reports something near zero or its build epoch, and
   // recording a 56-year "skew" for it would say nothing about anyone's drift.
   static const uint32_t MIN_SANE_EPOCH = 1700000000UL;   // 2023-11-14
+
+  /* A clock reading below this is not a wrong time, it is NO time: these boards
+     have no hardware RTC, so every reboot drops them back to VolatileRTCClock's
+     built-in 15 May 2024 and they stay there until something tells them
+     otherwise. 1 Jan 2025 sits safely above that default and below any real
+     deployment, so it separates "never set" from "set and drifting" without
+     needing to know when the firmware was built.
+     This cuts both ways: a node whose own clock is below it must not vote, and
+     one such neighbour is already out there on this mesh reading +71038395s. */
+  static const uint32_t CLOCK_SET_EPOCH = 1735689600UL;  // 2025-01-01
   static const uint16_t HOP_DELAY_DEFAULT_MS = 1500;
   /* Below this many measured pairs the mean is too noisy to beat the computed
      default, since each pair carries the full spread of one random relay wait. */
@@ -135,7 +145,7 @@ public:
     uint8_t  n_seen;      // peers that offered a usable reading
     uint8_t  n_used;      // survivors after outlier rejection
     uint8_t  agree_pct;   // n_used * 100 / n_seen -- what fraction survived
-    uint8_t  n_zero_hop;  // how many survivors were heard directly
+    uint8_t  n_zero_hop;  // how many survivors were heard directly (reporting only)
     uint16_t hop_delay_ms;// the per-hop correction actually applied
     /* Spread of the survivors. agree_pct alone is NOT a confidence measure: a
        population split evenly between two beliefs 300s apart loses nobody to

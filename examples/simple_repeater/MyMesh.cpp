@@ -1703,9 +1703,31 @@ void MyMesh::onClockSetExternally() {
  * when we are ahead is bleed it off slowly, and even that is a small
  * monotonicity violation, so it is capped hard.
  */
+bool MyMesh::clockIsUnset() const {
+  return getRTCClock()->getCurrentTime() < MeshObserver::CLOCK_SET_EPOCH;
+}
+
 void MyMesh::maybeConvergeClock() {
   if (!_clock_converge || !millisHasNowPassed(_next_clock_converge_ms)) return;
-  _next_clock_converge_ms = futureMillis(CLOCK_CONVERGE_INTERVAL_MS);
+
+  const bool unset = clockIsUnset();
+  _next_clock_converge_ms = futureMillis(unset ? CLOCK_CONVERGE_FAST_MS
+                                               : CLOCK_CONVERGE_INTERVAL_MS);
+
+  MeshObserver::ClockConsensus cc = _obs.clockConsensus();
+
+  if (unset) {
+    // Nothing here is worth protecting, so the only question is whether the
+    // neighbours agree well enough to be believed at all.
+    if (!cc.valid || cc.n_used < CLOCK_UNSET_MIN_SOURCES) return;
+    if (cc.spread_s > CLOCK_UNSET_MAX_SPREAD_S) return;
+    if (cc.offset_s <= 0) return;               // only ever forward out of this
+    uint32_t now = getRTCClock()->getCurrentTime();
+    getRTCClock()->setCurrentTime((uint32_t)((int64_t)now + cc.offset_s));
+    _last_clock_adj_s = cc.offset_s;
+    _clock_steps++;
+    return;
+  }
 
   // A clock a person or a client app just set beats anything the neighbourhood
   // can offer. The survey this is tuned against found whole sub-networks that
@@ -1714,7 +1736,6 @@ void MyMesh::maybeConvergeClock() {
   if (_clock_ever_set &&
       !millisHasNowPassed(_clock_extern_set_ms + CLOCK_HOLDOVER_MS)) return;
 
-  MeshObserver::ClockConsensus cc = _obs.clockConsensus();
   if (!cc.valid) return;
 
   const int32_t off = cc.offset_s;            // seconds to ADD to our clock
@@ -1804,16 +1825,18 @@ void MyMesh::formatObserverReply(char *reply, size_t reply_size, const char* wha
     MeshObserver::ClockConsensus cc = _obs.clockConsensus();
     if (cc.valid) {
       snprintf(reply, reply_size,
-               "clocks %s: %+ds from %u/%u src (%u direct, %u%%, spread %ds); hop %ums/%lup; step %lu slew %lu last %+ds; hold %lum",
-               _clock_converge ? "on" : "off", (int)cc.offset_s, cc.n_used, cc.n_seen,
+               "clocks %s%s: %+ds from %u/%u src (%u direct, %u%%, spread %ds); hop %ums/%lup; step %lu slew %lu last %+ds; hold %lum",
+               _clock_converge ? "on" : "off", clockIsUnset() ? " UNSET" : "",
+               (int)cc.offset_s, cc.n_used, cc.n_seen,
                cc.n_zero_hop, cc.agree_pct, (int)cc.spread_s,
                cc.hop_delay_ms, (unsigned long)_obs.hopDelayPairs(),
                (unsigned long)_clock_steps, (unsigned long)_clock_slews,
                (int)_last_clock_adj_s, (unsigned long)hold_m);
     } else {
       snprintf(reply, reply_size,
-               "clocks %s: no consensus (%u usable of %d samples, need %u); hop %ums/%lup; step %lu slew %lu; hold %lum",
-               _clock_converge ? "on" : "off", cc.n_seen, _obs.numClockSamples(),
+               "clocks %s%s: no consensus (%u usable of %d samples, need %u); hop %ums/%lup; step %lu slew %lu; hold %lum",
+               _clock_converge ? "on" : "off", clockIsUnset() ? " UNSET" : "",
+               cc.n_seen, _obs.numClockSamples(),
                MeshObserver::CLOCK_MIN_SOURCES, cc.hop_delay_ms,
                (unsigned long)_obs.hopDelayPairs(), (unsigned long)_clock_steps,
                (unsigned long)_clock_slews, (unsigned long)hold_m);

@@ -363,31 +363,25 @@ void MeshObserver::noteClockSample(const uint8_t* pub, uint8_t hops, uint32_t th
   s.ms = now;
 }
 
-/* Sorted ascending in place, carrying each value's weight with it. n is small
-   (bounded by CLOCK_SAMPLES) so an insertion sort beats qsort's indirection. */
-static void sortInPlace(int32_t* a, uint8_t* w, int n) {
+/* Sorted ascending in place, carrying the parallel arrays along. n is bounded
+   by CLOCK_SAMPLES so an insertion sort beats qsort's comparator indirection. */
+static void sortSamples(int32_t* a, uint8_t* z, uint8_t* cnt, int n) {
   for (int i = 1; i < n; i++) {
-    int32_t v = a[i]; uint8_t vw = w[i];
+    int32_t v = a[i]; uint8_t vz = z[i], vc = cnt[i];
     int j = i - 1;
-    while (j >= 0 && a[j] > v) { a[j + 1] = a[j]; w[j + 1] = w[j]; j--; }
-    a[j + 1] = v; w[j + 1] = vw;
+    while (j >= 0 && a[j] > v) {
+      a[j+1] = a[j]; z[j+1] = z[j]; cnt[j+1] = cnt[j]; j--;
+    }
+    a[j+1] = v; z[j+1] = vz; cnt[j+1] = vc;
   }
 }
 
-/* Weighted median of an already-sorted list: the value at which the running
-   weight reaches half the total. With every weight 1 this is the plain median,
-   except that it does not average the middle pair -- which is what we want,
-   since an interpolated value is not a reading anybody actually reported. */
-static int32_t weightedMedian(const int32_t* a, const uint8_t* w, int n) {
+static int32_t medianOfSorted(const int32_t* a, int n) {
   if (n <= 0) return 0;
-  uint32_t total = 0;
-  for (int i = 0; i < n; i++) total += w[i];
-  uint32_t half = total / 2, run = 0;
-  for (int i = 0; i < n; i++) {
-    run += w[i];
-    if (run > half) return a[i];
-  }
-  return a[n - 1];
+  if (n & 1) return a[n / 2];
+  // Truncates toward zero, so an even split either side of true time does not
+  // manufacture a correction out of nothing.
+  return (a[n / 2 - 1] + a[n / 2]) / 2;
 }
 
 MeshObserver::ClockConsensus MeshObserver::clockConsensus() const {
@@ -397,20 +391,23 @@ MeshObserver::ClockConsensus MeshObserver::clockConsensus() const {
   c.hop_delay_ms = hopDelayMs();
 
   int32_t d[CLOCK_SAMPLES];
-  uint8_t w[CLOCK_SAMPLES];
   uint8_t z[CLOCK_SAMPLES];
   uint8_t cnt[CLOCK_SAMPLES];   // nodes collapsed into each distinct value
   int n = 0, nodes = 0;
   uint32_t now = millis();
   if (_clock == nullptr) return c;
   uint32_t ours = _clock->getCurrentTime();
-  if (ours < MIN_SANE_EPOCH) return c;   // nothing to compare against yet
 
   for (int i = 0; i < _num_clock_samples && n < CLOCK_SAMPLES; i++) {
     const ClockSample& s = _clock_samples[i];
     if (s.ms == 0) continue;
     if ((uint32_t)(now - s.ms) > CLOCK_VOTE_MAX_AGE_MS) continue;   // stale
     if (s.hops > MAX_CLOCK_HOPS) continue;
+
+    uint32_t elapsed_s = (uint32_t)(now - s.ms) / 1000;
+    uint32_t theirs_now = s.their_ts + elapsed_s;
+    // A node that has not had its own clock set cannot help us set ours.
+    if (theirs_now < CLOCK_SET_EPOCH) continue;
 
     // A rate no crystal can produce means that clock is being SET, not
     // drifting, and its current value says nothing about what time it is.
@@ -426,23 +423,20 @@ MeshObserver::ClockConsensus MeshObserver::clockConsensus() const {
       }
     }
 
-    // Their clock has kept running since we heard them, so age the reading
-    // forward before comparing, then undo the trip: a relayed advert was
-    // stamped before it set off, so it reads late by however long that took.
-    // Trust it less afterwards -- the correction's own error grows with hops.
-    uint32_t elapsed_s = (uint32_t)(now - s.ms) / 1000;
-    int32_t corrected = (int32_t)((s.their_ts + elapsed_s) - ours)
+    // A relayed advert was stamped before it set off, so it reads late by
+    // however long the trip took. Undo that and the reading is as good as any
+    // other -- the residual scatter grows only as sqrt(hops), which is well
+    // inside the spread the mesh itself runs at, so nothing is down-weighted.
+    int32_t corrected = (int32_t)(theirs_now - ours)
                       + (int32_t)(((uint32_t)s.hops * c.hop_delay_ms + 500) / 1000);
-    uint8_t weight = (s.hops == 0) ? 4 : (s.hops == 1 ? 2 : 1);
 
+    nodes++;
     // Collapse a cluster to a single vote. Nodes sharing an upstream sync
     // source share its error exactly, so counting them individually lets one
     // wrong sub-network outvote the rest of the mesh on population alone.
-    nodes++;
     bool dup = false;
     for (int j = 0; j < n; j++) {
       if (d[j] == corrected) {
-        if (weight > w[j]) w[j] = weight;      // keep the best-quality sighting
         if (s.hops == 0) z[j] = 1;
         if (cnt[j] < 255) cnt[j]++;
         dup = true; break;
@@ -450,7 +444,7 @@ MeshObserver::ClockConsensus MeshObserver::clockConsensus() const {
     }
     if (dup) continue;
 
-    d[n] = corrected; w[n] = weight; z[n] = (s.hops == 0) ? 1 : 0; cnt[n] = 1; n++;
+    d[n] = corrected; z[n] = (s.hops == 0) ? 1 : 0; cnt[n] = 1; n++;
   }
 
   /* Quorum counts NODES, not distinct values. Collapsing a cluster is right for
@@ -461,47 +455,33 @@ MeshObserver::ClockConsensus MeshObserver::clockConsensus() const {
   c.n_seen = (uint8_t)(nodes > 255 ? 255 : nodes);
   if (nodes < CLOCK_MIN_SOURCES || n < 1) return c;
 
-  /* d, w, z and cnt are parallel: sort them together or the survivors get the
-     wrong weights and hop flags attached. */
-  for (int i = 1; i < n; i++) {
-    int32_t v = d[i]; uint8_t vw = w[i], vz = z[i], vc = cnt[i];
-    int j = i - 1;
-    while (j >= 0 && d[j] > v) {
-      d[j+1] = d[j]; w[j+1] = w[j]; z[j+1] = z[j]; cnt[j+1] = cnt[j]; j--;
-    }
-    d[j+1] = v; w[j+1] = vw; z[j+1] = vz; cnt[j+1] = vc;
-  }
-  int32_t med = weightedMedian(d, w, n);
+  sortSamples(d, z, cnt, n);
+  int32_t med = medianOfSorted(d, n);
 
   // Median absolute deviation: the spread of the honest majority, and unlike a
   // standard deviation it does not care how extreme the outliers are.
   int32_t dev[CLOCK_SAMPLES];
-  uint8_t devw[CLOCK_SAMPLES];
+  uint8_t dz[CLOCK_SAMPLES], dc[CLOCK_SAMPLES];
   for (int i = 0; i < n; i++) {
-    int32_t v = d[i] - med; dev[i] = v < 0 ? -v : v; devw[i] = w[i];
+    int32_t v = d[i] - med; dev[i] = v < 0 ? -v : v; dz[i] = z[i]; dc[i] = cnt[i];
   }
-  sortInPlace(dev, devw, n);
-  int32_t mad = weightedMedian(dev, devw, n);
+  sortSamples(dev, dz, dc, n);
+  int32_t mad = medianOfSorted(dev, n);
 
   // 3 * 1.4826 * MAD is the three-sigma equivalent for a normal core.
   int32_t limit = (int32_t)(((int64_t)mad * 4448) / 1000);
   if (limit < CLOCK_CLIP_FLOOR_S) limit = CLOCK_CLIP_FLOOR_S;
 
   int32_t kept[CLOCK_SAMPLES];
-  uint8_t keptw[CLOCK_SAMPLES];
   int k = 0, kept_nodes = 0, zero_hop = 0;
   for (int i = 0; i < n; i++) {          // d is sorted, so kept stays sorted
     int32_t v = d[i] - med;
     if (v < 0) v = -v;
-    if (v <= limit) {
-      kept[k] = d[i]; keptw[k] = w[i]; k++;
-      kept_nodes += cnt[i];
-      if (z[i]) zero_hop++;
-    }
+    if (v <= limit) { kept[k++] = d[i]; kept_nodes += cnt[i]; if (z[i]) zero_hop++; }
   }
   if (kept_nodes < CLOCK_MIN_SOURCES) return c;
 
-  c.offset_s   = weightedMedian(kept, keptw, k);
+  c.offset_s   = medianOfSorted(kept, k);
   c.spread_s   = mad;
   c.n_used     = (uint8_t)(kept_nodes > 255 ? 255 : kept_nodes);
   c.n_zero_hop = (uint8_t)zero_hop;

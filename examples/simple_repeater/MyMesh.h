@@ -294,6 +294,20 @@ protected:
      evidence of anything, and the right action is none. */
   static const int32_t  CLOCK_MAX_SPREAD_TO_ACT_S = 30;
 
+  /* None of the caution above applies when our clock was never set. These
+     boards have no hardware RTC, so every reboot lands them back on 15 May 2024
+     -- and until they leave it their adverts carry timestamps the rest of the
+     mesh rejects outright as replays, which makes the node not merely wrong but
+     invisible. There is nothing to protect and every second spent creeping
+     toward the right answer is a second off the air, so in that state we check
+     often, ignore holdover, and take the first credible consensus whole. */
+  static const uint32_t CLOCK_CONVERGE_FAST_MS = 30UL * 1000UL;
+  static const uint8_t  CLOCK_UNSET_MIN_SOURCES = 2;
+  /* Still not unconditional: sources this far apart would have us land
+     somewhere arbitrary, and a wrong year is no better than the default. */
+  static const int32_t  CLOCK_UNSET_MAX_SPREAD_S = 600;
+  bool clockIsUnset() const;
+
   bool     _clock_converge = false;
   uint32_t _next_clock_converge_ms = 0;
   uint32_t _clock_extern_set_ms = 0;
