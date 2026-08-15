@@ -861,6 +861,8 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       strcpy(reply, "Error: channel must be between 1-14");
     }
+#endif
+#ifdef WITH_BRIDGE_SECRET
   } else if (memcmp(config, "bridge.secret ", 14) == 0) {
     StrHelper::strncpy(_prefs->bridge_secret, &config[14], sizeof(_prefs->bridge_secret));
     _callbacks->restartBridge();
@@ -1034,6 +1036,8 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
             "espnow"
 #elif WITH_MQTT_BRIDGE
             "mqtt"
+#elif WITH_BLE_BRIDGE
+            "ble"
 #else
             "none"
 #endif
@@ -1053,6 +1057,8 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
 #ifdef WITH_ESPNOW_BRIDGE
   } else if (memcmp(config, "bridge.channel", 14) == 0) {
     sprintf(reply, "> %d", (uint32_t)_prefs->bridge_channel);
+#endif
+#ifdef WITH_BRIDGE_SECRET
   } else if (memcmp(config, "bridge.secret", 13) == 0) {
     sprintf(reply, "> %s", _prefs->bridge_secret);
 #endif

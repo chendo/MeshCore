@@ -39,10 +39,20 @@ class SerialBLEInterface : public BaseSerialInterface {
   static void onSecured(uint16_t connection_handle);
   static bool onPairingPasskey(uint16_t connection_handle, uint8_t const passkey[6], bool match_request);
   static void onPairingComplete(uint16_t connection_handle, uint8_t auth_status);
-  static void onBLEEvent(ble_evt_t* evt);
   static void onBleUartRX(uint16_t conn_handle);
 
 public:
+  /**
+   * Raw SoftDevice event handler, installed via Bluefruit.setEventCallback().
+   *
+   * Public only so another subsystem can chain to it: that callback is a single
+   * slot, so anything else needing raw events (BleBroadcast, for the bridge)
+   * has to take the slot and forward what it does not consume. Dropping these
+   * events is not an option -- CONN_PARAM_UPDATE_REQUEST goes unanswered and
+   * the connection eventually drops.
+   */
+  static void onBLEEvent(ble_evt_t* evt);
+
   SerialBLEInterface() {
     _isEnabled = false;
     _isDeviceConnected = false;

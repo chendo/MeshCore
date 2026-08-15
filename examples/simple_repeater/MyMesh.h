@@ -35,6 +35,18 @@
 #define WITH_BRIDGE
 #endif
 
+#ifdef WITH_BLE_BRIDGE
+#include "helpers/bridges/BLEBridge.h"
+#define WITH_BRIDGE
+#if !WITH_BLE_CLI
+  // The bridge does not own a BLE stack; it broadcasts on the one startBLE()
+  // brings up, and main.cpp hands it over via BLEBridge::setBleReady() from
+  // inside the WITH_BLE_CLI block. Without that the bridge would sit there
+  // initialised and permanently silent, which is a miserable thing to debug.
+  #error "WITH_BLE_BRIDGE requires WITH_BLE_CLI"
+#endif
+#endif
+
 #ifdef WITH_MQTT_UPLINK
 #include <helpers/mqtt/MQTTUplink.h>
 #endif
@@ -184,6 +196,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks, public WebPanelComm
   ESPNowBridge bridge;
 #elif defined(WITH_MQTT_BRIDGE)
   MQTTBridge bridge;
+#elif defined(WITH_BLE_BRIDGE)
+  BLEBridge bridge;
 #endif
 #ifdef WITH_MQTT_UPLINK
   MQTTUplink mqtt;

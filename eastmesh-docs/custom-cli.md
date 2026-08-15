@@ -159,6 +159,59 @@ Example:
 OK
 ```
 
+### BLE Bridge Settings For nRF52 Hydra Builds
+
+These commands are available on the `RAK_3401_hydra_ble_bridge` target, which
+bridges over Bluetooth instead of ESP-NOW. The RAK3401 is an nRF52840 with no
+Wi-Fi, so ESP-NOW is not available to it; BLE 5 extended advertising provides
+the same connectionless broadcast. Every node in BLE range running this build
+with the same `bridge.secret` hears every bridged packet, so co-located
+repeaters share traffic without spending a LoRa hop.
+
+- `get bridge.type`: reports `ble` on these builds.
+- `get bridge.secret`: shows the configured shared group key.
+- `set bridge.secret <secret>`: sets the shared group key and restarts the bridge.
+- `get bridge.enabled`, `set bridge.enabled on|off`: as for other bridges.
+- `get bridge.source`, `set bridge.source logTx|logRx`: as for other bridges.
+
+There is no `bridge.channel` on BLE builds -- that setting is ESP-NOW specific.
+
+Use the same `bridge.secret` on every node that should talk together. A
+different secret is exactly what keeps two neighbouring groups separate.
+
+#### What goes over the air
+
+The frame is **plaintext** and its format is meant to be publishable:
+
+```text
+[1]     version
+[4]     timestamp, little-endian, sender's clock
+[<=238] the mesh packet, unencrypted
+[8]     HMAC-SHA256 tag over everything above, truncated
+```
+
+Two consequences worth understanding:
+
+- **Anyone in BLE range can read bridged traffic.** This is deliberate. Mesh
+  traffic is already public over the air, and the ESP-NOW bridge's XOR "encryption"
+  only looked like protection. Message contents remain protected by MeshCore's own
+  end-to-end encryption exactly as they are over LoRa.
+- **`bridge.secret` is a credential, not a cipher.** It keys the HMAC that stops
+  anyone in range injecting packets into your mesh. Anyone holding it can forge
+  frames, so protect it like a password and prefer a random string -- its entropy
+  caps the key's, and the field holds 15 characters.
+
+#### Interaction with the BLE diagnostic port
+
+The SoftDevice provides exactly one advertising set, so the bridge and the BLE
+CLI/DFU port take turns on it. The diagnostic port stays discoverable -- at least
+300 ms of every 2 s is reserved for it -- but finding the device in a BLE scanner
+can take noticeably longer while the bridge is busy. Once a client is connected,
+advertising stops anyway and the bridge has the radio to itself.
+
+Range is BLE range: tens of metres, nothing like the 1 W LoRa link. This is a
+same-site bridge.
+
 ### Web Panel Controls
 
 - `get web`

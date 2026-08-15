@@ -112,6 +112,12 @@ void setup() {
     strncpy(ble_name, "@@MAC", sizeof(ble_name) - 1);   // resolved to the MAC by begin()
     the_mesh.startBLE(ble, "Hydra-", ble_name);
   }
+#if defined(WITH_BLE_BRIDGE)
+  // Only now is there a BLE stack for the bridge to broadcast on. It also needs
+  // the event callback SerialBLEInterface just installed, so it can forward
+  // what it does not consume -- that callback is a single slot.
+  BLEBridge::setBleReady(SerialBLEInterface::onBLEEvent);
+#endif
 #endif
 
 #ifdef DISPLAY_CLASS
