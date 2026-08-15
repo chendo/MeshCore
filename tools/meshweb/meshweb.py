@@ -115,10 +115,22 @@ class BleTransport:
                     self._q.get_nowait()
                 await c.write_gatt_char(NUS_RX, command.encode(), response=True)
                 data = await asyncio.wait_for(self._q.get(), timeout=8)
-                return data.decode(errors="replace").strip()
+                return _strip_prefix(data.decode(errors="replace"))
             except Exception as e:
                 self._client = None
                 raise RuntimeError(f"ble: {e}") from e
+
+
+def _strip_prefix(s):
+    """
+    `get` answers are prefixed "> " by the CLI. Serial replies come wrapped in
+    the echoed command so _last_reply peels them; a BLE reply is the bare frame
+    and keeps its prefix, which silently broke every numeric parse.
+    """
+    s = s.strip()
+    while s.startswith("->") or s.startswith(">"):
+        s = s.lstrip("->").lstrip(">").strip()
+    return s
 
 
 def _last_reply(text):
@@ -204,9 +216,16 @@ class Node:
                       "error": None, "updated": 0}
 
     async def ask(self, cmd):
-        return await self.tx.send(cmd)
+        return _strip_prefix(await self.tx.send(cmd))
 
-    async def poll(self):
+    async def poll(self, with_peers):
+        """
+        Two rates. The fast metrics are a dozen round-trips; the peer table is
+        one round-trip PER PEER and can be 48 of them, which over BLE is slower
+        than the poll interval. Fetching it every cycle would make a second node
+        wait behind the first, so it runs on a slower cadence and the previous
+        table is kept in between.
+        """
         st = {"name": self.name, "transport": self.tx.kind, "error": None}
         try:
             st["ver"] = await self.ask("ver")
@@ -223,27 +242,44 @@ class Node:
             summary = await self.ask("peers")
             st["peers_summary"] = parse_peers_summary(summary)
 
-            peers, total = [], (st["peers_summary"] or {}).get("count", 0)
-            for i in range(min(total, MAX_PEER_FETCH)):
-                entry = _json_or_none(await self.ask(f"peers {i}"))
-                if not entry or "h" not in entry:
-                    continue
-                peers.append(entry)
-            st["peers"] = peers
+            if with_peers:
+                peers, total = [], (st["peers_summary"] or {}).get("count", 0)
+                for i in range(min(total, MAX_PEER_FETCH)):
+                    entry = _json_or_none(await self.ask(f"peers {i}"))
+                    if not entry or "h" not in entry:
+                        continue
+                    peers.append(entry)
+                st["peers"] = peers
+                st["peers_updated"] = time.time()
+            else:
+                st["peers"] = self.state.get("peers", [])
+                st["peers_updated"] = self.state.get("peers_updated", 0)
             st["online"] = True
         except Exception as e:
             st["online"] = False
             st["error"] = str(e)[:160]
+            # keep the last good peer table so one dropped poll does not blank
+            # the view; the age is shown so it is obvious it is stale
+            st["peers"] = self.state.get("peers", [])
+            st["peers_updated"] = self.state.get("peers_updated", 0)
         st["updated"] = time.time()
         self.state = st
 
 
 # ------------------------------------------------------------------ server
 
-async def poller(nodes, interval):
+async def poller(nodes, interval, peers_every):
+    """
+    Nodes are polled CONCURRENTLY. Sequentially, one unreachable node would hold
+    every other node's data hostage for its whole timeout -- exactly when you
+    most want to see the others.
+    """
+    cycle = 0
     while True:
-        for n in nodes:
-            await n.poll()
+        with_peers = (cycle % max(1, peers_every) == 0)
+        await asyncio.gather(*(n.poll(with_peers) for n in nodes),
+                             return_exceptions=True)
+        cycle += 1
         await asyncio.sleep(interval)
 
 
@@ -253,8 +289,11 @@ async def main():
     ap.add_argument("--serial", action="append", default=[], metavar="NAME=PORT")
     ap.add_argument("--ble", action="append", default=[], metavar="NAME=ADDRESS")
     ap.add_argument("--port", type=int, default=8712)
-    ap.add_argument("--interval", type=float, default=20.0,
+    ap.add_argument("--interval", type=float, default=15.0,
                     help="seconds between polls (each poll is many CLI round-trips)")
+    ap.add_argument("--peers-every", type=int, default=3,
+                    help="fetch the full peer table every Nth poll (it is one "
+                         "round-trip per peer, so it is the expensive part)")
     args = ap.parse_args()
 
     nodes = []
@@ -279,20 +318,24 @@ async def main():
 
     async def command(req):
         body = await req.json()
-        target = body.get("node")
-        for n in nodes:
-            if n.name == target:
-                try:
-                    return web.json_response({"reply": await n.ask(body["cmd"])})
-                except Exception as e:
-                    return web.json_response({"reply": f"error: {e}"}, status=200)
-        return web.json_response({"reply": "no such node"}, status=404)
+        target, cmd = body.get("node"), body["cmd"]
+        targets = nodes if target in (None, "", "*") else [n for n in nodes if n.name == target]
+        if not targets:
+            return web.json_response({"replies": {"": "no such node"}}, status=404)
+
+        async def one(n):
+            try:
+                return n.name, await n.ask(cmd)
+            except Exception as e:
+                return n.name, f"error: {e}"
+        pairs = await asyncio.gather(*(one(n) for n in targets))
+        return web.json_response({"replies": dict(pairs)})
 
     app.router.add_get("/", index)
     app.router.add_get("/api/state", state)
     app.router.add_post("/api/cmd", command)
 
-    asyncio.create_task(poller(nodes, args.interval))
+    asyncio.create_task(poller(nodes, args.interval, args.peers_every))
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "127.0.0.1", args.port).start()

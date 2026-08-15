@@ -192,6 +192,86 @@ function peerRows(peers, zeroHopOnly) {
     }).join("") + `</tbody></table></div>`;
 }
 
+// Zero-hop neighbours across every node at once. The interesting column is
+// "heard by": a node both repeaters hear directly is a shared neighbour, one
+// only a single repeater hears is what that repeater uniquely contributes.
+function renderMergedNeighbours(nodes) {
+  const byPeer = new Map();
+  for (const n of nodes) {
+    if (!n.online && !(n.peers || []).length) continue;
+    for (const p of (n.peers || [])) {
+      if (!(p.d > 0 || p.m === 1)) continue;
+      const key = p.p || p.h;
+      if (!byPeer.has(key)) byPeer.set(key, { p, heard: [] });
+      const rec = byPeer.get(key);
+      rec.heard.push({ node: n.name, snr: p.s, d: p.d, da: p.da, u: p.u });
+      if ((p.nm && !rec.p.nm) || (p.w > (rec.p.w || 0))) rec.p = p;
+    }
+  }
+  const rows = [...byPeer.values()].sort((a, b) =>
+    b.heard.length - a.heard.length ||
+    Math.max(...b.heard.map(h => h.snr ?? -99)) - Math.max(...a.heard.map(h => h.snr ?? -99)));
+  if (!rows.length) return `<div class="empty">no directly-heard neighbours on any node yet</div>`;
+
+  return `<div class="scroll"><table><thead><tr>
+      <th>hash</th><th>name</th><th>heard by</th><th>best SNR</th>
+      <th>direct rx</th><th>heard us</th><th>last direct</th>
+    </tr></thead><tbody>` + rows.map(({ p, heard }) => {
+      const best = heard.reduce((a, h) => (h.snr ?? -99) > (a.snr ?? -99) ? h : a, heard[0]);
+      const q = snrQuality(best.snr);
+      const fresh = Math.min(...heard.map(h => h.da ?? 1e9));
+      return `<tr>
+        <td class="mono">${esc(p.h)}</td>
+        <td>${p.nm ? esc(p.nm) : `<span class="muted">${p.p ? esc(p.p.slice(0,8)) : "unknown"}</span>`}</td>
+        <td>${heard.map(h => `<span class="pill" title="${esc(h.node)}: SNR ${num(h.snr,1)}, ${h.d} direct">
+              <span class="sw" style="background:var(--series-1)"></span>${esc(h.node)}</span>`).join(" ")}
+            ${heard.length > 1 ? '<span class="muted"> · shared</span>' : ""}</td>
+        <td>${q ? `<span class="pill"><span class="sw" style="background:${q.color}"></span>${num(best.snr,1)} ${q.label}</span>` : '<span class="muted">—</span>'}</td>
+        <td>${heard.reduce((a,h)=>a+(h.d||0),0)}</td>
+        <td>${heard.reduce((a,h)=>a+(h.u||0),0) || '<span class="muted">0</span>'}</td>
+        <td>${ago(fresh === 1e9 ? null : fresh)}</td>
+      </tr>`;
+    }).join("") + `</tbody></table></div>`;
+}
+
+function renderOverview(nodes) {
+  const cards = nodes.map(n => {
+    const r = n.stats_radio || {}, c = n.stats_core || {}, ps = n.peers_summary || {};
+    const zero = (n.peers || []).filter(x => x.d > 0 || x.m === 1).length;
+    if (!n.online) {
+      return `<div class="card"><h2>${esc(n.name)} · ${esc(n.transport)}</h2>
+        <div class="err">offline — ${esc(n.error || "no reply")}</div></div>`;
+    }
+    return `<div class="card">
+      <h2>${esc(n.node_name || n.name)} · ${esc(n.transport)}</h2>
+      <div class="muted" style="margin:-6px 0 10px;font-size:12.5px">
+        ${n.radio ? `${n.radio.freq.toFixed(3)} MHz · BW ${n.radio.bw} · SF${n.radio.sf} · CR${n.radio.cr}` : "radio unknown"}
+        · TX ${esc(n.tx_power)} dBm · up ${dur(c.uptime_secs)}
+      </div>
+      <div class="tiles">
+        ${tile("zero-hop", zero)}
+        ${tile("peers", `${ps.count ?? 0}/${ps.max ?? 0}`)}
+        ${tile("noise", num(r.noise_floor), "dBm")}
+        ${tile("last SNR", num(r.last_snr,1), "dB")}
+        ${tile("battery", num(c.battery_mv), "mV")}
+        ${tile("bridge", n.bridge ? n.bridge.state : "—")}
+      </div>
+    </div>`;
+  }).join("");
+
+  const oldest = Math.max(0, ...nodes.map(n => n.peers_updated ? STATE.now - n.peers_updated : 0));
+  return `<div class="grid2">${cards}</div>
+    <div class="card">
+      <h2>Zero-hop neighbours — all nodes</h2>
+      <div class="muted" style="margin:-4px 0 10px;font-size:12.5px">
+        Directly received, no relay in between. “heard by” shows which repeaters
+        hear each node — one listed twice is a shared neighbour.
+        Peer tables refreshed ${ago(Math.round(oldest))} ago.
+      </div>
+      ${renderMergedNeighbours(nodes)}
+    </div>`;
+}
+
 function renderNode(n) {
   if (!n.online) {
     return `<div class="card"><h2>${esc(n.name)}</h2>
@@ -288,32 +368,49 @@ function renderNode(n) {
     </details>
   </div>
 
-  <div class="card">
+  `;
+}
+
+function consoleCard(nodes, active) {
+  const opts = (nodes.length > 1 ? `<option value="*">all nodes</option>` : "") +
+    nodes.map(n => `<option value="${esc(n.name)}" ${n.name === active ? "selected" : ""}>${esc(n.name)}</option>`).join("");
+  return `<div class="card">
     <h2>Console</h2>
     <div class="row">
+      <select id="target">${opts}</select>
       <input id="cmd" placeholder="e.g. peers, stats-radio, get radio" style="flex:1;min-width:200px">
       <button id="send">Send</button>
     </div>
-    <pre class="out" id="out">Commands run against <strong>${esc(n.name)}</strong> over ${esc(n.transport)}.</pre>
+    <pre class="out" id="out">Runs against the selected node. Sending to <strong>all nodes</strong> fans out concurrently — useful for `set` commands you want applied everywhere.</pre>
   </div>`;
 }
 
 function render() {
   const nodes = STATE.nodes || [];
   if (!nodes.length) { $("#body").innerHTML = `<div class="card empty">no nodes configured</div>`; return; }
-  if (!ACTIVE || !nodes.find(n => n.name === ACTIVE)) ACTIVE = nodes[0].name;
+  if (!ACTIVE || (ACTIVE !== "*" && !nodes.find(n => n.name === ACTIVE)))
+    ACTIVE = nodes.length > 1 ? "*" : nodes[0].name;
 
-  $("#tabs").innerHTML = nodes.map(n => `
+  $("#tabs").innerHTML =
+    (nodes.length > 1 ? `<button class="tab" role="tab" aria-selected="${ACTIVE === "*"}" data-node="*">
+        All nodes</button>` : "") +
+    nodes.map(n => `
     <button class="tab" role="tab" aria-selected="${n.name === ACTIVE}" data-node="${esc(n.name)}">
       <span class="dot" style="background:${n.online ? "var(--good)" : "var(--critical)"}"></span>${esc(n.name)}
     </button>`).join("");
   $("#tabs").querySelectorAll(".tab").forEach(b =>
     b.onclick = () => { ACTIVE = b.dataset.node; render(); });
 
-  const n = nodes.find(x => x.name === ACTIVE);
-  $("#body").innerHTML = renderNode(n);
-  const age = n.updated ? Math.round(STATE.now - n.updated) : null;
-  $("#meta").textContent = `${nodes.length} node(s) · ${ACTIVE} updated ${age == null ? "—" : age + "s"} ago`;
+  if (ACTIVE === "*") {
+    $("#body").innerHTML = renderOverview(nodes) + consoleCard(nodes, "*");
+    const worst = Math.max(...nodes.map(x => x.updated ? STATE.now - x.updated : 1e9));
+    $("#meta").textContent = `${nodes.length} nodes · ${nodes.filter(x=>x.online).length} online · oldest poll ${ago(Math.round(worst))} ago`;
+  } else {
+    const n = nodes.find(x => x.name === ACTIVE);
+    $("#body").innerHTML = renderNode(n) + consoleCard(nodes, ACTIVE);
+    const age = n.updated ? Math.round(STATE.now - n.updated) : null;
+    $("#meta").textContent = `${nodes.length} node(s) · ${ACTIVE} updated ${age == null ? "—" : age + "s"} ago`;
+  }
 
   const send = $("#send"), cmd = $("#cmd"), out = $("#out");
   if (send) {
@@ -324,9 +421,11 @@ function render() {
       try {
         const r = await fetch("/api/cmd", { method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ node: ACTIVE, cmd: c }) });
+          body: JSON.stringify({ node: $("#target").value, cmd: c }) });
         const j = await r.json();
-        out.textContent = out.textContent.replace(/…$/, j.reply || "(no reply)");
+        const text = Object.entries(j.replies || {})
+          .map(([k, v]) => Object.keys(j.replies).length > 1 ? `[${k}] ${v}` : v).join("\n");
+        out.textContent = out.textContent.replace(/…$/, text || "(no reply)");
       } catch (e) { out.textContent = out.textContent.replace(/…$/, "error: " + e); }
       out.scrollTop = out.scrollHeight; cmd.value = "";
     };
