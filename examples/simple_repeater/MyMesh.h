@@ -222,6 +222,9 @@ public:
   void setTxPower(int8_t power_dbm) override;
   void formatNeighborsReply(char *reply) override;
   void removeNeighbor(const uint8_t* pubkey, int key_len) override;
+#if defined(WITH_BLE_BRIDGE)
+  void formatBridgeReply(char *reply, const char* what) override;
+#endif
   void formatStatsReply(char *reply) override;
   void formatRadioStatsReply(char *reply) override;
   void formatPacketStatsReply(char *reply) override;

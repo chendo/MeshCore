@@ -4,6 +4,9 @@
 
 #include <Arduino.h>
 #include <SHA256.h>
+#if WITH_STATUS_LED
+  #include "helpers/StatusLed.h"
+#endif
 #include <string.h>
 
 BLEBridge *BLEBridge::_instance = nullptr;
@@ -125,23 +128,61 @@ void BLEBridge::sendPacket(mesh::Packet *packet) {
   computeTag(frame, signed_len, &frame[signed_len]);
 
   if (_bcast.send(frame, (uint8_t)(signed_len + TAG_SIZE))) {
+#if WITH_STATUS_LED
+    StatusLed::bleTx();
+#endif
     BRIDGE_DEBUG_PRINTLN("BLE: TX, len=%d\n", (int)packet_len);
   } else {
     BRIDGE_DEBUG_PRINTLN("BLE: TX failed\n");
   }
 }
 
-bool BLEBridge::checkAndUpdatePeer(const uint8_t addr[6], uint32_t timestamp) {
+bool BLEBridge::isDuplicate(const uint8_t addr[6], const uint8_t *tag) const {
+  /* The deliberate repeats. BleBroadcast sends each datagram over max_adv_evts
+     advertising events so a duty-cycled scanner cannot miss it entirely, so the
+     same frame normally arrives two or three times. The tag is an HMAC over the
+     whole frame, so it identifies one uniquely. Caught here a repeat costs
+     nothing; left to _seen_packets it would first consume a packet buffer and a
+     hash. Counted separately from a stale frame so the telemetry can tell
+     "working as designed" from "someone is replaying at us". */
+  for (uint8_t i = 0; i < MAX_PEERS; i++) {
+    if (_peers[i].in_use && memcmp(_peers[i].addr, addr, 6) == 0) {
+      return memcmp(_peers[i].last_tag, tag, TAG_SIZE) == 0;
+    }
+  }
+  return false;
+}
+
+uint8_t BLEBridge::numPeers() const {
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < MAX_PEERS; i++) if (_peers[i].in_use) n++;
+  return n;
+}
+
+bool BLEBridge::getPeer(uint8_t idx, uint8_t addr[6], int8_t &rssi, uint32_t &age_ms,
+                        uint32_t &frames, int32_t &skew_s) const {
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < MAX_PEERS; i++) {
+    if (!_peers[i].in_use) continue;
+    if (n++ != idx) continue;
+    memcpy(addr, _peers[i].addr, 6);
+    rssi = _peers[i].last_rssi;
+    age_ms = (uint32_t)(millis() - _peers[i].last_seen);
+    frames = _peers[i].frames;
+    skew_s = (int32_t)(_peers[i].last_timestamp - _rtc->getCurrentTime());
+    return true;
+  }
+  return false;
+}
+
+void BLEBridge::peerAccept(const uint8_t addr[6], uint32_t timestamp, const uint8_t *tag,
+                           int8_t rssi) {
   unsigned long now = millis();
-  PeerStamp *slot = nullptr;
-  PeerStamp *victim = nullptr;
+  PeerStamp *slot = nullptr, *victim = nullptr;
 
   for (uint8_t i = 0; i < MAX_PEERS; i++) {
     PeerStamp *p = &_peers[i];
-    if (p->in_use && memcmp(p->addr, addr, 6) == 0) {
-      slot = p;
-      break;
-    }
+    if (p->in_use && memcmp(p->addr, addr, 6) == 0) { slot = p; break; }
     if (!p->in_use) {
       if (victim == nullptr || victim->in_use) victim = p;
     } else if (victim == nullptr || (victim->in_use && p->last_seen < victim->last_seen)) {
@@ -150,56 +191,61 @@ bool BLEBridge::checkAndUpdatePeer(const uint8_t addr[6], uint32_t timestamp) {
   }
 
   if (slot == nullptr) {
-    /* First frame from this sender: bootstrap rather than reject, exactly as
-       BaseChatMesh does for an advert from an unknown contact. */
     slot = victim;
-    if (slot == nullptr) return true;   // table full of fresh peers; fail open
+    if (slot == nullptr) return;          // every slot fresh; nothing sane to evict
     memcpy(slot->addr, addr, 6);
     slot->in_use = true;
-    slot->last_timestamp = timestamp;
-    slot->last_seen = now;
-    return true;
-  }
-
-  /* A sender we have not heard from in a long while gets a fresh start. This is
-     the escape hatch for a node whose clock restarted lower across a reboot --
-     without it, a node with no hardware RTC could be ignored indefinitely. */
-  if (now - slot->last_seen > PEER_STALE_MS) {
-    slot->last_timestamp = timestamp;
-    slot->last_seen = now;
-    return true;
-  }
-
-  if (timestamp <= slot->last_timestamp) {
-    _num_replayed++;
-    BRIDGE_DEBUG_PRINTLN("BLE: RX replay/stale, ts=%lu last=%lu\n", (unsigned long)timestamp,
-                         (unsigned long)slot->last_timestamp);
-    return false;
   }
 
   slot->last_timestamp = timestamp;
   slot->last_seen = now;
-  return true;
+  slot->last_rssi = rssi;
+  slot->frames++;
+  memcpy(slot->last_tag, tag, TAG_SIZE);
 }
 
 void BLEBridge::onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t addr[6], int8_t rssi) {
-  if (len < HEADER_SIZE + TAG_SIZE + 1) return;         // no room for a packet
-  if (payload[0] != FRAME_VERSION) return;              // not ours, or newer
+  /* Not our protocol: too short to be a frame, a version we do not speak, or
+     impossibly large. 0xFFFF is the SIG's shared development company ID, so
+     other people's beacons legitimately arrive here and must be counted, or the
+     telemetry stops adding up. */
+  if (len < HEADER_SIZE + TAG_SIZE + 1 || payload[0] != FRAME_VERSION) {
+    _num_foreign++;
+    return;
+  }
 
   const size_t signed_len = len - TAG_SIZE;
   const size_t packet_len = signed_len - HEADER_SIZE;
-  if (packet_len > MAX_PAYLOAD_SIZE) return;
+  if (packet_len > MAX_PAYLOAD_SIZE) {
+    _num_foreign++;
+    return;
+  }
 
   uint32_t timestamp;
   memcpy(&timestamp, &payload[VERSION_SIZE], TIMESTAMP_SIZE);
 
-  /* Replay gate before the HMAC: a stale frame is rejected without doing any
-     crypto, and a forged one cannot get past the tag anyway. */
-  if (!checkAndUpdatePeer(addr, timestamp)) return;
+  const uint8_t *tag = &payload[signed_len];
+
+  /* Cheap gate first: a repeat is discarded without doing any crypto, and a
+     forgery cannot get past the tag anyway. Read-only, so nothing an attacker
+     sends can influence peer state before it authenticates.
+     
+     There is deliberately no freshness check on the timestamp. Rejecting frames
+     older than the last one from a sender bought almost nothing -- a replay is
+     already caught by _seen_packets here, by the mesh's own dedup table, and by
+     MeshCore's login/admin/advert timestamp checks, none of which the bridge can
+     weaken -- while costing real availability: these boards have no hardware
+     RTC, so any reboot moves a node's clock backwards and got it ignored for
+     minutes. The timestamp is still carried and still covered by the HMAC; it is
+     now purely a diagnostic (see getPeer's skew_s). */
+  if (isDuplicate(addr, tag)) {
+    _num_dup++;
+    return;
+  }
 
   uint8_t expected[TAG_SIZE];
   computeTag(payload, signed_len, expected);
-  if (memcmp(expected, &payload[signed_len], TAG_SIZE) != 0) {
+  if (memcmp(expected, tag, TAG_SIZE) != 0) {
     /* Wrong group secret, or someone playing. This is the same role
        ESPNowBridge's checksum plays: it is what keeps neighbouring bridge
        groups from bleeding into each other. */
@@ -208,6 +254,15 @@ void BLEBridge::onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t a
     return;
   }
 
+  /* Authenticated: only now is it safe to move this sender's high-water mark. */
+  peerAccept(addr, timestamp, tag, rssi);
+  _num_rx_ok++;
+
+#if WITH_STATUS_LED
+  // A bridged packet never reaches logRxRaw -- it is queued straight inbound --
+  // so the LoRa hooks never see it. Blue is the bridge's own colour anyway.
+  StatusLed::bleRx();
+#endif
   BRIDGE_DEBUG_PRINTLN("BLE: RX, payload_len=%d rssi=%d\n", (int)packet_len, (int)rssi);
 
   mesh::Packet *pkt = _mgr->allocNew();

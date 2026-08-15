@@ -25,8 +25,7 @@ bool BleBroadcast::initStack(const char* name) {
   static bool done = false;
   if (done) return true;
 
-  /* Only bring the stack up if nobody already has. A repeater build with a
-     companion or CLI interface has one; a bare one does not. */
+  /* Only bring the stack up if nobody already has. */
   uint8_t sd_enabled = 0;
   sd_softdevice_is_enabled(&sd_enabled);
   if (!sd_enabled) {
@@ -35,7 +34,6 @@ bool BleBroadcast::initStack(const char* name) {
       return false;
     }
   }
-
   if (name != nullptr) Bluefruit.setName(name);
   done = true;
   return true;
@@ -243,9 +241,7 @@ void BleBroadcast::loop() {
   if ((long)(now - _next_burst_allowed_ms) < 0) return;
 
   /* Roll the accounting window, then enforce the connectable-advert guarantee:
-     a CLI/DFU port sharing the set must stay discoverable even while the bridge
-     is busy. Skipped entirely when nothing else advertises -- throttling
-     ourselves on behalf of nobody would just add latency. */
+     the CLI/DFU port must stay discoverable even while the bridge is busy. */
   if (now - _window_started_ms >= CONNECTABLE_PERIOD_MS) {
     _window_started_ms = now;
     _burst_ms_in_window = 0;

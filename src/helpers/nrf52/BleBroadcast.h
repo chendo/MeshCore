@@ -53,8 +53,7 @@ public:
    *
    * A repeater with no companion or CLI interface has nobody to call
    * Bluefruit.begin() for it. Call this once before begin() in that case. It is
-   * idempotent and remembers whether it did the work, so a host that already
-   * has BLE up is unaffected.
+   * idempotent, so a host that already has BLE up is unaffected.
    *
    * @param name  GAP device name, or NULL to leave the default alone.
    */

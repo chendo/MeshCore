@@ -1166,6 +1166,44 @@ void MyMesh::onDefaultRegionChanged(const RegionEntry* r) {
   }
 }
 
+#if defined(WITH_BLE_BRIDGE)
+void MyMesh::formatBridgeReply(char *reply, const char* what) {
+  const size_t reply_size = 160;
+  if (memcmp(what, "peers", 5) == 0) {
+    // Who we are actually bridging with, and how good the link is. RSSI here is
+    // the BLE link to that node, nothing to do with LoRa.
+    uint8_t n = bridge.numPeers();
+    int o = snprintf(reply, reply_size, "%d bridge peer(s):", (int)n);
+    for (uint8_t i = 0; i < n && o + 30 < (int)reply_size; i++) {
+      uint8_t addr[6];
+      int8_t rssi;
+      uint32_t age_ms, frames;
+      int32_t skew_s;
+      if (!bridge.getPeer(i, addr, rssi, age_ms, frames, skew_s)) break;
+      // BLE addresses are little-endian on the wire; the high 3 bytes are what
+      // identifies a device at a glance.
+      o += snprintf(&reply[o], reply_size - o, " %02X%02X%02X/%ddB/%lupkt/%lus/skew%+lds",
+                    addr[5], addr[4], addr[3], (int)rssi,
+                    (unsigned long)frames, (unsigned long)(age_ms / 1000), (long)skew_s);
+    }
+    if (n == 0) snprintf(reply, reply_size, "no bridge peers heard yet");
+    return;
+  }
+
+  // seen = ok + dup + bad + other, so the split says WHY frames were not used.
+  // dup is expected and healthy (each datagram is deliberately broadcast over
+  // several advertising events); other is ambient traffic from anyone else
+  // using the shared 0xFFFF development company ID.
+  snprintf(reply, reply_size,
+           "ble bridge %s: tx %lu drop %lu | rx seen %lu ok %lu dup %lu bad %lu other %lu | peers %d",
+           bridge.isTransportUp() ? "up" : (bridge.isRunning() ? "starting" : "off"),
+           (unsigned long)bridge.numSent(), (unsigned long)bridge.numTxDropped(),
+           (unsigned long)bridge.numSeen(), (unsigned long)bridge.numRxOk(),
+           (unsigned long)bridge.numDup(), (unsigned long)bridge.numBadTag(),
+           (unsigned long)bridge.numForeign(), (int)bridge.numPeers());
+}
+#endif
+
 void MyMesh::formatStatsReply(char *reply) {
   StatsFormatHelper::formatCoreStats(reply, board, *_ms, _err_flags, _mgr);
 }

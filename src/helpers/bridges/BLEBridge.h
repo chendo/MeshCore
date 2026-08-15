@@ -65,11 +65,10 @@ public:
   /**
    * @brief Tell the bridge the BLE stack is up, and what to chain events to.
    *
-   * The bridge cannot start its transport from begin(): MyMesh::begin() runs
-   * that during boot, and on a build that also has a BLE serial interface, that
-   * interface's own begin() comes later and would overwrite the raw event
-   * callback we depend on. So the host calls this once BLE is up, and loop()
-   * picks it up from there.
+   * The bridge cannot start its transport from begin(): MyMesh::begin() runs it
+   * long before main() has called startBLE(), and SerialBLEInterface::begin()
+   * would then overwrite the raw event callback we depend on. So the repeater
+   * calls this once BLE is initialised and loop() picks it up from there.
    *
    * @param chain  The event callback already installed, if any, so events we do
    *               not consume still reach it. Pass NULL when nothing else on
@@ -89,13 +88,34 @@ public:
    *  repeater keep sleeping when the bridge is merely listening. */
   bool hasPendingTx() const { return _transport_up && _bcast.hasPendingWork(); }
 
-  /* Frames seen but rejected. A steadily climbing badTag count means another
-     group is in range on a different secret -- which is the mechanism working,
-     not a fault. Both are also traced when BRIDGE_DEBUG is on. */
+  /* Telemetry. Every frame carrying our company ID is "seen"; it then lands in
+     exactly one of ok / dup / stale / badtag, so the four should sum to seen
+     A climbing badtag means another group is in
+     range on a different secret -- the mechanism working, not a fault. A large
+     dup count is normal and healthy: each datagram is deliberately broadcast
+     over several advertising events. */
+  bool isTransportUp() const { return _transport_up; }
+  uint32_t numSeen() const { return _bcast.numRecv(); }
+  uint32_t numRxOk() const { return _num_rx_ok; }
+  uint32_t numDup() const { return _num_dup; }
   uint32_t numBadTag() const { return _num_bad_tag; }
-  uint32_t numReplayed() const { return _num_replayed; }
+  /** Adverts carrying our company ID that are not our protocol at all. 0xFFFF
+   *  is the SIG's shared development ID, so other people's beacons land here;
+   *  a large count is ambient noise, not a fault. */
+  uint32_t numForeign() const { return _num_foreign; }
   uint32_t numSent() const { return _bcast.numSent(); }
-  uint32_t numRecv() const { return _bcast.numRecv(); }
+  uint32_t numTxDropped() const { return _bcast.numTxDropped(); }
+
+  uint8_t numPeers() const;
+
+  /**
+   * @param age_ms  how long since we last accepted a frame from this peer
+   * @param skew_s  their clock minus ours, from the last frame's timestamp.
+   *                Not acted on -- purely a diagnostic, and the quickest way to
+   *                spot a node whose clock has drifted or reset.
+   */
+  bool getPeer(uint8_t idx, uint8_t addr[6], int8_t &rssi, uint32_t &age_ms,
+               uint32_t &frames, int32_t &skew_s) const;
 
 private:
   /**
@@ -112,10 +132,6 @@ private:
    *  co-located nodes, so this is generous. */
   static const uint8_t MAX_PEERS = 8;
 
-  /** A peer unheard this long is re-bootstrapped rather than left rejecting.
-   *  Covers a sender whose clock restarted lower across a reboot. */
-  static const uint32_t PEER_STALE_MS = 10UL * 60UL * 1000UL;
-
   /** Backoff between attempts to bring the transport up, so a persistent
    *  failure logs occasionally instead of once per loop iteration. */
   static const uint32_t START_RETRY_MS = 30000;
@@ -124,6 +140,9 @@ private:
     uint8_t addr[6];
     uint32_t last_timestamp;   // by THEIR clock
     unsigned long last_seen;   // by ours, for staleness and eviction
+    uint8_t last_tag[TAG_SIZE];// fingerprint of the last frame accepted
+    int8_t last_rssi;          // link quality to this bridge peer
+    uint32_t frames;           // accepted from this peer
     bool in_use;
   };
 
@@ -141,9 +160,12 @@ private:
   /** HMAC-SHA256 over `len` bytes of `frame`, truncated into `tag`. */
   void computeTag(const uint8_t *frame, size_t len, uint8_t tag[TAG_SIZE]);
 
-  /** Replay gate. Returns false if this timestamp is not newer than the last
-   *  one accepted from this sender. */
-  bool checkAndUpdatePeer(const uint8_t addr[6], uint32_t timestamp);
+  /** Record an authenticated frame. Only called once the HMAC has verified. */
+  void peerAccept(const uint8_t addr[6], uint32_t timestamp, const uint8_t *tag, int8_t rssi);
+
+  /** Distinguishes a suppressed repeat from a genuine stale frame, so the
+   *  telemetry can tell "working as designed" from "something is replaying". */
+  bool isDuplicate(const uint8_t addr[6], const uint8_t *tag) const;
 
   BleBroadcast _bcast;
   uint8_t _key[KEY_SIZE];
@@ -160,7 +182,9 @@ private:
   PeerStamp _peers[MAX_PEERS];
 
   uint32_t _num_bad_tag = 0;
-  uint32_t _num_replayed = 0;
+  uint32_t _num_dup = 0;
+  uint32_t _num_foreign = 0;
+  uint32_t _num_rx_ok = 0;
 };
 
 #endif

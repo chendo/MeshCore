@@ -221,6 +221,11 @@ public:
   virtual void formatStatsReply(char *reply) = 0;
   virtual void formatRadioStatsReply(char *reply) = 0;
   virtual void formatPacketStatsReply(char *reply) = 0;
+  // Bridge telemetry. Default-implemented so examples carrying no bridge, or a
+  // bridge with no stats of its own, are unaffected.
+  virtual void formatBridgeReply(char *reply, const char* what) {
+    strcpy(reply, "no bridge telemetry in this firmware");
+  }
   virtual mesh::LocalIdentity& getSelfId() = 0;
   virtual void saveIdentity(const mesh::LocalIdentity& new_id) = 0;
   virtual void clearStats() = 0;
