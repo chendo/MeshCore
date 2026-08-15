@@ -89,7 +89,7 @@ public:
 
   /* Telemetry. Every frame carrying our company ID is "seen"; it then lands in
      exactly one of ok / dup / stale / badtag, so the four should sum to seen
-     (minus any malformed runt). A climbing badtag means another group is in
+     A climbing badtag means another group is in
      range on a different secret -- the mechanism working, not a fault. A large
      dup count is normal and healthy: each datagram is deliberately broadcast
      over several advertising events. */
@@ -97,16 +97,24 @@ public:
   uint32_t numSeen() const { return _bcast.numRecv(); }
   uint32_t numRxOk() const { return _num_rx_ok; }
   uint32_t numDup() const { return _num_dup; }
-  uint32_t numReplayed() const { return _num_replayed; }
   uint32_t numBadTag() const { return _num_bad_tag; }
+  /** Adverts carrying our company ID that are not our protocol at all. 0xFFFF
+   *  is the SIG's shared development ID, so other people's beacons land here;
+   *  a large count is ambient noise, not a fault. */
+  uint32_t numForeign() const { return _num_foreign; }
   uint32_t numSent() const { return _bcast.numSent(); }
   uint32_t numTxDropped() const { return _bcast.numTxDropped(); }
 
   uint8_t numPeers() const;
 
-  /** @param age_ms  how long since we last accepted a frame from this peer */
+  /**
+   * @param age_ms  how long since we last accepted a frame from this peer
+   * @param skew_s  their clock minus ours, from the last frame's timestamp.
+   *                Not acted on -- purely a diagnostic, and the quickest way to
+   *                spot a node whose clock has drifted or reset.
+   */
   bool getPeer(uint8_t idx, uint8_t addr[6], int8_t &rssi, uint32_t &age_ms,
-               uint32_t &frames) const;
+               uint32_t &frames, int32_t &skew_s) const;
 
 private:
   /**
@@ -122,10 +130,6 @@ private:
   /** Senders tracked for replay rejection. A bridge group is a handful of
    *  co-located nodes, so this is generous. */
   static const uint8_t MAX_PEERS = 8;
-
-  /** A peer unheard this long is re-bootstrapped rather than left rejecting.
-   *  Covers a sender whose clock restarted lower across a reboot. */
-  static const uint32_t PEER_STALE_MS = 10UL * 60UL * 1000UL;
 
   /** Backoff between attempts to bring the transport up, so a persistent
    *  failure logs occasionally instead of once per loop iteration. */
@@ -155,17 +159,6 @@ private:
   /** HMAC-SHA256 over `len` bytes of `frame`, truncated into `tag`. */
   void computeTag(const uint8_t *frame, size_t len, uint8_t tag[TAG_SIZE]);
 
-  /**
-   * Read-only replay gate: false if this frame is older than the last one
-   * accepted from this sender, or is a byte-identical repeat of it.
-   *
-   * Deliberately does NOT mutate peer state. Doing so before the HMAC is
-   * checked would let anyone in radio range spoof a sender's BLE address, claim
-   * a far-future timestamp, and lock that node out even though the frame is
-   * then discarded as forged.
-   */
-  bool peerAllows(const uint8_t addr[6], uint32_t timestamp, const uint8_t *tag) const;
-
   /** Record an authenticated frame. Only called once the HMAC has verified. */
   void peerAccept(const uint8_t addr[6], uint32_t timestamp, const uint8_t *tag, int8_t rssi);
 
@@ -188,8 +181,8 @@ private:
   PeerStamp _peers[MAX_PEERS];
 
   uint32_t _num_bad_tag = 0;
-  uint32_t _num_replayed = 0;
   uint32_t _num_dup = 0;
+  uint32_t _num_foreign = 0;
   uint32_t _num_rx_ok = 0;
 };
 

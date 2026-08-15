@@ -843,27 +843,30 @@ void MyMesh::formatBridgeReply(char *reply, size_t reply_size, const char* what)
       uint8_t addr[6];
       int8_t rssi;
       uint32_t age_ms, frames;
-      if (!bridge.getPeer(i, addr, rssi, age_ms, frames)) break;
+      int32_t skew_s;
+      if (!bridge.getPeer(i, addr, rssi, age_ms, frames, skew_s)) break;
       // BLE addresses are little-endian on the wire; show the high 3 bytes,
       // which is what identifies a device at a glance.
-      o += snprintf(&reply[o], reply_size - o, " %02X%02X%02X/%ddB/%lupkt/%lus",
+      o += snprintf(&reply[o], reply_size - o, " %02X%02X%02X/%ddB/%lupkt/%lus/skew%+lds",
                     addr[5], addr[4], addr[3], (int)rssi,
-                    (unsigned long)frames, (unsigned long)(age_ms / 1000));
+                    (unsigned long)frames, (unsigned long)(age_ms / 1000),
+                    (long)skew_s);
     }
     if (n == 0) snprintf(reply, reply_size, "no bridge peers heard yet");
     return;
   }
 
-  // seen = ok + dup + stale + bad, so the split says WHY frames were not used.
-  // dup is expected and healthy: each datagram is deliberately broadcast over
-  // several advertising events so a duty-cycled scanner cannot miss it.
+  // seen = ok + dup + bad + other, so the split says WHY frames were not used.
+  // dup is expected and healthy (each datagram is deliberately broadcast over
+  // several advertising events); other is ambient traffic from anyone else
+  // using the shared 0xFFFF development company ID.
   snprintf(reply, reply_size,
-           "ble bridge %s: tx %lu drop %lu | rx seen %lu ok %lu dup %lu stale %lu bad %lu | peers %d",
+           "ble bridge %s: tx %lu drop %lu | rx seen %lu ok %lu dup %lu bad %lu other %lu | peers %d",
            bridge.isTransportUp() ? "up" : (bridge.isRunning() ? "starting" : "off"),
            (unsigned long)bridge.numSent(), (unsigned long)bridge.numTxDropped(),
            (unsigned long)bridge.numSeen(), (unsigned long)bridge.numRxOk(),
-           (unsigned long)bridge.numDup(), (unsigned long)bridge.numReplayed(),
-           (unsigned long)bridge.numBadTag(), (int)bridge.numPeers());
+           (unsigned long)bridge.numDup(), (unsigned long)bridge.numBadTag(),
+           (unsigned long)bridge.numForeign(), (int)bridge.numPeers());
 }
 #endif
 
