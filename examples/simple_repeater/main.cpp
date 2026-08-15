@@ -106,6 +106,21 @@ void setup() {
 
   the_mesh.begin(fs);
 
+#if defined(WITH_BLE_BRIDGE)
+  // Nothing else on a plain repeater build uses BLE, so the bridge owns the
+  // stack. It cannot do this from its own begin(), which runs inside
+  // the_mesh.begin() above: a build that DOES have a BLE serial interface
+  // brings the stack up after that point and would clobber the raw event
+  // callback the bridge depends on. So the host brings BLE up and hands it
+  // over. NULL chain because there is no other raw-event consumer here.
+  {
+    char ble_name[40];
+    snprintf(ble_name, sizeof(ble_name), "MeshCore-%s", the_mesh.getNodePrefs()->node_name);
+    BleBroadcast::initStack(ble_name);
+    BLEBridge::setBleReady(NULL);
+  }
+#endif
+
 #ifdef DISPLAY_CLASS
   ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);
 #endif

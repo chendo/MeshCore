@@ -1127,15 +1127,50 @@ region save
 
 ---
 
-#### Set the ESP-Now secret
+#### Set the shared bridge secret (ESP-NOW and BLE)
 **Usage:** 
 - `get bridge.secret`
 - `set bridge.secret <secret>`
 
 **Parameters:**
-- `secret`: ESP-NOW bridge secret, up to 15 characters
+- `secret`: shared bridge secret, up to 15 characters
 
 **Default:** Varies by board
+
+On ESP-NOW builds this is an XOR key. On BLE builds it is hashed into an
+HMAC key that authenticates every frame -- see the BLE bridge notes below.
+
+---
+
+#### BLE bridge (nRF52 only)
+
+`WITH_BLE_BRIDGE` mirrors mesh packets over BLE 5 extended advertising instead
+of ESP-NOW, for nRF52 boards that have no WiFi. Every node in BLE range running
+the build with the same `bridge.secret` hears every bridged packet, so
+co-located repeaters can share traffic without spending a LoRa hop. `get
+bridge.type` reports `ble`; there is no `bridge.channel`, which is ESP-NOW only.
+
+The frame is deliberately **plaintext**, so the format can be implemented
+independently:
+
+```text
+[1]     version
+[4]     timestamp, little-endian, sender's clock
+[<=238] the mesh packet, unencrypted
+[8]     HMAC-SHA256 tag over everything above, truncated
+```
+
+Anyone in BLE range can therefore read bridged traffic. Message contents remain
+protected by MeshCore's own end-to-end encryption exactly as they are over LoRa.
+`bridge.secret` is a credential rather than a cipher: it keys the HMAC that stops
+anyone in range injecting packets into the mesh, so anyone holding it can forge
+frames. Prefer a random string, since its entropy caps the key's.
+
+The SoftDevice provides one advertising set, so on a build that also exposes a
+BLE serial interface the bridge and that interface take turns on it: at least
+300 ms of every 2 s is reserved for connectable advertising, so the device stays
+discoverable, though a BLE scanner may take longer to find it while the bridge is
+busy. Range is BLE range -- tens of metres. This is a same-site bridge.
 
 ---
 

@@ -1,0 +1,202 @@
+#pragma once
+
+#include <stdint.h>
+#include <stddef.h>
+#include <bluefruit.h>
+
+/**
+ * @brief  Connectionless many-to-many datagrams over BLE 5 extended advertising.
+ *
+ * This is the nRF52 answer to ESP-NOW: no pairing, no connections, no peer
+ * state. Every node in range that is scanning hears every datagram. It exists
+ * so a board with no WiFi (RAK3401 and friends) can run the same bridge
+ * topology the ESP32 boards get from ESPNowBridge.
+ *
+ * Why extended advertising and not legacy: a legacy advert carries 31 bytes,
+ * of which about 24 would survive our framing, so a full MeshCore packet would
+ * need eleven fragments with no acknowledgement anywhere -- delivery decays as
+ * (1-p)^11 and collapses as soon as two nodes talk at once. An extended
+ * advertising PDU carries 255, so a packet always fits in exactly one
+ * transmission and there is no reassembly to get wrong.
+ *
+ * Payload is wrapped in one Manufacturer Specific Data AD structure so the air
+ * format stays well-formed BLE and every other scanner in earshot ignores it.
+ *
+ * NOT a general-purpose BLE object: exactly one instance can exist, because
+ * the SoftDevice has exactly one advertising set and one scanner.
+ */
+class BleBroadcast {
+public:
+  /** Called from the SoftDevice event handler for each accepted datagram. */
+  typedef void (*rx_handler_t)(const uint8_t* payload, uint8_t len,
+                               const uint8_t peer_addr[6], int8_t rssi);
+
+  /** Chained raw-event callback -- see begin(). */
+  typedef void (*event_chain_t)(ble_evt_t* evt);
+
+  /**
+   * AD framing overhead: length(1) + type(1) + company ID(2).
+   * The SoftDevice will accept 255 bytes of advertising data in an extended
+   * PDU, so this is what is left for a caller.
+   */
+  static const uint8_t AD_OVERHEAD = 4;
+  static const uint8_t MAX_PAYLOAD = 255 - AD_OVERHEAD;   // 251
+
+  /** Datagrams buffered for transmission. Each burst occupies the radio for
+   *  tens of milliseconds, so a little queueing absorbs bursty senders. */
+  static const uint8_t QUEUE_SIZE = 4;
+
+  BleBroadcast() {}
+
+  /**
+   * @brief  Bring up the BLE stack, for a host that has no other BLE user.
+   *
+   * A repeater with no companion or CLI interface has nobody to call
+   * Bluefruit.begin() for it. Call this once before begin() in that case. It is
+   * idempotent and remembers whether it did the work, so a host that already
+   * has BLE up is unaffected.
+   *
+   * @param name  GAP device name, or NULL to leave the default alone.
+   */
+  static bool initStack(const char* name = nullptr);
+
+  /**
+   * @brief  Start advertising-based broadcast.
+   *
+   * MUST be called after the BLE stack is up (Bluefruit.begin()) and after any
+   * other subsystem that installs a raw event callback -- see the `chain`
+   * parameter.
+   *
+   * @param company_id  Manufacturer ID used to tag and filter our adverts.
+   * @param handler     Invoked for each accepted datagram, from SoftDevice
+   *                    event context. Keep it short.
+   * @param chain       Bluefruit.setEventCallback() is a single slot, and on a
+   *                    repeater SerialBLEInterface has already claimed it (it
+   *                    needs CONN_PARAM_UPDATE_REQUEST or the CLI connection
+   *                    eventually drops). We take the slot and forward every
+   *                    event we do not consume to this. Pass the previous
+   *                    handler, or NULL if there was none.
+   * @returns false if the SoftDevice refused, in which case nothing is running.
+   */
+  bool begin(uint16_t company_id, rx_handler_t handler, event_chain_t chain);
+
+  /** Stop scanning, abandon any in-flight burst, restore connectable adverts. */
+  void end();
+
+  bool isRunning() const { return _running; }
+
+  /**
+   * @brief  Queue one datagram for broadcast.
+   * @returns false if oversize or the queue is full (caller should drop).
+   */
+  bool send(const uint8_t* payload, uint8_t len);
+
+  /** Drive the advertising-set arbiter. Call from the main loop. */
+  void loop();
+
+  /** Radio time is currently ours rather than the connectable advert's. */
+  bool isBursting() const { return _bursting; }
+
+  /**
+   * @brief  True while transmission still needs loop() to be called on time.
+   *
+   * Receiving survives sleep -- SoftDevice radio events wake the CPU -- but the
+   * burst arbiter works to millis() deadlines, so a sleeping node with a queued
+   * datagram would stall until some unrelated interrupt happened along.
+   */
+  bool hasPendingWork() const { return _bursting || _queue_len > 0; }
+
+  uint32_t numSent() const { return _num_sent; }
+  uint32_t numRecv() const { return _num_recv; }
+  uint32_t numTxDropped() const { return _num_tx_dropped; }
+
+private:
+  /* Advertising interval for a burst, in 625us units. 20ms is the shortest
+     interval permitted for a non-connectable extended advert. */
+  static const uint32_t ADV_INTERVAL = 32;
+
+  /* Repeat each datagram over this many advertising events. A scanner running
+     at less than 100% duty cycle would otherwise miss whole datagrams; three
+     chances spread over ~60ms comfortably covers our own scan duty cycle. */
+  static const uint8_t MAX_ADV_EVTS = 3;
+
+  /* Safety net: if ADV_SET_TERMINATED never arrives we would wedge holding the
+     advertising set forever, and the diagnostic port would never come back. */
+  static const uint32_t BURST_TIMEOUT_MS = 400;
+
+  /* Minimum idle between bursts, so back-to-back traffic cannot completely
+     monopolise the single advertising set. */
+  static const uint32_t BURST_GAP_MS = 20;
+
+  /* The SoftDevice has ONE advertising set (BLE_GAP_ADV_SET_COUNT_MAX == 1),
+     so our broadcast and the connectable CLI/DFU advert cannot both run. We
+     guarantee the connectable advert at least CONNECTABLE_MIN_MS of every
+     CONNECTABLE_PERIOD_MS, otherwise a busy bridge would make the diagnostic
+     port undiscoverable. */
+  static const uint32_t CONNECTABLE_PERIOD_MS = 2000;
+  static const uint32_t CONNECTABLE_MIN_MS = 300;
+
+  /* Scan window/interval in 625us units: 40ms of every 50ms, i.e. 80% duty.
+     Deliberately not 100% -- the SoftDevice needs slack to service our own
+     advertising bursts and any connection. */
+  static const uint16_t SCAN_INTERVAL = 80;
+  static const uint16_t SCAN_WINDOW = 64;
+
+  struct Datagram {
+    uint8_t len;
+    uint8_t buf[MAX_PAYLOAD];
+  };
+
+  /** Build the manufacturer-data AD structure into _adv_buf and hand the set
+   *  to the SoftDevice. Returns the raw sd_ble_gap_adv_set_configure() result. */
+  uint32_t configureAdvSet(const uint8_t* payload, uint8_t len);
+
+  bool startBurst(const Datagram& d);
+  void finishBurst();
+  void shiftQueueLeft();
+  bool armScan(bool first);
+  void onAdvReport(const ble_gap_evt_adv_report_t* report);
+
+  static void onBLEEvent(ble_evt_t* evt);
+
+  bool _running = false;
+  bool _bursting = false;
+  bool _restore_connectable = false;
+
+  /* Whether anything else actually wants the advertising set. On a repeater
+     with no CLI or companion interface nothing else advertises, so the
+     connectable-window reservation below would just throttle us for nobody. */
+  bool _shares_adv_set = false;
+
+  uint16_t _company_id = 0;
+  rx_handler_t _handler = nullptr;
+  event_chain_t _chain = nullptr;
+
+  uint8_t _adv_handle = 0;
+  unsigned long _burst_started_ms = 0;
+  unsigned long _next_burst_allowed_ms = 0;
+
+  /* Rolling accounting for the connectable-advert guarantee. */
+  unsigned long _window_started_ms = 0;
+  uint32_t _burst_ms_in_window = 0;
+
+  uint8_t _queue_len = 0;
+  Datagram _queue[QUEUE_SIZE];
+
+  /* The SoftDevice keeps a pointer to the advertising buffer for as long as
+     the set is configured, so this must outlive each burst and must not be
+     touched while one is in flight. */
+  uint8_t _adv_buf[255];
+  uint8_t _adv_len = 0;
+
+  uint32_t _num_sent = 0;
+  uint32_t _num_recv = 0;
+  uint32_t _num_tx_dropped = 0;
+};
+
+#if BLE_BROADCAST_DEBUG_LOGGING && ARDUINO
+  #include <Arduino.h>
+  #define BLE_BCAST_DEBUG_PRINTLN(F, ...) Serial.printf("BleBroadcast: " F "\n", ##__VA_ARGS__)
+#else
+  #define BLE_BCAST_DEBUG_PRINTLN(...) {}
+#endif

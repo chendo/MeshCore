@@ -198,6 +198,8 @@ uint8_t MyMesh::handleAnonClockReq(const mesh::Identity& sender, uint32_t sender
     reply_data[8] |= 0x01;  // is bridge, type UART
 #elif WITH_ESPNOW_BRIDGE
     reply_data[8] |= 0x03;  // is bridge, type ESP-NOW
+#elif WITH_BLE_BRIDGE
+    reply_data[8] |= 0x05;  // is bridge, type BLE
 #endif
     if (_prefs.disable_fwd) {   // is this repeater currently disabled
       reply_data[8] |= 0x80;  // is disabled
@@ -872,6 +874,9 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 #if defined(WITH_ESPNOW_BRIDGE)
       , bridge(&_prefs, _mgr, &rtc)
 #endif
+#if defined(WITH_BLE_BRIDGE)
+      , bridge(&_prefs, _mgr, &rtc)
+#endif
 {
   last_millis = 0;
   uptime_millis = 0;
@@ -1331,7 +1336,14 @@ void MyMesh::loop() {
 
 // To check if there is pending work
 bool MyMesh::hasPendingWork() const {
-#if defined(WITH_BRIDGE)
+#if defined(WITH_BLE_BRIDGE)
+  // Unlike the WiFi bridges, this one can sleep. nRF52 sleep is event-driven
+  // (sd_app_evt_wait), and SoftDevice radio events wake the CPU, so packets
+  // still arrive over BLE while asleep. Only transmission needs the loop to run
+  // on time -- the advertising-set arbiter works to millis() deadlines, and a
+  // queued datagram would otherwise wait for some unrelated interrupt.
+  if (bridge.hasPendingTx()) return true;
+#elif defined(WITH_BRIDGE)
   if (bridge.isRunning()) return true;  // bridge needs WiFi radio, can't sleep
 #endif
   return _mgr->getOutboundTotal() > 0;

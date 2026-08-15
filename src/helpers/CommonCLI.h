@@ -7,8 +7,14 @@
 #include <helpers/RegionMap.h>
 #include <helpers/ConfigSerializer.h>
 
-#if defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_BLE_BRIDGE)
 #define WITH_BRIDGE
+#endif
+
+// Bridges whose transport is a shared-secret broadcast, and so expose
+// bridge.secret. ESP-NOW uses it as an XOR key; BLE derives an HMAC key from it.
+#if defined(WITH_ESPNOW_BRIDGE) || defined(WITH_BLE_BRIDGE)
+#define WITH_BRIDGE_SECRET
 #endif
 
 #define ADVERT_LOC_NONE       0
