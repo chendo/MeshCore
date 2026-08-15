@@ -6,6 +6,10 @@
 
 #include "MyMesh.h"
 #include <helpers/ArchiveStorage.h>
+#if WITH_STATUS_LED
+  #include <helpers/StatusLed.h>
+  static StatusLed status_led;
+#endif
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
@@ -103,6 +107,12 @@ void setup() {
 #endif
 
   the_mesh.begin(fs, &archive);
+#if WITH_STATUS_LED
+  // blue = transmit, green = receive, both together = 5s heartbeat,
+  // both at a low glow = running on external power. The RAK3401 has no red
+  // LED, so the pattern carries the meaning rather than the colour.
+  status_led.begin(LED_BLUE, LED_GREEN, LED_STATE_ON);
+#endif
 #if WITH_BLE_CLI
   // Local diagnostic + firmware-update port. The interface is the companion's,
   // unchanged, which is also what provides the BLE DFU service.
@@ -179,6 +189,9 @@ void loop() {
 #endif
 
   the_mesh.loop();
+#if WITH_STATUS_LED
+  status_led.loop(board.isExternalPowered());
+#endif
   sensors.loop();
 #ifdef DISPLAY_CLASS
   ui_task.loop();

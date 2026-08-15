@@ -4,6 +4,9 @@
 
 #include <Arduino.h>
 #include <SHA256.h>
+#if WITH_STATUS_LED
+  #include "helpers/StatusLed.h"
+#endif
 #include <string.h>
 
 BLEBridge *BLEBridge::_instance = nullptr;
@@ -125,6 +128,9 @@ void BLEBridge::sendPacket(mesh::Packet *packet) {
   computeTag(frame, signed_len, &frame[signed_len]);
 
   if (_bcast.send(frame, (uint8_t)(signed_len + TAG_SIZE))) {
+#if WITH_STATUS_LED
+    StatusLed::txBlink();
+#endif
     BRIDGE_DEBUG_PRINTLN("BLE: TX, len=%d\n", (int)packet_len);
   } else {
     BRIDGE_DEBUG_PRINTLN("BLE: TX failed\n");
@@ -208,6 +214,11 @@ void BLEBridge::onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t a
     return;
   }
 
+#if WITH_STATUS_LED
+  // A bridged packet never reaches logRxRaw -- it is queued straight inbound --
+  // so without this the green LED would stay dark for BLE receive.
+  StatusLed::rxBlink();
+#endif
   BRIDGE_DEBUG_PRINTLN("BLE: RX, payload_len=%d rssi=%d\n", (int)packet_len, (int)rssi);
 
   mesh::Packet *pkt = _mgr->allocNew();

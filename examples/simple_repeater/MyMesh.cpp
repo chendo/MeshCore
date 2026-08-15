@@ -821,6 +821,9 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 #if WITH_MESH_OBSERVER
   _obs.observeRx(raw, len, (int8_t)(snr * 4));   // peers, hops, types, relay confirms
 #endif
+#if WITH_STATUS_LED
+  StatusLed::rxBlink();
+#endif
 #if MESH_PACKET_LOGGING
   Serial.print(getLogDateTime());
   Serial.print(" RAW: ");
@@ -864,6 +867,9 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
   // only the header byte matters here: observeTx uses it to spot floods, which
   // are the only transmissions that can come back to us relayed
   { uint8_t hdr = pkt->header; _obs.observeTx(&hdr, 1); }
+#endif
+#if WITH_STATUS_LED
+  StatusLed::txBlink();
 #endif
 #ifdef WITH_BRIDGE
   if (_prefs.bridge_pkt_src == 0) {

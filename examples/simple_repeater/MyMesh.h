@@ -35,6 +35,10 @@
 #define WITH_BRIDGE
 #endif
 
+#if WITH_STATUS_LED
+#include "helpers/StatusLed.h"
+#endif
+
 #ifdef WITH_BLE_BRIDGE
 #include "helpers/bridges/BLEBridge.h"
 #define WITH_BRIDGE
