@@ -381,7 +381,7 @@ function consoleCard(nodes, active) {
       <input id="cmd" placeholder="e.g. peers, stats-radio, get radio" style="flex:1;min-width:200px">
       <button id="send">Send</button>
     </div>
-    <pre class="out" id="out">Runs against the selected node. Sending to <strong>all nodes</strong> fans out concurrently — useful for `set` commands you want applied everywhere.</pre>
+    <pre class="out" id="out">Runs against the selected node. Sending to <strong>all nodes</strong> fans out concurrently — useful for &ldquo;set&rdquo; commands you want applied everywhere.</pre>
   </div>`;
 }
 
@@ -442,8 +442,15 @@ async function tick() {
     $("#meta").textContent = "backend unreachable — is meshweb.py running?";
   }
 }
-tick();
-setInterval(tick, 5000);
+// Never poll faster than 5s, and never faster than the server polls its nodes:
+// a quicker refresh would only redraw identical data.
+let TIMER = null;
+function schedule() {
+  const ms = Math.max(5000, (STATE.poll_interval || 5) * 1000);
+  if (TIMER) clearInterval(TIMER);
+  TIMER = setInterval(tick, ms);
+}
+tick().then(schedule);
 </script>
 </body>
 </html>

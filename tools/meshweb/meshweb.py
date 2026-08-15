@@ -128,8 +128,9 @@ def _strip_prefix(s):
     and keeps its prefix, which silently broke every numeric parse.
     """
     s = s.strip()
-    while s.startswith("->") or s.startswith(">"):
-        s = s.lstrip("->").lstrip(">").strip()
+    for prefix in ("->", ">"):
+        while s.startswith(prefix):
+            s = s[len(prefix):].strip()
     return s
 
 
@@ -295,6 +296,11 @@ async def main():
                     help="fetch the full peer table every Nth poll (it is one "
                          "round-trip per peer, so it is the expensive part)")
     args = ap.parse_args()
+    # A poll is dozens of CLI round-trips over a shared link; anything faster
+    # than this just queues on the transport and starves the console.
+    if args.interval < 5.0:
+        print(f"interval {args.interval:g}s is too fast; clamping to 5s", flush=True)
+        args.interval = 5.0
 
     nodes = []
     for spec in args.serial:
@@ -314,7 +320,8 @@ async def main():
 
     async def state(_req):
         return web.json_response({"nodes": [n.state for n in nodes],
-                                  "now": time.time()})
+                                  "now": time.time(),
+                                  "poll_interval": args.interval})
 
     async def command(req):
         body = await req.json()
