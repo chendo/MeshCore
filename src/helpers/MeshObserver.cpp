@@ -384,7 +384,7 @@ static int32_t medianOfSorted(const int32_t* a, int n) {
   return (a[n / 2 - 1] + a[n / 2]) / 2;
 }
 
-MeshObserver::ClockConsensus MeshObserver::clockConsensus() const {
+MeshObserver::ClockConsensus MeshObserver::clockConsensus(uint8_t min_sources) const {
   ClockConsensus c;
   c.valid = false; c.offset_s = 0; c.n_seen = 0; c.n_used = 0;
   c.agree_pct = 0; c.spread_s = 0; c.n_zero_hop = 0;
@@ -453,7 +453,7 @@ MeshObserver::ClockConsensus MeshObserver::clockConsensus() const {
      second granularity a handful of honest neighbours land on the same value
      often enough that quorum-by-value would refuse perfectly good data. */
   c.n_seen = (uint8_t)(nodes > 255 ? 255 : nodes);
-  if (nodes < CLOCK_MIN_SOURCES || n < 1) return c;
+  if (nodes < min_sources || n < 1) return c;
 
   sortSamples(d, z, cnt, n);
   int32_t med = medianOfSorted(d, n);
@@ -479,7 +479,7 @@ MeshObserver::ClockConsensus MeshObserver::clockConsensus() const {
     if (v < 0) v = -v;
     if (v <= limit) { kept[k++] = d[i]; kept_nodes += cnt[i]; if (z[i]) zero_hop++; }
   }
-  if (kept_nodes < CLOCK_MIN_SOURCES) return c;
+  if (kept_nodes < min_sources) return c;
 
   c.offset_s   = medianOfSorted(kept, k);
   c.spread_s   = mad;

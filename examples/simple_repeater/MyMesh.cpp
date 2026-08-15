@@ -1714,12 +1714,14 @@ void MyMesh::maybeConvergeClock() {
   _next_clock_converge_ms = futureMillis(unset ? CLOCK_CONVERGE_FAST_MS
                                                : CLOCK_CONVERGE_INTERVAL_MS);
 
-  MeshObserver::ClockConsensus cc = _obs.clockConsensus();
+  MeshObserver::ClockConsensus cc =
+      _obs.clockConsensus(unset ? CLOCK_UNSET_MIN_SOURCES
+                                : MeshObserver::CLOCK_MIN_SOURCES);
 
   if (unset) {
     // Nothing here is worth protecting, so the only question is whether the
     // neighbours agree well enough to be believed at all.
-    if (!cc.valid || cc.n_used < CLOCK_UNSET_MIN_SOURCES) return;
+    if (!cc.valid) return;
     if (cc.spread_s > CLOCK_UNSET_MAX_SPREAD_S) return;
     if (cc.offset_s <= 0) return;               // only ever forward out of this
     uint32_t now = getRTCClock()->getCurrentTime();
@@ -1822,7 +1824,9 @@ void MyMesh::formatObserverReply(char *reply, size_t reply_size, const char* wha
       uint32_t since = millis() - _clock_extern_set_ms;
       if (since < CLOCK_HOLDOVER_MS) hold_m = (CLOCK_HOLDOVER_MS - since) / 60000;
     }
-    MeshObserver::ClockConsensus cc = _obs.clockConsensus();
+    const uint8_t min_src = clockIsUnset() ? CLOCK_UNSET_MIN_SOURCES
+                                           : MeshObserver::CLOCK_MIN_SOURCES;
+    MeshObserver::ClockConsensus cc = _obs.clockConsensus(min_src);
     if (cc.valid) {
       snprintf(reply, reply_size,
                "clocks %s%s: %+ds from %u/%u src (%u direct, %u%%, spread %ds); hop %ums/%lup; step %lu slew %lu last %+ds; hold %lum",
@@ -1836,8 +1840,7 @@ void MyMesh::formatObserverReply(char *reply, size_t reply_size, const char* wha
       snprintf(reply, reply_size,
                "clocks %s%s: no consensus (%u usable of %d samples, need %u); hop %ums/%lup; step %lu slew %lu; hold %lum",
                _clock_converge ? "on" : "off", clockIsUnset() ? " UNSET" : "",
-               cc.n_seen, _obs.numClockSamples(),
-               MeshObserver::CLOCK_MIN_SOURCES, cc.hop_delay_ms,
+               cc.n_seen, _obs.numClockSamples(), min_src, cc.hop_delay_ms,
                (unsigned long)_obs.hopDelayPairs(), (unsigned long)_clock_steps,
                (unsigned long)_clock_slews, (unsigned long)hold_m);
     }

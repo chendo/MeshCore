@@ -166,7 +166,7 @@ public:
    *
    * Reports only. Deciding whether to act on it is the caller's business.
    */
-  ClockConsensus clockConsensus() const;
+  ClockConsensus clockConsensus(uint8_t min_sources = CLOCK_MIN_SOURCES) const;
 
   /**
    * @brief  Measured one-way propagation delay per relay hop, in milliseconds.
