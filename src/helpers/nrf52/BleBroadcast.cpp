@@ -249,6 +249,24 @@ void BleBroadcast::loop() {
     armScan(true);
   }
 
+  /* Connectable advertising must be running whenever nothing else is using the
+     set. Checked EVERY pass, not only when the burst budget runs out.
+     
+     The previous version lived inside the budget-exhausted branch, which a
+     lightly loaded node reaches rarely or never -- so a node that lost the
+     advert (a burst that began while Bluefruit's running flag was already
+     clear, or a client disconnecting mid-burst) stayed invisible indefinitely
+     while bridging perfectly well. That is not theoretical: it took out the
+     production repeater, which was still relaying LoRa and still broadcasting
+     bridge traffic with no way left to reach it over BLE.
+
+     Cheap to check and idempotent -- Advertising.start() on an already running
+     advert does nothing, and startBurst() re-reads isRunning() anyway. */
+  if (_shares_adv_set && !_bursting && Bluefruit.Periph.connected() == 0
+      && !Bluefruit.Advertising.isRunning()) {
+    Bluefruit.Advertising.start(0);
+  }
+
   unsigned long now = millis();
 
   if (s_scan_needs_rearm) {
@@ -278,11 +296,9 @@ void BleBroadcast::loop() {
     _burst_ms_in_window = 0;
   }
   if (_shares_adv_set && _burst_ms_in_window >= CONNECTABLE_PERIOD_MS - CONNECTABLE_MIN_MS) {
-    /* Yield the rest of this window -- and while standing down, make sure the
-       connectable advert is actually running. finishBurst() only restores it if
-       it observed taking the set, so an interleaving where a burst began with
-       Bluefruit's running flag already clear leaves connectable advertising off
-       INDEFINITELY. SerialBLEInterface's watchdog cannot notice, because its
+    /* Yield the rest of this window. The connectable advert is kept alive by
+       the unconditional check above; this branch used to carry that job and
+       only ran when the budget was exhausted, which is why it did not. SerialBLEInterface's watchdog cannot notice, because its
        isAdvertising() asks whether adv set 0 is CONFIGURED, which is true
        whichever advert currently owns it.
 
