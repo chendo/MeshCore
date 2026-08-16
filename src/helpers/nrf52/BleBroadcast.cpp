@@ -1,4 +1,5 @@
 #include "BleBroadcast.h"
+#include "BleStack.h"
 
 #include <Arduino.h>
 #include <string.h>
@@ -21,22 +22,8 @@ static ble_data_t s_scan_data;
    without this the node would go permanently deaf on a single transient. */
 static volatile bool s_scan_needs_rearm = false;
 
-bool BleBroadcast::initStack(const char* name) {
-  static bool done = false;
-  if (done) return true;
-
-  /* Only bring the stack up if nobody already has. */
-  uint8_t sd_enabled = 0;
-  sd_softdevice_is_enabled(&sd_enabled);
-  if (!sd_enabled) {
-    if (!Bluefruit.begin()) {
-      BLE_BCAST_DEBUG_PRINTLN("Bluefruit.begin() failed");
-      return false;
-    }
-  }
-  if (name != nullptr) Bluefruit.setName(name);
-  done = true;
-  return true;
+bool BleBroadcast::initStack(const char* name, uint8_t prph_count, uint8_t central_count) {
+  return BleStack::ensure(name, prph_count, central_count);
 }
 
 bool BleBroadcast::begin(uint16_t company_id, rx_handler_t handler, event_chain_t chain) {

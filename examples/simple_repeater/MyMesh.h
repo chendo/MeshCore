@@ -89,6 +89,7 @@ struct NeighbourInfo {
 
 #if WITH_BLE_CLI
   #include <helpers/BaseSerialInterface.h>
+  #include <helpers/nrf52/BleStack.h>
   #include <helpers/nrf52/SerialBLEInterface.h>
 #endif
 

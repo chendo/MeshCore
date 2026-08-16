@@ -58,7 +58,25 @@ public:
    *
    * @param name  GAP device name, or NULL to leave the default alone.
    */
-  static bool initStack(const char* name = nullptr);
+  /**
+   * @brief  Bring the BLE stack up with room for the roles we need.
+   *
+   * @param prph_count     peripheral links: 1 for the CLI, plus one per peer
+   *                       that connects INWARD to us.
+   * @param central_count  outward links we can open to peers.
+   *
+   * Role counts drive the SoftDevice's RAM requirement, which is fixed at link
+   * time (RAM origin 0x20006000 leaves it 24KB). Asking for more than fits
+   * makes Bluefruit.begin() return false with the stack half-configured, and on
+   * a node with no USB attached that is indistinguishable from bricking it --
+   * no CLI, no DFU, no way back in. So a failure here disables the SoftDevice
+   * and retries with the single-peripheral config that has always worked,
+   * degrading to broadcast-only bridging rather than to silence.
+   */
+  static bool initStack(const char* name = nullptr,
+                        uint8_t prph_count = 1, uint8_t central_count = 0);
+
+
 
   /**
    * @brief  Start advertising-based broadcast.

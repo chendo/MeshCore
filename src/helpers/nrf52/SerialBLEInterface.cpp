@@ -1,4 +1,5 @@
 #include "SerialBLEInterface.h"
+#include "BleStack.h"
 #include <stdio.h>
 #include <string.h>
 #include "ble_gap.h"
@@ -132,7 +133,10 @@ void SerialBLEInterface::begin(const char* prefix, char* name, uint32_t pin_code
   // If we want to control BLE LED ourselves, uncomment this:
   // Bluefruit.autoConnLed(false);
   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
-  Bluefruit.begin();
+  /* Whoever initialises first fixes the role counts for the whole node, and on
+     a bridge build that is this interface. Defaults keep companion builds on
+     the single-peripheral configuration they have always used. */
+  BleStack::ensure(nullptr, BLE_PRPH_SLOTS, BLE_CENTRAL_SLOTS);
  
   char dev_name[32+16];
   if (strcmp(name, "@@MAC") == 0) {

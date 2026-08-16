@@ -1,5 +1,15 @@
 #pragma once
 
+/* Connection slots the node reserves at stack init. One peripheral is the CLI
+   and DFU port; a bridge build overrides these to add inbound peer links and
+   outbound ones. Cannot be changed after the SoftDevice is enabled. */
+#ifndef BLE_PRPH_SLOTS
+  #define BLE_PRPH_SLOTS 1
+#endif
+#ifndef BLE_CENTRAL_SLOTS
+  #define BLE_CENTRAL_SLOTS 0
+#endif
+
 #include "../BaseSerialInterface.h"
 #include <bluefruit.h>
 

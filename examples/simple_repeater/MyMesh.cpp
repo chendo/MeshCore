@@ -1292,9 +1292,15 @@ void MyMesh::startBLE(SerialBLEInterface& ble, const char* name_prefix, char* na
    also what carries DFU, no way to reflash either. Report it over the CLI,
    which a still-paired host or a mesh admin can reach. */
 void MyMesh::formatBleReply(char *reply) {
-  snprintf(reply, 160, "ble on, PIN %06lu (new every boot), connected=%s",
+  /* Report the slots the stack ACTUALLY came up with, not the ones asked for.
+     Role counts drive the SoftDevice's RAM requirement and a request that does
+     not fit silently degrades to the single-peripheral fallback -- which looks
+     identical from outside until something tries to open a second link. */
+  snprintf(reply, 160,
+           "ble on, PIN %06lu (new every boot), connected=%s; slots %up/%uc",
            (unsigned long)_ble_pin,
-           (_ble != nullptr && _ble->isConnected()) ? "yes" : "no");
+           (_ble != nullptr && _ble->isConnected()) ? "yes" : "no",
+           (unsigned)BleStack::periphSlots(), (unsigned)BleStack::centralSlots());
 }
 
 void MyMesh::bleLoop() {
