@@ -456,6 +456,50 @@ MeshObserver::ClockConsensus MeshObserver::clockConsensus(uint8_t min_sources) c
   if (nodes < min_sources || n < 1) return c;
 
   sortSamples(d, z, cnt, n);
+
+  /* Pick the DENSEST cluster before doing any statistics on it.
+
+     Median-and-MAD assumes one population with outliers around it, and quietly
+     fails when the population is split: this mesh carries a large group of
+     nodes about 28 hours out, which drives the MAD so high that the clip
+     threshold accepts everything and the median lands between the two groups
+     -- a value not one node holds, reported with high agreement. Observed as
+     "+12653s from 19/21 src, 90% agree, spread 65953s".
+
+     Counting how many nodes sit within a fixed band of each sample, and keeping
+     only the best-supported band, answers the question actually being asked:
+     what do most nodes agree the time is. A wrong sub-network can then only win
+     by outnumbering the right one, rather than by being far enough away to
+     distort the average. */
+  int best_i = 0, best_support = 0;
+  for (int i = 0; i < n; i++) {
+    int support = 0;
+    for (int j = 0; j < n; j++) {
+      int32_t diff = d[j] - d[i];
+      if (diff < 0) diff = -diff;
+      if (diff <= CLOCK_CLUSTER_WIDTH_S) support += cnt[j];
+    }
+    if (support > best_support) { best_support = support; best_i = i; }
+  }
+
+  /* Collapse to that cluster, keeping the arrays parallel. */
+  {
+    int32_t centre = d[best_i];
+    int k2 = 0, dropped_nodes = 0;
+    for (int i = 0; i < n; i++) {
+      int32_t diff = d[i] - centre;
+      if (diff < 0) diff = -diff;
+      if (diff <= CLOCK_CLUSTER_WIDTH_S) {
+        d[k2] = d[i]; z[k2] = z[i]; cnt[k2] = cnt[i]; k2++;
+      } else {
+        dropped_nodes += cnt[i];
+      }
+    }
+    n = k2;
+    (void)dropped_nodes;
+  }
+  if (n < 1) return c;
+
   int32_t med = medianOfSorted(d, n);
 
   // Median absolute deviation: the spread of the honest majority, and unlike a

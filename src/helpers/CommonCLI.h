@@ -128,6 +128,12 @@ public:
      is the right trade on a fixed site and the wrong one while bringing a mesh
      up. Discovery windows keep it joinable either way. */
   uint8_t bridge_scan_filter = 0;
+  /* Steer the clock from what zero-hop neighbours say. On by default and
+     persisted: a node that loses its clock on every reboot -- which these do,
+     having no hardware RTC -- is exactly the node that needs this, and a
+     setting that resets to off on each firmware update is one nobody
+     remembers to turn back on. */
+  uint8_t clock_converge = 1;
   uint32_t bridge_baud = 0;   // 9600, 19200, 38400, 57600, 115200 (default 115200)
   uint8_t bridge_channel = 0; // 1-14 (ESP-NOW only)
   char bridge_secret[16]; // for XOR encryption of bridge packets (ESP-NOW only)
@@ -187,6 +193,7 @@ private:
       def("ble_hold", _parent->bridge_ble_hold);  // ms to hold before a BLE burst
       def("scan_duty", _parent->bridge_scan_duty); // % of each scan cycle listening
       def("scan_filt", _parent->bridge_scan_filter); // link-layer filter to known peers
+      def("clk_conv", _parent->clock_converge);     // steer clock from neighbours
       def("baud", _parent->bridge_baud);   // 9600, 19200, 38400, 57600, 115200 (default 115200)
       def("ch", _parent->bridge_channel); // 1-14 (ESP-NOW only)
       def("secret", _parent->bridge_secret, sizeof(_parent->bridge_secret)); // for XOR encryption of bridge packets (ESP-NOW only)
