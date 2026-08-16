@@ -229,8 +229,12 @@ bool BLEBridge::getPeer(uint8_t idx, uint8_t addr[6], int8_t &rssi, uint32_t &ag
     frames = p->frames;
     copies = p->copies;
     lost = p->lost;
+    /* Age the peer's reading forward before comparing. Their clock kept running
+       after they stamped that frame, so comparing a timestamp captured age_ms
+       ago against now charges the idle time to them as clock error -- a peer
+       silent for five minutes reads as five minutes fast. */
     uint32_t ours = _rtc->getCurrentTime();
-    skew_s = (int32_t)(p->last_timestamp - ours);
+    skew_s = (int32_t)((p->last_timestamp + age_ms / 1000) - ours);
     return true;
   }
   return false;
