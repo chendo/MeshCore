@@ -5,6 +5,10 @@
 #include <Mesh.h>
 
 #include "MyMesh.h"
+#if WITH_STATUS_LED
+  #include <helpers/StatusLed.h>
+  static StatusLed status_led;
+#endif
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
@@ -108,6 +112,12 @@ void setup() {
   sensors.begin();
 
   the_mesh.begin(fs);
+#if WITH_STATUS_LED
+  // Colour is the radio, brightness is the direction: green = LoRa, blue = BLE
+  // bridge, dim = receive, bright = transmit. Both dim together every 5s is the
+  // heartbeat. The RAK3401 has only these two LEDs and no red.
+  status_led.begin(LED_BLUE, LED_GREEN, LED_STATE_ON);
+#endif
 
 #if WITH_BLE_CLI
   // Local diagnostic and firmware-update port -- SerialBLEInterface also brings
@@ -224,6 +234,9 @@ void loop() {
 #endif
 
   the_mesh.loop();
+#if WITH_STATUS_LED
+  status_led.loop();
+#endif
   sensors.loop();
 #ifdef DISPLAY_CLASS
   ui_task.loop();

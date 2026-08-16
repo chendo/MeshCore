@@ -1,6 +1,10 @@
 #include "MyMesh.h"
 #include <algorithm>
 
+#if WITH_STATUS_LED
+#include "helpers/StatusLed.h"
+#endif
+
 /* ------------------------------ Config -------------------------------- */
 
 #ifndef LORA_FREQ
@@ -470,6 +474,9 @@ const char *MyMesh::getLogDateTime() {
 }
 
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
+#if WITH_STATUS_LED
+  StatusLed::loraRx();
+#endif
 #if MESH_PACKET_LOGGING
   Serial.print(getLogDateTime());
   Serial.print(" RAW: ");
@@ -505,6 +512,9 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 }
 
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
+#if WITH_STATUS_LED
+  StatusLed::loraTx();
+#endif
 #ifdef WITH_BRIDGE
   if (_prefs.bridge_pkt_src == 0) {
     bridge.sendPacket(pkt);
