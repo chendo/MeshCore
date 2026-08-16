@@ -262,7 +262,13 @@ void BleBroadcast::loop() {
 
      Cheap to check and idempotent -- Advertising.start() on an already running
      advert does nothing, and startBurst() re-reads isRunning() anyway. */
-  if (_shares_adv_set && !_bursting && Bluefruit.Periph.connected() == 0
+  /* Advertise whenever a peripheral slot is still FREE, not merely when none
+     is used. A peer link now occupies one of them, and requiring zero
+     connections meant a node with a link stopped advertising entirely -- so its
+     CLI and DFU became unreachable the moment bridging started working, which
+     is the worst possible time to lose the way in. */
+  if (_shares_adv_set && !_bursting
+      && Bluefruit.Periph.connected() < BleStack::periphSlots()
       && !Bluefruit.Advertising.isRunning()) {
     Bluefruit.Advertising.start(0);
   }
