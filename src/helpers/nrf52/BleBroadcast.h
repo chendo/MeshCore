@@ -364,7 +364,23 @@ private:
 
      Gated on having HEARD something first, so a node genuinely alone in the RF
      spectrum is never reset for it. */
-  static const uint32_t SILENCE_LIMIT_MS = 300000;
+  /* Report flow is the ONLY observable truth about the scanner. There is no
+     call to ask the SoftDevice whether it is scanning, and we are not its only
+     owner: BLECentral::connect() passes Bluefruit.Scanner.getParams() and
+     Bluefruit's own BLEScanner keeps its own buffer, its own running flag and
+     its own auto-restart on disconnect. Any belief we hold about scan state can
+     be invalidated by that other owner without notice, so this stops trying to
+     track who stopped it and simply watches whether reports arrive.
+
+     Thirty seconds against an environment delivering tens per second is a
+     thousand missing reports -- conclusive rather than suggestive. */
+  static const uint32_t SILENCE_LIMIT_MS = 30000;
+  /* ...but only for a node that has demonstrated it lives somewhere busy. A
+     repeater genuinely alone in the spectrum can be silent for half an hour
+     legitimately, and must never restart its radio over it. One report per
+     second averaged since boot is far below what a populated area gives and far
+     above what an empty one does. */
+  static const uint32_t SILENCE_MIN_RATE_HZ = 1;
   /* volatile: written from the BLE event task, read from the main loop. Without
      it the compiler may cache the read across loop iterations and compare
      against a value that never changes -- which is exactly what happened, the

@@ -305,7 +305,9 @@ void BleBroadcast::loop() {
      scanner has stopped and no error was reported -- the node still bridges
      outbound and looks healthy from its own telemetry. Restart the scan; if the
      stack is wedged harder than that, the next window escalates again. */
-  if (_ever_heard
+  uint32_t up_s = millis() / 1000;
+  bool busy_environment = (up_s > 30) && (_report_count / (up_s ? up_s : 1) >= SILENCE_MIN_RATE_HZ);
+  if (_ever_heard && busy_environment
       && (unsigned long)(millis() - _last_report_ms) > SILENCE_LIMIT_MS) {
     /* Deliberately NOT gated on having no connections. That gate seemed prudent
        and was actively harmful: a peer link is a permanent central connection,
@@ -319,13 +321,12 @@ void BleBroadcast::loop() {
     _num_recoveries++;
     _last_report_ms = millis();          // one attempt per window, not per pass
 
-    /* Cycle the whole transport rather than just re-arming the scan. Whatever
-       leaves a scanner silent for five minutes without reporting an error is
-       not something a re-arm has any particular reason to clear, and by this
-       point the node has been deaf long enough that the cost of rebuilding is
-       irrelevant. BLEBridge watches isRunning() and calls begin() again. */
-    end();
-    _running = false;
+    /* Clear the intent so the paced restart in this same loop retries until it
+       takes, rather than cycling the whole transport. The scanner being stopped
+       by the other owner is an ordinary event now, not an emergency. */
+    _scan_armed = false;
+    _next_scan_try_ms = 0;
+
   }
 
   unsigned long now = millis();
