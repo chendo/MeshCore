@@ -131,7 +131,7 @@ public:
     uint8_t n = (evts < 1) ? 1 : evts;
     if (n == _adv_repeat) return;
     _adv_repeat = n;
-    _rescan_needed = true;    // the scan cycle is derived from this
+    _scan_armed = false;      // the scan cycle is derived from this
   }
   void setTxHoldMs(uint16_t ms) { _tx_hold_ms = ms; }
   /**
@@ -157,12 +157,12 @@ public:
    * -- which is exactly what happened here, the initiating node losing its
    * scanner while the accepting node kept hers.
    */
-  void requestRescan() { _rescan_needed = true; }
+  void requestRescan() { _scan_armed = false; }
 
   void setScanFilter(bool on) {
     if (on == _filter_enabled) return;
     _filter_enabled = on;
-    _rescan_needed = true;
+    _scan_armed = false;
   }
   /** True while deliberately listening to everyone, to discover new peers. */
   bool inDiscovery() const { return _discovery_until_ms != 0; }
@@ -171,7 +171,7 @@ public:
     uint8_t d = pct < 25 ? 25 : (pct > 100 ? 100 : pct);
     if (d == _scan_duty) return;
     _scan_duty = d;
-    _rescan_needed = true;
+    _scan_armed = false;
   }
 
   /**
@@ -330,7 +330,12 @@ private:
   }
 
   uint8_t _scan_duty = SCAN_DUTY_DEFAULT;
-  bool _rescan_needed = false;
+  /* Our INTENT: the scanner should be running. There is no SoftDevice call to
+     ask whether it actually is, so this is the only model available -- set
+     false by everything that stops scanning, and driven back to true by loop()
+     retrying until the stack accepts. One flag, one authority, retried rather
+     than assumed, which is what the previous three attempts each lacked. */
+  bool _scan_armed = false;
 
   uint8_t _queue_len = 0;
   Datagram _queue[QUEUE_SIZE];

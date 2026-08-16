@@ -118,6 +118,7 @@ void BleBroadcast::end() {
   if (!_running) return;
 
   sd_ble_gap_scan_stop();
+  _scan_armed = false;
   if (_bursting) {
     sd_ble_gap_adv_stop(_adv_handle);
     finishBurst();
@@ -260,21 +261,17 @@ void BleBroadcast::loop() {
       if ((long)(t - _discovery_until_ms) >= 0) {
         _discovery_until_ms = 0;
         _next_discovery_ms = t + DISCOVERY_PERIOD_MS;
-        _rescan_needed = true;                // back to whitelist-only
+        _scan_armed = false;                  // back to whitelist-only
       }
     } else if (_next_discovery_ms == 0) {
       _next_discovery_ms = t + DISCOVERY_PERIOD_MS;
     } else if ((long)(t - _next_discovery_ms) >= 0) {
       _discovery_until_ms = t + DISCOVERY_WINDOW_MS;
-      _rescan_needed = true;                  // hear everyone for a moment
+      _scan_armed = false;                    // hear everyone for a moment
     }
   }
 
-  if (_rescan_needed) {
-    _rescan_needed = false;
-    sd_ble_gap_scan_stop();
-    armScan(true);
-  }
+
 
   /* Connectable advertising must be running whenever nothing else is using the
      set. Checked EVERY pass, not only when the burst budget runs out.
@@ -333,15 +330,28 @@ void BleBroadcast::loop() {
 
   unsigned long now = millis();
 
+  /* Drive the scanner back to our intent, every pass, until the stack accepts.
+     Retrying is the whole point: a connect attempt stops scanning AND leaves
+     the SoftDevice briefly unable to start it again, so the first attempt after
+     dialling a peer is expected to fail. Discarding that failure is what left
+     the initiating node permanently deaf. */
+  if (!_scan_armed) {
+    /* Stop first. Scan PARAMETERS can only be given to a fresh scan_start, so
+       a duty or filter change needs the scanner down before it goes back up;
+       and when it is already stopped -- after a connect, or after end() -- the
+       stop is a harmless no-op. Doing both unconditionally means one path
+       covers every reason the intent was cleared. */
+    sd_ble_gap_scan_stop();
+    armScan(true);
+  }
+
   if (s_scan_needs_rearm) {
     s_scan_needs_rearm = false;
-    /* Escalate rather than retry the same call forever. armScan(false) is the
-       CONTINUE form -- scan_start(NULL, buffer) -- which is only valid while the
-       scanner is paused holding our buffer. Once anything actually stops it,
-       and both end() and the liveness cycle do, the continue form can never
-       succeed again: retrying it leaves the node permanently deaf while looking
-       busy. A full restart with parameters is the only thing that recovers. */
-    if (!armScan(false) && !armScan(true)) s_scan_needs_rearm = true;
+    /* The paused-by-report case. armScan(false) is the CONTINUE form and is
+       only valid while the scanner holds our buffer; if it fails, the scanner
+       is stopped rather than paused, so clear the intent and let the retry
+       above use the full form. */
+    if (!armScan(false)) _scan_armed = false;
   }
 
   if (_bursting) {
@@ -403,7 +413,7 @@ void BleBroadcast::setWhitelist(const ble_gap_addr_t* addrs, uint8_t n) {
   }
   if (n > 0) memcpy(_wl, addrs, n * sizeof(ble_gap_addr_t));
   _wl_count = n;
-  _rescan_needed = true;
+  _scan_armed = false;
 }
 
 bool BleBroadcast::armScan(bool first) {
@@ -448,8 +458,10 @@ bool BleBroadcast::armScan(bool first) {
 
   if (err != NRF_SUCCESS) {
     BLE_BCAST_DEBUG_PRINTLN("scan_start(first=%d) failed: 0x%08lX", (int)first, (unsigned long)err);
+    _scan_armed = false;
     return false;
   }
+  _scan_armed = true;
   return true;
 }
 
