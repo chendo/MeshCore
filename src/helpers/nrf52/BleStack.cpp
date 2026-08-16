@@ -34,10 +34,17 @@ bool ensure(const char* name, uint8_t prph, uint8_t central) {
           break;
         }
         sd_softdevice_disable();
-        if (central > 0) {
-          central--;                             // outward links are the costly half
-        } else if (prph > 1) {
+        /* Shed INBOUND links first and keep the outbound ones. Measured on a
+           RAK3401: (4,3) down to (4,0) were all refused and (3,0) accepted, so
+           roughly three connections fit -- but spending all three on peers
+           dialling in leaves none to dial out with, which is the half that
+           actually needs a slot reserved. A node can always be reached on its
+           one remaining peripheral slot (the CLI), and a peer that cannot
+           connect inward to us will be connected to BY us instead. */
+        if (prph > 1) {
           prph--;
+        } else if (central > 0) {
+          central--;
         } else {
           return false;                          // even (1,0) refused: no BLE at all
         }
