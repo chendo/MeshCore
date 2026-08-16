@@ -303,6 +303,15 @@ public:
   virtual void formatPacketStatsReply(char *reply) = 0;
   // Bridge telemetry. Default-implemented so examples carrying no bridge, or a
   // bridge with no stats of its own, are unaffected.
+  /* The clock was just set by something authoritative -- a person, or a client
+     app that knows the real time. Anything inferring the time from neighbours
+     should stand down for a while afterwards rather than drag a known-good
+     clock back towards a mesh that may be collectively wrong. */
+  virtual void onClockSetExternally() {
+  }
+  virtual void formatObserverReply(char *reply, const char* what) {
+    strcpy(reply, "no observer in this firmware");
+  }
   virtual void formatBleReply(char *reply) {
     strcpy(reply, "no BLE in this firmware");
   }

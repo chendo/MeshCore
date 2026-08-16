@@ -90,6 +90,8 @@ struct NeighbourInfo {
 
 #ifdef LOOP_WATCHDOG_MS
   #include <helpers/nrf52/LoopWatchdog.h>
+#if WITH_MESH_OBSERVER
+  #include "helpers/MeshObserver.h"
 #endif
 #if WITH_BLE_CLI
   #include <helpers/BaseSerialInterface.h>
@@ -147,6 +149,57 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 
   File openAppend(const char* fname);
   bool isLooped(const mesh::Packet* packet, const uint8_t max_counters[]);
+
+#if WITH_MESH_OBSERVER
+  // Passive metrics fed from the raw receive/transmit hooks. Costs a few KB of
+  // RAM and nothing on air; off unless the build asks for it.
+  MeshObserver _obs;
+
+  /* Clock convergence: steer our clock towards what the neighbourhood says the
+     time is. The observer supplies the estimate; the policy for acting on it
+     lives here -- see maybeConvergeClock(). Off until "clocks on". */
+  static const uint32_t CLOCK_CONVERGE_INTERVAL_MS = 5UL * 60UL * 1000UL;
+  static const int32_t  CLOCK_DEADBAND_S = 2;     // agreement to the second is enough
+  static const int32_t  CLOCK_SLEW_MAX_S = 2;     // per interval, either direction
+  static const int32_t  CLOCK_STEP_MIN_S = 30;    // below this, never worth a jump
+  static const uint8_t  CLOCK_STEP_MIN_AGREE = 80;
+  /* A survey of a real 407-node mesh put the false-fire rate of the step gate
+     at 0.2% of rounds with eight sources but 4.3% with four, so a step needs a
+     real quorum. */
+  static const uint8_t  CLOCK_STEP_MIN_SOURCES = 6;
+  /* And the survivors must actually agree with each other, not merely all
+     survive clipping. 15s is about twice the 7s MAD the survey mesh runs at,
+     which lets a genuinely-wrong node step within about three rounds while
+     still refusing a population split between two beliefs -- that case reports
+     100% agreement on a midpoint nobody holds, with a spread of 150s. */
+  static const int32_t  CLOCK_STEP_MAX_SPREAD_S = 15;
+  static const uint32_t CLOCK_HOLDOVER_MS = 6UL * 60UL * 60UL * 1000UL;
+  /* Slewing needs a quality gate of its own: on hardware a node computed +50s
+     from seven scattered multi-hop sources with a spread of 62s, and nothing
+     stopped the slew from walking a known-good clock 50s away two seconds at a
+     time. When sources disagree this much the median is not evidence. */
+  static const int32_t  CLOCK_MAX_SPREAD_TO_ACT_S = 30;
+
+  /* None of that caution applies when our clock was never set. These boards
+     have no hardware RTC, so every reboot lands them back on 15 May 2024 --
+     and until they leave it their adverts carry timestamps the rest of the mesh
+     rejects outright as replays, which makes the node not merely wrong but
+     invisible. Nothing to protect, so check often and take the first credible
+     consensus whole. */
+  static const uint32_t CLOCK_CONVERGE_FAST_MS = 30UL * 1000UL;
+  static const uint8_t  CLOCK_UNSET_MIN_SOURCES = 2;
+static const int32_t  CLOCK_UNSET_MAX_SPREAD_S = 600;
+
+  bool     _clock_converge = false;
+  uint32_t _next_clock_converge_ms = 0;
+  uint32_t _clock_extern_set_ms = 0;
+  bool     _clock_ever_set = false;
+  int32_t  _last_clock_adj_s = 0;
+  uint32_t _clock_steps = 0;
+  uint32_t _clock_slews = 0;
+  bool clockIsUnset() const;
+  void maybeConvergeClock();
+#endif
 
 protected:
   float getAirtimeBudgetFactor() const override {
@@ -254,6 +307,10 @@ public:
   void removeNeighbor(const uint8_t* pubkey, int key_len) override;
 #if defined(WITH_BLE_BRIDGE)
   void formatBridgeReply(char *reply, const char* what) override;
+#if WITH_MESH_OBSERVER
+  void formatObserverReply(char *reply, const char* what) override;
+  void onClockSetExternally() override;
+#endif
 #endif
   void formatStatsReply(char *reply) override;
   void formatRadioStatsReply(char *reply) override;
