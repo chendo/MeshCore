@@ -205,10 +205,22 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       strcpy(reply, "OK - Advert sent");
     } else if (memcmp(command, "ble", 3) == 0 && (command[3] == 0 || command[3] == ' ')) {
       _callbacks->formatBleReply(reply);
+    } else if (memcmp(command, "clocks", 6) == 0 && (command[6] == 0 || command[6] == ' ')) {
+      // must precede the "clock" matches below, which would otherwise swallow it
+      _callbacks->formatObserverReply(reply, command);   // "clocks", "clocks on|off"
+    } else if (memcmp(command, "peers", 5) == 0 && (command[5] == 0 || command[5] == ' ')) {
+      _callbacks->formatObserverReply(reply, command);   // "peers", "peers <n>"
+    } else if (memcmp(command, "hops", 4) == 0 && (command[4] == 0 || command[4] == ' ')) {
+      _callbacks->formatObserverReply(reply, "hops");
+    } else if (memcmp(command, "types", 5) == 0 && (command[5] == 0 || command[5] == ' ')) {
+      _callbacks->formatObserverReply(reply, "types");
+    } else if (memcmp(command, "heard", 5) == 0 && (command[5] == 0 || command[5] == ' ')) {
+      _callbacks->formatObserverReply(reply, "heard");
     } else if (memcmp(command, "clock sync", 10) == 0) {
       uint32_t curr = getRTCClock()->getCurrentTime();
       if (sender_timestamp > curr) {
         getRTCClock()->setCurrentTime(sender_timestamp + 1);
+        _callbacks->onClockSetExternally();
         uint32_t now = getRTCClock()->getCurrentTime();
         DateTime dt = DateTime(now);
         sprintf(reply, "OK - clock set: %02d:%02d - %d/%d/%d UTC", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
@@ -222,12 +234,18 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     } else if (memcmp(command, "clock", 5) == 0) {
       uint32_t now = getRTCClock()->getCurrentTime();
       DateTime dt = DateTime(now);
-      sprintf(reply, "%02d:%02d - %d/%d/%d UTC", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
+      // Seconds and the raw epoch, so a host holding disciplined time can
+      // measure this node's error. To the minute, a node can be 59s out and
+      // still look correct, which is most of the range that matters here.
+      sprintf(reply, "%02d:%02d:%02d - %d/%d/%d UTC (epoch %lu)",
+              dt.hour(), dt.minute(), dt.second(), dt.day(), dt.month(), dt.year(),
+              (unsigned long)now);
     } else if (memcmp(command, "time ", 5) == 0) {  // set time (to epoch seconds)
       uint32_t secs = _atoi(&command[5]);
       uint32_t curr = getRTCClock()->getCurrentTime();
       if (secs > curr) {
         getRTCClock()->setCurrentTime(secs);
+        _callbacks->onClockSetExternally();
         uint32_t now = getRTCClock()->getCurrentTime();
         DateTime dt = DateTime(now);
         sprintf(reply, "OK - clock set: %02d:%02d - %d/%d/%d UTC", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
