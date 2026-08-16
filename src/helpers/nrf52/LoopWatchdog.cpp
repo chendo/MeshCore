@@ -7,9 +7,31 @@ namespace LoopWatchdog {
 static volatile uint32_t s_last_feed_ms = 0;
 static uint32_t s_limit_ms = 0;
 
+static void watchdog_task(void* arg) {
+  (void)arg;
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    check();
+  }
+}
+
 void begin(uint32_t limit_ms) {
   s_limit_ms = limit_ms;
   s_last_feed_ms = millis();
+
+  /* Its own task, not a callback from somewhere convenient.
+     
+     The first version checked only from BLE event context, on the assumption
+     that BLE would keep running while the loop stalled -- each subsystem
+     watching the other. Then a node hung with BOTH stopped: USB still
+     enumerating, no CLI, no advertising, nothing left to notice, and no way in
+     without pressing its reset button. Mutual liveness fails exactly when it is
+     needed, because whatever wedges one can wedge the other.
+     
+     TASK_PRIO_NORMAL sits above the loop (LOW) and below Bluefruit (HIGH), so
+     it preempts a spinning loop and cannot be starved by it, while never
+     delaying radio work. It wakes once a second and compares two numbers. */
+  xTaskCreate(watchdog_task, "wdog", 256, NULL, TASK_PRIO_NORMAL, NULL);
 }
 
 void feed() {
