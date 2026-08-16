@@ -89,6 +89,8 @@ void BLEBridge::loop() {
   _bcast.setScanDuty(_prefs->bridge_scan_duty);
   _bcast.setScanFilter(_prefs->bridge_scan_filter != 0);
   _link.loop();
+  /* Connecting stops the scanner; re-arm whenever the link topology moved. */
+  if (_link.takeTopologyChanged()) _bcast.requestRescan();
 
   /* The transport can take itself down when its receive path stops answering.
      Rebuild it rather than leaving the bridge nominally up and permanently

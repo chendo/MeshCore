@@ -131,6 +131,10 @@ void BleLink::loop() {
     l.next_try_ms = now + l.backoff_ms;
     if (l.backoff_ms < BACKOFF_MAX_MS) l.backoff_ms = (uint16_t)(l.backoff_ms * 2 > BACKOFF_MAX_MS
                                                                 ? BACKOFF_MAX_MS : l.backoff_ms * 2);
+    /* Whether or not this succeeds, the SoftDevice has now stopped scanning --
+       sd_ble_gap_connect() does that unconditionally. Flag it so the caller
+       re-arms, or the node is deaf from here on. */
+    _topology_changed = true;
     if (!Bluefruit.Central.connect(&l.addr)) l.state = IDLE;
   }
 }
@@ -177,6 +181,7 @@ void BleLink::onDisconnected(uint16_t conn, uint8_t reason) {
   if (idx < 0) return;
   Link& l = _links[idx];
   if (l.state == UP) l.drops++;
+  _topology_changed = true;
   l.state = IDLE;
   l.conn = BLE_CONN_HANDLE_INVALID;
   l.rx_expect = l.rx_have = 0;

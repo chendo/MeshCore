@@ -68,6 +68,12 @@ public:
    */
   uint8_t send(const uint8_t* data, uint16_t len, uint8_t except = NO_LINK);
 
+  /** True once since the last call if a link came up or went down -- the caller
+   *  must re-arm scanning, which connecting silently stopped. */
+  bool takeTopologyChanged() {
+    bool c = _topology_changed; _topology_changed = false; return c;
+  }
+
   uint8_t numUp() const;
   bool getLink(uint8_t idx, ble_gap_addr_t& addr, bool& up, int8_t& rssi,
                uint32_t& sent, uint32_t& recv, uint32_t& drops) const;
@@ -124,6 +130,7 @@ private:
   ble_gap_addr_t _self;
   rx_handler_t _handler = nullptr;
   bool _running = false;
+  bool _topology_changed = false;
 
   /* Inbound peer link. The peripheral role also carries the CLI, so at most one
      slot is left for a peer dialling us -- which is fine, because a peer we

@@ -148,6 +148,17 @@ public:
    * afterwards, with discovery windows to find new ones.
    */
   void setWhitelist(const ble_gap_addr_t* addrs, uint8_t n);
+  /**
+   * @brief  Ask for the scanner to be restarted on the next loop.
+   *
+   * Needed because connecting kills it: the SoftDevice documents that scanning
+   * stops automatically when sd_ble_gap_connect() is called, and nothing brings
+   * it back. A node that dials peers therefore goes deaf the moment it does so
+   * -- which is exactly what happened here, the initiating node losing its
+   * scanner while the accepting node kept hers.
+   */
+  void requestRescan() { _rescan_needed = true; }
+
   void setScanFilter(bool on) {
     if (on == _filter_enabled) return;
     _filter_enabled = on;
