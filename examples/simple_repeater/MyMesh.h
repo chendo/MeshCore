@@ -87,6 +87,9 @@ struct NeighbourInfo {
 
 #define PACKET_LOG_FILE  "/packet_log"
 
+#ifdef LOOP_WATCHDOG_MS
+  #include <helpers/nrf52/LoopWatchdog.h>
+#endif
 #if WITH_BLE_CLI
   #include <helpers/BaseSerialInterface.h>
   #include <helpers/nrf52/BleStack.h>
@@ -205,7 +208,27 @@ public:
     return &_prefs;
   }
 
+  /* Deferred, not immediate. A prefs save is remove-then-rewrite of the whole
+     file, and under BLE load it stalls this loop for around 1.6 seconds --
+     measured, and dominated by SoftDevice flash arbitration rather than by
+     LittleFS, since erase and write can only proceed in radio-idle slots.
+     During that stall the bridge arbiter stops being driven and the connectable
+     advert can be left held.
+
+     There are 56 savePrefs() call sites in the CLI, one per setting, so
+     configuring a node runs that stall once per command. Coalescing here costs
+     one flag and turns a burst of settings into a single write. */
+  static const uint32_t PREFS_SETTLE_MS = 2000;
+  unsigned long _prefs_dirty_ms = 0;
+
   void savePrefs() override {
+    _prefs_dirty_ms = millis();
+  }
+  /** Write now if anything is pending -- before a reboot, poweroff or OTA,
+   *  where a deferred write would otherwise be lost. */
+  void flushPrefs() override {
+    if (_prefs_dirty_ms == 0) return;
+    _prefs_dirty_ms = 0;
     _cli.savePrefs(_fs);
   }
 

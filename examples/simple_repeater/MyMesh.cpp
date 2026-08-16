@@ -947,6 +947,10 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 
 void MyMesh::begin(FILESYSTEM *fs) {
   mesh::Mesh::begin();
+
+#ifdef LOOP_WATCHDOG_MS
+  LoopWatchdog::begin(LOOP_WATCHDOG_MS);
+#endif
   _fs = fs;
   // load persisted prefs
   _cli.loadPrefs(_fs);
@@ -1447,6 +1451,9 @@ void MyMesh::loop() {
     }
     _loop_last_ms = lt;
     _loop_iters++;
+#ifdef LOOP_WATCHDOG_MS
+    LoopWatchdog::feed();
+#endif
     if (lt - _loop_rate_ms >= 1000) {
       _loop_rate = _loop_iters;
       _loop_iters = 0;
@@ -1491,6 +1498,12 @@ void MyMesh::loop() {
   }
 
   // is pending dirty contacts write needed?
+  /* Settled long enough that more settings are unlikely to follow. */
+  if (_prefs_dirty_ms != 0 && (unsigned long)(millis() - _prefs_dirty_ms) >= PREFS_SETTLE_MS) {
+    _prefs_dirty_ms = 0;
+    _cli.savePrefs(_fs);
+  }
+
   if (dirty_contacts_expiry && millisHasNowPassed(dirty_contacts_expiry)) {
     acl.save(_fs);
     dirty_contacts_expiry = 0;

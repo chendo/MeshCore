@@ -1,5 +1,8 @@
 #include "BleBroadcast.h"
 #include "BleStack.h"
+#ifdef LOOP_WATCHDOG_MS
+  #include "LoopWatchdog.h"
+#endif
 
 #include <Arduino.h>
 #include <string.h>
@@ -484,6 +487,11 @@ void BleBroadcast::onBLEEvent(ble_evt_t* evt) {
         /* Timed across the whole handler, including the HMAC for our own
            frames, because that is the window in which the SoftDevice has
            paused scanning waiting for its buffer back. */
+#ifdef LOOP_WATCHDOG_MS
+        /* This context preempts the main loop and fires constantly, which
+           makes it the natural place to notice the loop has stopped. */
+        LoopWatchdog::check();
+#endif
         uint32_t t0 = micros();
         self->_report_count++;
         self->_last_report_ms = millis();

@@ -247,6 +247,11 @@ public:
 class CommonCLICallbacks {
 public:
   virtual void savePrefs() = 0;
+  /* Force any deferred prefs write to disk. Called before anything that does
+     not return -- a setting made and then immediately rebooted away would
+     otherwise be silently lost. */
+  virtual void flushPrefs() {
+  }
   virtual const char* getFirmwareVer() = 0;
   virtual const char* getBuildDate() = 0;
   virtual const char* getRole() = 0;
