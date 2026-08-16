@@ -244,6 +244,13 @@ public:
 
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
 
+  /* Loop iterations, sampled per second. The Arduino task runs at
+     TASK_PRIO_LOW and every BLE report preempts it, so the rate is a
+     whole-system proxy for what the radio side is stealing -- and unlike
+     FreeRTOS run-time stats it costs one increment and needs no core patch. */
+  uint32_t _loop_iters = 0, _loop_rate = 0;
+  unsigned long _loop_rate_ms = 0;
+
 #if WITH_BLE_CLI
 private:
   // A local, high-bandwidth diagnostic port. Metrics over LoRa are capped at a

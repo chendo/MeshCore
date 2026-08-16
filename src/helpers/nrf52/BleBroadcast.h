@@ -145,6 +145,26 @@ public:
     _rescan_needed = true;
   }
 
+  /**
+   * @brief  CPU spent ingesting advertising reports, in microseconds.
+   *
+   * The only part of scanning we control. Note what this does NOT include: the
+   * link layer still receives and decodes every advert on air even when the
+   * whitelist rejects it, so filtering saves this figure but not radio time or
+   * radio current. Anyone reading a battery number off this should know that.
+   *
+   * Measured around the report handler, which runs at TASK_PRIO_HIGH and
+   * preempts everything MeshCore does -- so this is also the figure for how
+   * much the BLE side steals from LoRa.
+   */
+  uint32_t reportCpuUs() const { return _report_cpu_us; }
+  uint32_t reportCount() const { return _report_count; }
+  /** Mean RSSI over all reports seen, as a proxy for ambient BLE activity --
+   *  there is no way to sample a true noise floor while the SoftDevice scans. */
+  int8_t meanReportRssi() const {
+    return _report_count ? (int8_t)(_rssi_sum / (int32_t)_report_count) : 0;
+  }
+
   uint32_t numSent() const { return _num_sent; }
   uint32_t numRecv() const { return _num_recv; }
   uint32_t numTxDropped() const { return _num_tx_dropped; }
@@ -285,6 +305,9 @@ private:
   uint32_t _num_sent = 0;
   uint32_t _num_recv = 0;
   uint32_t _num_tx_dropped = 0;
+  uint32_t _report_cpu_us = 0;
+  uint32_t _report_count = 0;
+  int32_t  _rssi_sum = 0;
 };
 
 #if BLE_BROADCAST_DEBUG_LOGGING && ARDUINO

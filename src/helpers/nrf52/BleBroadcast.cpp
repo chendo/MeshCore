@@ -422,7 +422,14 @@ void BleBroadcast::onBLEEvent(ble_evt_t* evt) {
   if (self != nullptr && self->_running) {
     switch (evt->header.evt_id) {
       case BLE_GAP_EVT_ADV_REPORT: {
+        /* Timed across the whole handler, including the HMAC for our own
+           frames, because that is the window in which the SoftDevice has
+           paused scanning waiting for its buffer back. */
+        uint32_t t0 = micros();
+        self->_report_count++;
+        self->_rssi_sum += evt->evt.gap_evt.params.adv_report.rssi;
         self->onAdvReport(&evt->evt.gap_evt.params.adv_report);
+        self->_report_cpu_us += (uint32_t)(micros() - t0);
         /* The SoftDevice pauses scanning on every completed report and hands
            our buffer back; without this call the node simply stops hearing. */
         if (evt->evt.gap_evt.params.adv_report.type.status

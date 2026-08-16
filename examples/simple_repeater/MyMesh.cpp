@@ -1203,6 +1203,27 @@ void MyMesh::formatBridgeReply(char *reply, const char* what) {
     return;
   }
 
+  if (memcmp(what, "cpu", 3) == 0) {
+    /* What advert ingestion costs. The link layer decodes every advert on air
+       whether or not the whitelist lets it through, so filtering moves this
+       number and NOT radio current -- the battery saving is the CPU share
+       only. rssi is the mean over reports we were given, which is the closest
+       thing to an ambient reading available: the SoftDevice will not sample
+       RSSI outside a connection. */
+    uint32_t us = bridge.reportCpuUs(), n = bridge.reportCount();
+    uint32_t up_s = (uint32_t)(uptime_millis / 1000);
+    snprintf(reply, reply_size,
+             "ble ingest: %lu reports, %lu ms cpu (%lu us/report), %lu.%02lu%% of %lus uptime; "
+             "mean rssi %ddB; loop %lu/s",
+             (unsigned long)n, (unsigned long)(us / 1000),
+             (unsigned long)(n ? us / n : 0),
+             (unsigned long)(up_s ? (us / 10000) / up_s : 0),
+             (unsigned long)(up_s ? ((us / 100) / up_s) % 100 : 0),
+             (unsigned long)up_s, (int)bridge.meanReportRssi(),
+             (unsigned long)_loop_rate);
+    return;
+  }
+
   // seen = ok + dup + bad + other, so the split says WHY frames were not used.
   // dup is expected and healthy (each datagram is deliberately broadcast over
   // several advertising events); other is ambient traffic from anyone else
@@ -1387,6 +1408,19 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
 }
 
 void MyMesh::loop() {
+  /* Sampled once a second. This task is TASK_PRIO_LOW and every BLE advert
+     report preempts it, so the rate is a whole-system proxy for what the radio
+     side is taking -- one increment, no core patch, no dedicated timer. */
+  {
+    unsigned long lt = millis();
+    _loop_iters++;
+    if (lt - _loop_rate_ms >= 1000) {
+      _loop_rate = _loop_iters;
+      _loop_iters = 0;
+      _loop_rate_ms = lt;
+    }
+  }
+
 #ifdef WITH_BRIDGE
   bridge.loop();
 #endif

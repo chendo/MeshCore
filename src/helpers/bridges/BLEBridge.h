@@ -105,6 +105,12 @@ public:
      over several advertising events. */
   bool isTransportUp() const { return _transport_up; }
   uint32_t numSeen() const { return _bcast.numRecv(); }
+  /* Ingestion cost, from the transport. Exposed here because the bridge is
+     what a caller has a handle to. */
+  uint32_t reportCpuUs() const { return _bcast.reportCpuUs(); }
+  uint32_t reportCount() const { return _bcast.reportCount(); }
+  int8_t meanReportRssi() const { return _bcast.meanReportRssi(); }
+
   uint32_t numRxOk() const { return _num_rx_ok; }
   uint32_t numDup() const { return _num_dup; }
   uint32_t numBadTag() const { return _num_bad_tag; }
