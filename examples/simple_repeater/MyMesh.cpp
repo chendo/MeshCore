@@ -1242,6 +1242,46 @@ void MyMesh::clearStats() {
   ((SimpleMeshTables *)getTables())->resetStats();
 }
 
+#if WITH_BLE_CLI
+void MyMesh::startBLE(SerialBLEInterface& ble, const char* name_prefix, char* name) {
+  _ble = &ble;
+  // Six digits, never zero-padded away, and never the shipped 123456.
+  _ble_pin = 100000 + (uint32_t)getRNG()->nextInt(0, 900000);
+  ble.begin(name_prefix, name, _ble_pin);
+  ble.enable();
+  Serial.printf("[ble] pairing PIN for this boot: %06lu\n", (unsigned long)_ble_pin);
+}
+
+/* The pairing PIN is regenerated every boot and upstream prints it only to USB
+   serial. On a repeater sited without a cable that is unreadable, so a host
+   whose bond went stale has no way back in -- and since SerialBLEInterface is
+   also what carries DFU, no way to reflash either. Report it over the CLI,
+   which a still-paired host or a mesh admin can reach. */
+void MyMesh::formatBleReply(char *reply) {
+  snprintf(reply, 160, "ble on, PIN %06lu (new every boot), connected=%s",
+           (unsigned long)_ble_pin,
+           (_ble != nullptr && _ble->isConnected()) ? "yes" : "no");
+}
+
+void MyMesh::bleLoop() {
+  if (_ble == nullptr || !_ble->isConnected()) return;
+  uint8_t frame[MAX_FRAME_SIZE + 1];
+  size_t n = _ble->checkRecvFrame(frame);
+  if (n == 0 || _ble->isWriteBusy()) return;
+  if (n > MAX_FRAME_SIZE) n = MAX_FRAME_SIZE;
+  frame[n] = 0;                       // the CLI wants a C string
+
+  // A non-zero timestamp deliberately withholds the commands CommonCLI gates to
+  // local serial only -- erase, log, set freq, set prv.key. BLE reaches tens of
+  // metres, so those stay behind physical USB access even though pairing is
+  // encrypted and MITM-protected.
+  char reply[MAX_FRAME_SIZE];
+  reply[0] = 0;
+  handleCommand(++_ble_seq, (char *) frame, reply);
+  if (reply[0]) _ble->writeFrame((const uint8_t *) reply, strlen(reply));
+}
+#endif
+
 void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply) {
   if (region_load_active) {
     if (StrHelper::isBlank(command)) {  // empty/blank line, signal to terminate 'load' operation
@@ -1336,6 +1376,10 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
 void MyMesh::loop() {
 #ifdef WITH_BRIDGE
   bridge.loop();
+#endif
+
+#if WITH_BLE_CLI
+  bleLoop();
 #endif
 
   mesh::Mesh::loop();

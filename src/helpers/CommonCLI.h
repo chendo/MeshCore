@@ -223,6 +223,9 @@ public:
   virtual void formatPacketStatsReply(char *reply) = 0;
   // Bridge telemetry. Default-implemented so examples carrying no bridge, or a
   // bridge with no stats of its own, are unaffected.
+  virtual void formatBleReply(char *reply) {
+    strcpy(reply, "no BLE in this firmware");
+  }
   virtual void formatBridgeReply(char *reply, const char* what) {
     strcpy(reply, "no bridge telemetry in this firmware");
   }

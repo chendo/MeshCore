@@ -196,6 +196,8 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       // send flood advert
       _callbacks->sendSelfAdvertisement(1500, true);  // longer delay, give CLI response time to be sent first
       strcpy(reply, "OK - Advert sent");
+    } else if (memcmp(command, "ble", 3) == 0 && (command[3] == 0 || command[3] == ' ')) {
+      _callbacks->formatBleReply(reply);
     } else if (memcmp(command, "clock sync", 10) == 0) {
       uint32_t curr = getRTCClock()->getCurrentTime();
       if (sender_timestamp > curr) {

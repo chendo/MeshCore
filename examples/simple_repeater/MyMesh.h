@@ -87,6 +87,11 @@ struct NeighbourInfo {
 
 #define PACKET_LOG_FILE  "/packet_log"
 
+#if WITH_BLE_CLI
+  #include <helpers/BaseSerialInterface.h>
+  #include <helpers/nrf52/SerialBLEInterface.h>
+#endif
+
 class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   FILESYSTEM* _fs;
   uint32_t last_millis;
@@ -238,6 +243,27 @@ public:
   void clearStats() override;
 
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
+
+#if WITH_BLE_CLI
+private:
+  // A local, high-bandwidth diagnostic port. Metrics over LoRa are capped at a
+  // ~160-byte reply and cost airtime on a congested band; over BLE they cost
+  // nothing. Reuses the companion's SerialBLEInterface unchanged, which also
+  // brings Adafruit's DFU service -- so this is the firmware-update path too,
+  // and on a node with no USB attached it is the ONLY way back in.
+  BaseSerialInterface* _ble = nullptr;
+  uint32_t _ble_pin = 0;
+  uint32_t _ble_seq = 0;      // monotonic, for the CLI's replay guard
+  void bleLoop();
+public:
+  // The PIN is generated per boot, so a stolen pairing cannot be replayed after
+  // a restart and there is no shipped default to look up.
+  void startBLE(SerialBLEInterface& ble, const char* name_prefix, char* name);
+  uint32_t blePin() const { return _ble_pin; }
+  void formatBleReply(char *reply) override;
+  // handleCommand above is public; restore that so loop() and friends below
+  // keep the access they had before this block was inserted.
+#endif
   void loop();
 
 #if defined(WITH_BRIDGE)

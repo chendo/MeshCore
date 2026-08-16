@@ -1,4 +1,7 @@
 #include <Arduino.h>   // needed for PlatformIO
+#if WITH_BLE_CLI
+  #include <helpers/nrf52/SerialBLEInterface.h>
+#endif
 #include <Mesh.h>
 
 #include "MyMesh.h"
@@ -106,19 +109,39 @@ void setup() {
 
   the_mesh.begin(fs);
 
-#if defined(WITH_BLE_BRIDGE)
-  // Nothing else on a plain repeater build uses BLE, so the bridge owns the
-  // stack. It cannot do this from its own begin(), which runs inside
-  // the_mesh.begin() above: a build that DOES have a BLE serial interface
-  // brings the stack up after that point and would clobber the raw event
-  // callback the bridge depends on. So the host brings BLE up and hands it
-  // over. NULL chain because there is no other raw-event consumer here.
+#if WITH_BLE_CLI
+  // Local diagnostic and firmware-update port -- SerialBLEInterface also brings
+  // Adafruit's DFU service with it. On a repeater sited with no USB attached
+  // this is the ONLY way back in, including for the next OTA, so a build that
+  // can reach such a node must not drop it.
   {
-    char ble_name[40];
-    snprintf(ble_name, sizeof(ble_name), "MeshCore-%s", the_mesh.getNodePrefs()->node_name);
-    BleBroadcast::initStack(ble_name);
-    BLEBridge::setBleReady(NULL);
+    static SerialBLEInterface ble;
+    static char ble_name[32];
+    strncpy(ble_name, "@@MAC", sizeof(ble_name) - 1);   // resolved to the MAC by begin()
+    the_mesh.startBLE(ble, "MeshCore-", ble_name);
   }
+#endif
+
+#if defined(WITH_BLE_BRIDGE)
+  // The bridge cannot bring the stack up from its own begin(), which runs
+  // inside the_mesh.begin() above -- anything that starts BLE afterwards would
+  // clobber the raw event callback it depends on. So the host does it here,
+  // once whoever else wants BLE has had their turn.
+  #if WITH_BLE_CLI
+    // The CLI already started the stack and claimed the raw-event callback,
+    // which is a single slot. Hand it to the bridge so it can forward every
+    // event it does not consume rather than silently swallowing the CLI's.
+    BLEBridge::setBleReady(SerialBLEInterface::onBLEEvent);
+  #else
+    // Nothing else uses BLE on this build, so the bridge owns the stack and
+    // there is no chain to forward to.
+    {
+      char ble_name[40];
+      snprintf(ble_name, sizeof(ble_name), "MeshCore-%s", the_mesh.getNodePrefs()->node_name);
+      BleBroadcast::initStack(ble_name);
+      BLEBridge::setBleReady(NULL);
+    }
+  #endif
 #endif
 
 #ifdef DISPLAY_CLASS
