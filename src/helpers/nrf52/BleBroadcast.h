@@ -29,7 +29,8 @@ class BleBroadcast {
 public:
   /** Called from the SoftDevice event handler for each accepted datagram. */
   typedef void (*rx_handler_t)(const uint8_t* payload, uint8_t len,
-                               const uint8_t peer_addr[6], int8_t rssi);
+                               const uint8_t peer_addr[6], uint8_t peer_addr_type,
+                               int8_t rssi);
 
   /** Chained raw-event callback -- see begin(). */
   typedef void (*event_chain_t)(ble_evt_t* evt);
@@ -115,6 +116,28 @@ public:
     _rescan_needed = true;    // the scan cycle is derived from this
   }
   void setTxHoldMs(uint16_t ms) { _tx_hold_ms = ms; }
+  /**
+   * @brief  Only generate reports for these addresses, in the link layer.
+   *
+   * Worth far more than the CPU it saves. The SoftDevice PAUSES scanning on
+   * every completed report and does not resume until the application hands the
+   * buffer back, so each foreign beacon costs listening time as well as a
+   * high-priority task wakeup -- and on a live node 82% of all reports were
+   * other people's. Filtering by address happens before any of that.
+   *
+   * BLE can only filter on address, never on content, so there is no way to ask
+   * for "company ID 0xFFFF" -- hence learning peers first and whitelisting them
+   * afterwards, with discovery windows to find new ones.
+   */
+  void setWhitelist(const ble_gap_addr_t* addrs, uint8_t n);
+  void setScanFilter(bool on) {
+    if (on == _filter_enabled) return;
+    _filter_enabled = on;
+    _rescan_needed = true;
+  }
+  /** True while deliberately listening to everyone, to discover new peers. */
+  bool inDiscovery() const { return _discovery_until_ms != 0; }
+
   void setScanDuty(uint8_t pct) {
     uint8_t d = pct < 25 ? 25 : (pct > 100 ? 100 : pct);
     if (d == _scan_duty) return;
@@ -231,6 +254,22 @@ private:
 
   uint8_t _adv_repeat = MAX_ADV_EVTS;
   uint16_t _tx_hold_ms = 0;
+  /* A whitelisted scanner is deaf to anyone it has not met, so it has to open
+     its ears periodically or a new node could never join. Short and infrequent:
+     the cost of a discovery window is a window's worth of foreign reports. */
+  static const uint32_t DISCOVERY_PERIOD_MS = 60000;
+  static const uint32_t DISCOVERY_WINDOW_MS = 4000;
+  static const uint8_t  MAX_WHITELIST = 8;      // BLE_GAP_WHITELIST_ADDR_MAX_COUNT
+
+  ble_gap_addr_t _wl[MAX_WHITELIST];
+  uint8_t _wl_count = 0;
+  bool _filter_enabled = false;
+  unsigned long _discovery_until_ms = 0;
+  unsigned long _next_discovery_ms = 0;
+  bool useWhitelist() const {
+    return _filter_enabled && _wl_count > 0 && _discovery_until_ms == 0;
+  }
+
   uint8_t _scan_duty = SCAN_DUTY_DEFAULT;
   bool _rescan_needed = false;
 

@@ -18,9 +18,10 @@ void BLEBridge::setBleReady(BleBroadcast::event_chain_t chain) {
   _ble_ready = true;
 }
 
-void BLEBridge::rx_cb(const uint8_t *payload, uint8_t len, const uint8_t addr[6], int8_t rssi) {
+void BLEBridge::rx_cb(const uint8_t *payload, uint8_t len, const uint8_t addr[6],
+                      uint8_t addr_type, int8_t rssi) {
   if (_instance) {
-    _instance->onFrameRecv(payload, len, addr, rssi);
+    _instance->onFrameRecv(payload, len, addr, addr_type, rssi);
   }
 }
 
@@ -84,6 +85,24 @@ void BLEBridge::loop() {
   _bcast.setAdvRepeat(_prefs->bridge_adv_repeat);
   _bcast.setTxHoldMs(_prefs->bridge_ble_hold);
   _bcast.setScanDuty(_prefs->bridge_scan_duty);
+  _bcast.setScanFilter(_prefs->bridge_scan_filter != 0);
+
+  /* Only peers that have passed the HMAC get whitelisted, so an attacker
+     cannot talk their way into our scan filter -- and cannot talk everyone
+     else out of it either. */
+  if (_peers_gen != _wl_pushed_gen) {
+    _wl_pushed_gen = _peers_gen;
+    ble_gap_addr_t wl[MAX_PEERS];
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < MAX_PEERS && n < MAX_PEERS; i++) {
+      if (!_peers[i].in_use) continue;
+      memset(&wl[n], 0, sizeof(wl[n]));
+      wl[n].addr_type = _peers[i].addr_type;
+      memcpy(wl[n].addr, _peers[i].addr, 6);
+      n++;
+    }
+    _bcast.setWhitelist(wl, n);
+  }
 
   _bcast.loop();
 }
@@ -200,8 +219,8 @@ void BLEBridge::peerCountCopy(const uint8_t addr[6]) {
   }
 }
 
-void BLEBridge::peerAccept(const uint8_t addr[6], uint32_t timestamp, const uint8_t *tag,
-                           int8_t rssi, uint16_t seq) {
+void BLEBridge::peerAccept(const uint8_t addr[6], uint8_t addr_type, uint32_t timestamp,
+                           const uint8_t *tag, int8_t rssi, uint16_t seq) {
   unsigned long now = millis();
   PeerStamp *slot = nullptr, *victim = nullptr;
 
@@ -219,7 +238,9 @@ void BLEBridge::peerAccept(const uint8_t addr[6], uint32_t timestamp, const uint
     slot = victim;
     if (slot == nullptr) return;          // every slot fresh; nothing sane to evict
     memcpy(slot->addr, addr, 6);
+    slot->addr_type = addr_type;
     slot->in_use = true;
+    _peers_gen++;              // the whitelist needs rebuilding
   }
 
   /* Gap accounting, in uint16 arithmetic so the wrap at 65535 costs nothing.
@@ -247,7 +268,8 @@ void BLEBridge::peerAccept(const uint8_t addr[6], uint32_t timestamp, const uint
   memcpy(slot->last_tag, tag, TAG_SIZE);
 }
 
-void BLEBridge::onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t addr[6], int8_t rssi) {
+void BLEBridge::onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t addr[6],
+                            uint8_t addr_type, int8_t rssi) {
   /* Not our protocol: too short to be a frame, a version we do not speak, or
      impossibly large. 0xFFFF is the SIG's shared development company ID, so
      other people's beacons legitimately arrive here and must be counted, or the
@@ -304,7 +326,7 @@ void BLEBridge::onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t a
   }
 
   /* Authenticated: only now is it safe to move this sender's high-water mark. */
-  peerAccept(addr, timestamp, tag, rssi, seq);
+  peerAccept(addr, addr_type, timestamp, tag, rssi, seq);
   _num_rx_ok++;
 
 #if WITH_STATUS_LED

@@ -155,6 +155,9 @@ private:
 
   struct PeerStamp {
     uint8_t addr[6];
+    /* Needed to whitelist this peer: a BLE whitelist entry is (type, address),
+       and getting the type wrong means the link layer never matches. */
+    uint8_t addr_type;
     uint32_t last_timestamp;   // by THEIR clock
     unsigned long last_seen;   // by ours, for staleness and eviction
     uint8_t last_tag[TAG_SIZE];// fingerprint of the last frame accepted
@@ -176,8 +179,10 @@ private:
   static BleBroadcast::event_chain_t _chain;
   static bool _ble_ready;
 
-  static void rx_cb(const uint8_t *payload, uint8_t len, const uint8_t addr[6], int8_t rssi);
-  void onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t addr[6], int8_t rssi);
+  static void rx_cb(const uint8_t *payload, uint8_t len, const uint8_t addr[6],
+                    uint8_t addr_type, int8_t rssi);
+  void onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t addr[6],
+                   uint8_t addr_type, int8_t rssi);
 
   /** Derive the HMAC key from bridge.secret. Called whenever the bridge starts,
    *  so `set bridge.secret` + restartBridge() picks up the new value. */
@@ -187,8 +192,11 @@ private:
   void computeTag(const uint8_t *frame, size_t len, uint8_t tag[TAG_SIZE]);
 
   /** Record an authenticated frame. Only called once the HMAC has verified. */
-  void peerAccept(const uint8_t addr[6], uint32_t timestamp, const uint8_t *tag, int8_t rssi,
-                  uint16_t seq);
+  void peerAccept(const uint8_t addr[6], uint8_t addr_type, uint32_t timestamp,
+                  const uint8_t *tag, int8_t rssi, uint16_t seq);
+  /* Bumped whenever a peer slot is claimed, so loop() can tell the transport
+     which addresses to filter on without rebuilding the list every pass. */
+  uint8_t _peers_gen = 0, _wl_pushed_gen = 0xFF;
   /** Credit a repeat of an already-authenticated frame to its peer. */
   void peerCountCopy(const uint8_t addr[6]);
 

@@ -237,6 +237,25 @@ void BleBroadcast::loop() {
      This has to happen BEFORE the early returns below -- the queue is empty on
      an idle node, which is exactly when someone retunes adv_rep, and behind
      that return the scanner would keep the old cycle until traffic resumed. */
+  /* Open our ears to everyone briefly and periodically, so a node we have never
+     met still has a way in. Entering and leaving both need the scanner
+     restarted, since the filter policy is a scan parameter. */
+  if (_filter_enabled && _wl_count > 0) {
+    unsigned long t = millis();
+    if (_discovery_until_ms != 0) {
+      if ((long)(t - _discovery_until_ms) >= 0) {
+        _discovery_until_ms = 0;
+        _next_discovery_ms = t + DISCOVERY_PERIOD_MS;
+        _rescan_needed = true;                // back to whitelist-only
+      }
+    } else if (_next_discovery_ms == 0) {
+      _next_discovery_ms = t + DISCOVERY_PERIOD_MS;
+    } else if ((long)(t - _next_discovery_ms) >= 0) {
+      _discovery_until_ms = t + DISCOVERY_WINDOW_MS;
+      _rescan_needed = true;                  // hear everyone for a moment
+    }
+  }
+
   if (_rescan_needed) {
     _rescan_needed = false;
     sd_ble_gap_scan_stop();
@@ -304,6 +323,16 @@ void BleBroadcast::loop() {
   }
 }
 
+void BleBroadcast::setWhitelist(const ble_gap_addr_t* addrs, uint8_t n) {
+  if (n > MAX_WHITELIST) n = MAX_WHITELIST;
+  if (n == _wl_count && (n == 0 || memcmp(_wl, addrs, n * sizeof(ble_gap_addr_t)) == 0)) {
+    return;                                   // unchanged; do not churn the scanner
+  }
+  if (n > 0) memcpy(_wl, addrs, n * sizeof(ble_gap_addr_t));
+  _wl_count = n;
+  _rescan_needed = true;
+}
+
 bool BleBroadcast::armScan(bool first) {
   uint32_t err;
   if (first) {
@@ -318,7 +347,23 @@ bool BleBroadcast::armScan(bool first) {
     sp.window = scanWindowUnits();
     sp.timeout = BLE_GAP_SCAN_TIMEOUT_UNLIMITED;
     sp.scan_phys = BLE_GAP_PHY_1MBPS;
-    sp.filter_policy = BLE_GAP_SCAN_FP_ACCEPT_ALL;
+
+    /* The whitelist is shared between BLE roles and cannot be changed while one
+       is using it, so it is set here -- between a scan_stop and a scan_start --
+       rather than whenever the peer table happens to change. */
+    if (useWhitelist()) {
+      const ble_gap_addr_t* ptrs[MAX_WHITELIST];
+      for (uint8_t i = 0; i < _wl_count; i++) ptrs[i] = &_wl[i];
+      if (sd_ble_gap_whitelist_set(ptrs, _wl_count) == NRF_SUCCESS) {
+        sp.filter_policy = BLE_GAP_SCAN_FP_WHITELIST;
+      } else {
+        BLE_BCAST_DEBUG_PRINTLN("whitelist_set failed; hearing everyone");
+        sp.filter_policy = BLE_GAP_SCAN_FP_ACCEPT_ALL;
+      }
+    } else {
+      sd_ble_gap_whitelist_set(NULL, 0);
+      sp.filter_policy = BLE_GAP_SCAN_FP_ACCEPT_ALL;
+    }
 
     err = sd_ble_gap_scan_start(&sp, &s_scan_data);
   } else {
@@ -359,7 +404,8 @@ void BleBroadcast::onAdvReport(const ble_gap_evt_adv_report_t* report) {
         uint8_t payload_len = (uint8_t)(field_len - 3);
         _num_recv++;
         if (_handler) {
-          _handler(payload, payload_len, report->peer_addr.addr, report->rssi);
+          _handler(payload, payload_len, report->peer_addr.addr,
+                   report->peer_addr.addr_type, report->rssi);
         }
         return;
       }

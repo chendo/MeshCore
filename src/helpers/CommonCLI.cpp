@@ -125,6 +125,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {  // Legacy 
     _prefs->bridge_adv_repeat = constrain(_prefs->bridge_adv_repeat, 1, 10);
     _prefs->bridge_ble_hold = constrain(_prefs->bridge_ble_hold, 0, 5000);
     _prefs->bridge_scan_duty = constrain(_prefs->bridge_scan_duty, 25, 100);
+    _prefs->bridge_scan_filter = constrain(_prefs->bridge_scan_filter, 0, 1);
     _prefs->bridge_baud = constrain(_prefs->bridge_baud, 9600, BRIDGE_MAX_BAUD);
     _prefs->bridge_channel = constrain(_prefs->bridge_channel, 0, 14);
 
@@ -767,6 +768,10 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       strcpy(reply, "Error: scan_duty must be between 25-100 %");
     }
+  } else if (memcmp(config, "bridge.scan_filter ", 19) == 0) {
+    _prefs->bridge_scan_filter = memcmp(&config[19], "on", 2) == 0 ? 1 : 0;
+    savePrefs();
+    strcpy(reply, "OK");
   } else if (memcmp(config, "bridge.source ", 14) == 0) {
     _prefs->bridge_pkt_src = memcmp(&config[14], "rx", 2) == 0;
     savePrefs();
@@ -967,6 +972,8 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %d", (uint32_t)_prefs->bridge_ble_hold);
   } else if (memcmp(config, "bridge.scan_duty", 16) == 0) {
     sprintf(reply, "> %d", (uint32_t)_prefs->bridge_scan_duty);
+  } else if (memcmp(config, "bridge.scan_filter", 18) == 0) {
+    sprintf(reply, "> %s", _prefs->bridge_scan_filter ? "on" : "off");
   } else if (memcmp(config, "bridge.source", 13) == 0) {
     sprintf(reply, "> %s", _prefs->bridge_pkt_src ? "logRx" : "logTx");
 #endif
