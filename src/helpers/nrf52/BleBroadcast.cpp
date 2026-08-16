@@ -335,12 +335,14 @@ void BleBroadcast::loop() {
      the SoftDevice briefly unable to start it again, so the first attempt after
      dialling a peer is expected to fail. Discarding that failure is what left
      the initiating node permanently deaf. */
-  if (!_scan_armed) {
-    /* Stop first. Scan PARAMETERS can only be given to a fresh scan_start, so
-       a duty or filter change needs the scanner down before it goes back up;
-       and when it is already stopped -- after a connect, or after end() -- the
-       stop is a harmless no-op. Doing both unconditionally means one path
-       covers every reason the intent was cleared. */
+  if (!_scan_armed && (long)(now - _next_scan_try_ms) >= 0) {
+    _next_scan_try_ms = now + SCAN_RETRY_MS;
+
+    /* Stop first. Scan PARAMETERS can only be given to a fresh scan_start, so a
+       duty or filter change needs the scanner down before it goes back up; when
+       it is already stopped -- after a connect, or after end() -- the stop is a
+       harmless no-op. One path therefore covers every reason the intent was
+       cleared, rather than a different remedy per cause. */
     sd_ble_gap_scan_stop();
     armScan(true);
   }

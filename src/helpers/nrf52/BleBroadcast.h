@@ -336,6 +336,13 @@ private:
      retrying until the stack accepts. One flag, one authority, retried rather
      than assumed, which is what the previous three attempts each lacked. */
   bool _scan_armed = false;
+  /* Retries must be PACED. loop() runs about 20,000 times a second, so an
+     unpaced retry issues twenty thousand scan_stop/scan_start pairs per second
+     and starves the stack outright -- reports collapsed to almost nothing, the
+     peer link dropped and the node stopped advertising entirely. A restart that
+     is refused needs time to become possible, not immediate repetition. */
+  static const uint32_t SCAN_RETRY_MS = 1000;
+  unsigned long _next_scan_try_ms = 0;
 
   uint8_t _queue_len = 0;
   Datagram _queue[QUEUE_SIZE];
