@@ -281,6 +281,31 @@ public:
      it -- filesystem writes, LoRa transmit and BLE work all block here. */
   unsigned long _loop_gap_max_ms = 0, _loop_last_ms = 0;
 
+  /* LoRa watchdog. Both repeaters have been found with a completely dead radio
+     -- zero packets sent or received for over an hour, correct config, repeat
+     on -- and a reboot did not clear it, so nothing short of intervention got
+     them back on the air. Nothing noticed, because a silent band and a dead
+     radio look identical from the outside.
+
+     They are distinguishable if we make traffic ourselves: transmitting is
+     always possible, so after a long idle period the node sends one zero-hop
+     advert and watches whether its own transmit airtime moves. That separates
+     "nobody is talking" from "this radio is not working" without waiting for
+     someone else to speak, which on a quiet band may be never. */
+  static const uint32_t LORA_IDLE_MS = 15UL * 60UL * 1000UL;
+  static const uint32_t LORA_SELFTEST_GRACE_MS = 30000;
+  static const uint32_t LORA_CHECK_EVERY_MS = 30000;
+  enum LoraWd : uint8_t { LORA_WD_IDLE = 0, LORA_WD_TESTING, LORA_WD_REINITED };
+
+  unsigned long _lora_activity_ms = 0;   // when air time last moved
+  unsigned long _lora_last_air = 0;      // tx+rx air time at that moment
+  unsigned long _lora_next_check_ms = 0;
+  unsigned long _lora_test_started_ms = 0;
+  unsigned long _lora_test_air = 0;
+  uint8_t  _lora_wd_state = LORA_WD_IDLE;
+  uint32_t _lora_reinits = 0;
+  void loraWatchdog();
+
 #if WITH_BLE_CLI
 private:
   // A local, high-bandwidth diagnostic port. Metrics over LoRa are capped at a

@@ -1248,7 +1248,8 @@ void MyMesh::formatBridgeReply(char *reply, const char* what) {
     uint32_t up_s = (uint32_t)(uptime_millis / 1000);
     snprintf(reply, reply_size,
              "ble ingest: %lu reports, %lu ms cpu (%lu us/report), %lu.%02lu%% of %lus uptime; "
-             "mean rssi %ddB; loop %lu/s max-gap %lums; silence %lums; recoveries %lu; advfail %lu",
+             "mean rssi %ddB; loop %lu/s max-gap %lums; silence %lums; recoveries %lu; advfail %lu; "
+             "lora idle %lus reinits %lu",
              (unsigned long)n, (unsigned long)(us / 1000),
              (unsigned long)(n ? us / n : 0),
              (unsigned long)(up_s ? (us / 10000) / up_s : 0),
@@ -1256,7 +1257,9 @@ void MyMesh::formatBridgeReply(char *reply, const char* what) {
              (unsigned long)up_s, (int)bridge.meanReportRssi(),
              (unsigned long)_loop_rate, (unsigned long)_loop_gap_max_ms,
              (unsigned long)bridge.silenceMs(),
-             (unsigned long)bridge.numRecoveries(), (unsigned long)bridge.numAdvFailures());
+             (unsigned long)bridge.numRecoveries(), (unsigned long)bridge.numAdvFailures(),
+             (unsigned long)(_lora_activity_ms ? (millis() - _lora_activity_ms) / 1000 : 0),
+             (unsigned long)_lora_reinits);
     return;
   }
 
@@ -1450,6 +1453,81 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   }
 }
 
+/* See the notes in MyMesh.h. Staged: notice a long silence, prove the radio can
+   still transmit, reinitialise it if it cannot, and reboot only if that fails
+   too. Every stage is paced and every comparison signed -- an unpaced retry and
+   an unsigned elapsed-time test have each already cost this project a node. */
+void MyMesh::loraWatchdog() {
+  unsigned long now = millis();
+  if (_lora_next_check_ms != 0 && (long)(now - _lora_next_check_ms) < 0) return;
+  _lora_next_check_ms = now + LORA_CHECK_EVERY_MS;
+
+  unsigned long air = getTotalAirTime() + getReceiveAirTime();
+
+  if (air != _lora_last_air) {              // radio demonstrably working
+    _lora_last_air = air;
+    _lora_activity_ms = now;
+    _lora_wd_state = LORA_WD_IDLE;
+    return;
+  }
+  if (_lora_activity_ms == 0) { _lora_activity_ms = now; return; }
+
+  switch (_lora_wd_state) {
+    case LORA_WD_IDLE:
+      if ((long)(now - _lora_activity_ms) < (long)LORA_IDLE_MS) return;
+      /* Make our own traffic rather than wait for someone else's: on a quiet
+         band nobody may ever transmit, and silence would be misread as death. */
+      _lora_test_air = air;
+      _lora_test_started_ms = now;
+      _lora_wd_state = LORA_WD_TESTING;
+      sendSelfAdvertisement(500, false);     // zero-hop, cheap, no flood
+      MESH_DEBUG_PRINTLN("LoRa watchdog: silent %lus, probing radio",
+                         (unsigned long)((now - _lora_activity_ms) / 1000));
+      return;
+
+    case LORA_WD_TESTING:
+      if ((long)(now - _lora_test_started_ms) < (long)LORA_SELFTEST_GRACE_MS) return;
+      if (air != _lora_test_air) {           // it transmitted: radio is alive
+        _lora_last_air = air;
+        _lora_activity_ms = now;
+        _lora_wd_state = LORA_WD_IDLE;
+        return;
+      }
+      /* Asked to transmit and no airtime resulted. Reinitialise, and restore
+         every parameter begin() sets -- a bare radio_init() would leave the
+         node on the driver's default frequency, silently off-band, which is
+         worse than the fault being repaired. */
+      _lora_reinits++;
+      MESH_DEBUG_PRINTLN("LoRa watchdog: no airtime after probe, reinitialising");
+      radio_init();
+      radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
+      radio_driver.setTxPower(_prefs.tx_power_dbm);
+      radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
+      board.setLoRaFemLnaEnabled(_prefs.radio_fem_rxgain);
+      board.setLoRaFemPaGainEnabled(_prefs.radio_fem_txgain);
+      _lora_test_started_ms = now;
+      _lora_test_air = getTotalAirTime() + getReceiveAirTime();
+      _lora_wd_state = LORA_WD_REINITED;
+      sendSelfAdvertisement(500, false);
+      return;
+
+    case LORA_WD_REINITED:
+      if ((long)(now - _lora_test_started_ms) < (long)LORA_SELFTEST_GRACE_MS) return;
+      if (air != _lora_test_air) {           // reinit worked
+        _lora_last_air = air;
+        _lora_activity_ms = now;
+        _lora_wd_state = LORA_WD_IDLE;
+        return;
+      }
+      /* Reinitialised and still cannot transmit. Nothing else here can help,
+         and a repeater that cannot use its radio is doing nothing at all. */
+      MESH_DEBUG_PRINTLN("LoRa watchdog: dead after reinit, rebooting");
+      _cli.savePrefs(_fs);                   // deferred writes would be lost
+      board.reboot();
+      return;
+  }
+}
+
 void MyMesh::loop() {
   /* Sampled once a second. This task is TASK_PRIO_LOW and every BLE advert
      report preempts it, so the rate is a whole-system proxy for what the radio
@@ -1510,7 +1588,9 @@ void MyMesh::loop() {
 
   // is pending dirty contacts write needed?
   /* Settled long enough that more settings are unlikely to follow. */
-  if (_prefs_dirty_ms != 0 && (unsigned long)(millis() - _prefs_dirty_ms) >= PREFS_SETTLE_MS) {
+  loraWatchdog();
+
+  if (_prefs_dirty_ms != 0 && (long)(millis() - _prefs_dirty_ms) >= (long)PREFS_SETTLE_MS) {
     _prefs_dirty_ms = 0;
     _cli.savePrefs(_fs);
   }
