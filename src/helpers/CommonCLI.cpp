@@ -739,6 +739,24 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       strcpy(reply, "Error: delay must be between 0-10000 ms");
     }
+  } else if (memcmp(config, "bridge.adv_rep ", 15) == 0) {
+    int n = _atoi(&config[15]);
+    if (n >= 1 && n <= 10) {
+      _prefs->bridge_adv_repeat = (uint8_t)n;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error: adv_rep must be between 1-10 events");
+    }
+  } else if (memcmp(config, "bridge.ble_hold ", 16) == 0) {
+    int ms = _atoi(&config[16]);
+    if (ms >= 0 && ms <= 5000) {
+      _prefs->bridge_ble_hold = (uint16_t)ms;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error: ble_hold must be between 0-5000 ms");
+    }
   } else if (memcmp(config, "bridge.source ", 14) == 0) {
     _prefs->bridge_pkt_src = memcmp(&config[14], "rx", 2) == 0;
     savePrefs();
@@ -933,6 +951,10 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", _prefs->bridge_enabled ? "on" : "off");
   } else if (memcmp(config, "bridge.delay", 12) == 0) {
     sprintf(reply, "> %d", (uint32_t)_prefs->bridge_delay);
+  } else if (memcmp(config, "bridge.adv_rep", 14) == 0) {
+    sprintf(reply, "> %d", (uint32_t)_prefs->bridge_adv_repeat);
+  } else if (memcmp(config, "bridge.ble_hold", 15) == 0) {
+    sprintf(reply, "> %d", (uint32_t)_prefs->bridge_ble_hold);
   } else if (memcmp(config, "bridge.source", 13) == 0) {
     sprintf(reply, "> %s", _prefs->bridge_pkt_src ? "logRx" : "logTx");
 #endif
