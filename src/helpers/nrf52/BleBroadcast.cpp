@@ -47,6 +47,17 @@ bool BleBroadcast::begin(uint16_t company_id, rx_handler_t handler, event_chain_
   _handler = handler;
   _chain = chain;
 
+  /* A chain means somebody else is already using this BLE stack, which is the
+     whole question _shares_adv_set answers -- so answer it now instead of
+     waiting to observe it. Discovering it lazily fails in exactly the case that
+     matters: a client connected early stops the connectable advert, so a burst
+     starting then sees isRunning() false, the flag never latches, and the
+     stand-down below that would restore connectable advertising is gated behind
+     it. The node then keeps bridging happily while being completely
+     unreachable, which on a repeater with no USB means unreachable full stop.
+     Observed exactly that way on the dev unit. */
+  if (chain != nullptr) _shares_adv_set = true;
+
   /* Take the raw event slot and forward what we do not consume. This must come
      after every other subsystem's begin(), or ours is the one that gets
      overwritten and we never see an advert report. */
