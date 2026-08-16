@@ -6,6 +6,7 @@
 #ifdef WITH_BLE_BRIDGE
 
 #include "helpers/nrf52/BleBroadcast.h"
+#include "helpers/nrf52/BleLink.h"
 
 /**
  * @brief Bridge implementation carrying mesh packets over BLE broadcast
@@ -130,6 +131,13 @@ public:
   int8_t meanReportRssi() const { return _bcast.meanReportRssi(); }
 
   uint32_t numHeartbeatsRx() const { return _num_hb_rx; }
+  /* Connection-oriented links. Where one exists, delivery is acknowledged and
+     retried by the link layer rather than hoped for. */
+  uint8_t numLinks() const { return _link.numUp(); }
+  bool getLinkInfo(uint8_t i, ble_gap_addr_t& a, bool& up, int8_t& rssi,
+                   uint32_t& sent, uint32_t& recv, uint32_t& drops) const {
+    return _link.getLink(i, a, up, rssi, sent, recv, drops);
+  }
   uint32_t numRxOk() const { return _num_rx_ok; }
   uint32_t numDup() const { return _num_dup; }
   uint32_t numBadTag() const { return _num_bad_tag; }
@@ -167,6 +175,13 @@ private:
   unsigned long _next_hb_ms = 0;
   uint32_t _num_hb_rx = 0;
   void sendHeartbeat();
+  BleLink _link;
+  /* Frames arriving over a link, already acknowledged by the link layer and so
+     needing no dedup by tag. */
+  void onLinkFrame(const uint8_t* data, uint16_t len, uint8_t link_idx);
+  static void link_rx_cb(const uint8_t* data, uint16_t len, uint8_t link_idx);
+  /** Send over links if any are established, otherwise broadcast. */
+  bool dispatch(const uint8_t* frame, uint16_t len);
 
   static const uint16_t COMPANY_ID = 0xFFFF;
 

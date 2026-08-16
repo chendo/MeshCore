@@ -73,6 +73,8 @@ void BLEBridge::loop() {
 
     if (_bcast.begin(COMPANY_ID, rx_cb, _chain)) {
       _transport_up = true;
+      ble_gap_addr_t self;
+      if (sd_ble_gap_addr_get(&self) == NRF_SUCCESS) _link.begin(link_rx_cb, self);
       BRIDGE_DEBUG_PRINTLN("BLE: broadcast up\n");
     } else {
       _next_start_attempt = now + START_RETRY_MS;
@@ -86,6 +88,7 @@ void BLEBridge::loop() {
   _bcast.setTxHoldMs(_prefs->bridge_ble_hold);
   _bcast.setScanDuty(_prefs->bridge_scan_duty);
   _bcast.setScanFilter(_prefs->bridge_scan_filter != 0);
+  _link.loop();
 
   /* Only peers that have passed the HMAC get whitelisted, so an attacker
      cannot talk their way into our scan filter -- and cannot talk everyone
@@ -125,6 +128,52 @@ void BLEBridge::computeTag(const uint8_t *frame, size_t len, uint8_t tag[TAG_SIZ
   sha.finalizeHMAC(_key, KEY_SIZE, tag, TAG_SIZE);
 }
 
+void BLEBridge::link_rx_cb(const uint8_t* data, uint16_t len, uint8_t link_idx) {
+  if (_instance) _instance->onLinkFrame(data, len, link_idx);
+}
+
+/* Same validation as the broadcast path minus the duplicate check: a link
+   delivers each frame exactly once, so a repeat there would be an anomaly
+   rather than the deliberate redundancy broadcasting depends on. */
+void BLEBridge::onLinkFrame(const uint8_t* data, uint16_t len, uint8_t link_idx) {
+  const bool is_hb = (data[0] == FRAME_HEARTBEAT);
+  if ((data[0] != FRAME_VERSION && !is_hb) ||
+      len < HEADER_SIZE + TAG_SIZE + (is_hb ? 0 : 1)) {
+    _num_foreign++;
+    return;
+  }
+  const size_t signed_len = len - TAG_SIZE;
+  uint8_t expected[TAG_SIZE];
+  computeTag(data, signed_len, expected);
+  if (memcmp(expected, &data[signed_len], TAG_SIZE) != 0) {
+    /* Still checked. BLE authenticates the LINK; the group tag is what says
+       this peer belongs to our bridge rather than merely speaking the protocol. */
+    _num_bad_tag++;
+    return;
+  }
+
+  if (is_hb) { _num_hb_rx++; return; }
+
+  _num_rx_ok++;
+  mesh::Packet *pkt = _mgr->allocNew();
+  if (!pkt) return;
+  if (pkt->readFrom(&data[HEADER_SIZE], (uint8_t)(signed_len - HEADER_SIZE))) {
+    onPacketReceived(pkt);
+  } else {
+    _mgr->free(pkt);
+  }
+  (void)link_idx;
+}
+
+/* Prefer an established link and fall back to broadcasting. A link is reliable
+   and a broadcast is not, so where both are possible the link wins -- but a
+   peer we have no connection to is still only reachable the old way, which is
+   why the broadcast transport stays rather than being replaced. */
+bool BLEBridge::dispatch(const uint8_t* frame, uint16_t len) {
+  if (_link.send(frame, len) > 0) return true;
+  return _bcast.send(frame, (uint8_t)len);
+}
+
 void BLEBridge::sendHeartbeat() {
   uint8_t *frame = _tx_frame;
   frame[0] = FRAME_HEARTBEAT;
@@ -137,6 +186,8 @@ void BLEBridge::sendHeartbeat() {
   memcpy(&frame[VERSION_SIZE + SEQ_SIZE], &timestamp, TIMESTAMP_SIZE);
 
   computeTag(frame, HEADER_SIZE, &frame[HEADER_SIZE]);
+  /* Heartbeats always broadcast, never go down a link: their whole purpose is
+     to reach a peer we have no connection to. */
   _bcast.send(frame, (uint8_t)(HEADER_SIZE + TAG_SIZE));
 }
 
@@ -183,7 +234,7 @@ void BLEBridge::sendPacket(mesh::Packet *packet) {
   const size_t signed_len = HEADER_SIZE + packet_len;
   computeTag(frame, signed_len, &frame[signed_len]);
 
-  if (_bcast.send(frame, (uint8_t)(signed_len + TAG_SIZE))) {
+  if (dispatch(frame, (uint16_t)(signed_len + TAG_SIZE))) {
 #if WITH_STATUS_LED
     StatusLed::bleTx();
 #endif
@@ -271,6 +322,15 @@ void BLEBridge::peerAccept(const uint8_t addr[6], uint8_t addr_type, uint32_t ti
     slot->addr_type = addr_type;
     slot->in_use = true;
     _peers_gen++;              // the whitelist needs rebuilding
+
+    /* Only now, with the group tag verified, is this an address we are willing
+       to dial. Feeding the link layer from raw scan results would let anyone in
+       radio range choose who we connect to. */
+    ble_gap_addr_t pa;
+    memset(&pa, 0, sizeof(pa));
+    pa.addr_type = addr_type;
+    memcpy(pa.addr, addr, 6);
+    _link.notePeer(pa);
   }
 
   /* Gap accounting, in uint16 arithmetic so the wrap at 65535 costs nothing.

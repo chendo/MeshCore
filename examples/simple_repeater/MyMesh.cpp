@@ -1169,6 +1169,22 @@ void MyMesh::onDefaultRegionChanged(const RegionEntry* r) {
 #if defined(WITH_BLE_BRIDGE)
 void MyMesh::formatBridgeReply(char *reply, const char* what) {
   const size_t reply_size = 160;
+  if (memcmp(what, "links", 5) == 0) {
+    /* Connection-oriented peer links. "up" means the link layer is
+       acknowledging and retrying for us; anything else means this peer is
+       still being served by broadcast, with its measured loss. */
+    int o = snprintf(reply, reply_size, "%d link(s) up:", (int)bridge.numLinks());
+    for (uint8_t i = 0; i < BleLink::MAX_LINKS && o + 28 < (int)reply_size; i++) {
+      ble_gap_addr_t a; bool up; int8_t rssi; uint32_t sent, recv, drops;
+      if (!bridge.getLinkInfo(i, a, up, rssi, sent, recv, drops)) continue;
+      o += snprintf(&reply[o], reply_size - o, " %02X%02X%02X/%s/tx%lu/rx%lu/drop%lu",
+                    a.addr[5], a.addr[4], a.addr[3], up ? "up" : "dialling",
+                    (unsigned long)sent, (unsigned long)recv, (unsigned long)drops);
+    }
+    if (o <= 14) snprintf(reply, reply_size, "no peer links (broadcast only)");
+    return;
+  }
+
   if (memcmp(what, "peers", 5) == 0) {
     // Who we are actually bridging with, and how good the link is. RSSI here is
     // the BLE link to that node, nothing to do with LoRa.
