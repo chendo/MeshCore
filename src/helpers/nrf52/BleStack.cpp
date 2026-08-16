@@ -15,16 +15,32 @@ bool ensure(const char* name, uint8_t prph, uint8_t central) {
     sd_softdevice_is_enabled(&sd_enabled);
     if (!sd_enabled) {
       if (prph < 1) prph = 1;                    // the CLI always needs one
-      if (Bluefruit.begin(prph, central)) {
-        s_prph = prph;
-        s_central = central;
-      } else {
-        /* sd_softdevice_enable() succeeded before the config failed, so the
-           stack is up but unusable and a plain retry hits INVALID_STATE. */
+
+      /* Walk down until the SoftDevice's RAM requirement fits what the linker
+         reserved, rather than guessing at build time. Measured on a RAK3401:
+         (4,3) does not fit the 24KB at RAM origin 0x20006000 and the node came
+         up with a single peripheral, so the ceiling is genuinely lower than it
+         looks and worth discovering rather than assuming.
+
+         Each failed attempt leaves the SoftDevice enabled but unconfigured --
+         sd_softdevice_enable() succeeds before the config does not -- so it has
+         to come down before the next try or that one fails on INVALID_STATE. */
+      bool up = false;
+      while (!up) {
+        if (Bluefruit.begin(prph, central)) {
+          s_prph = prph;
+          s_central = central;
+          up = true;
+          break;
+        }
         sd_softdevice_disable();
-        if (!Bluefruit.begin(1, 0)) return false;
-        s_prph = 1;
-        s_central = 0;
+        if (central > 0) {
+          central--;                             // outward links are the costly half
+        } else if (prph > 1) {
+          prph--;
+        } else {
+          return false;                          // even (1,0) refused: no BLE at all
+        }
       }
     }
     s_done = true;
