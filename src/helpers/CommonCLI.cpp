@@ -325,7 +325,12 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     } else if (memcmp(command, "clock", 5) == 0) {
       uint32_t now = getRTCClock()->getCurrentTime();
       DateTime dt = DateTime(now);
-      sprintf(reply, "%02d:%02d - %d/%d/%d UTC", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
+      // Seconds and the raw epoch, so a host holding disciplined time can
+      // measure this node's error. To the minute, a node can be 59s out and
+      // still look correct, which is most of the range that matters here.
+      sprintf(reply, "%02d:%02d:%02d - %d/%d/%d UTC (epoch %lu)",
+              dt.hour(), dt.minute(), dt.second(), dt.day(), dt.month(), dt.year(),
+              (unsigned long)now);
     } else if (memcmp(command, "time.force ", 11) == 0) {  // force set time (to epoch seconds)
       uint32_t secs = _atoi(&command[11]);
       getRTCClock()->setCurrentTime(secs);
