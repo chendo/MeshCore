@@ -115,6 +115,12 @@ public:
     _rescan_needed = true;    // the scan cycle is derived from this
   }
   void setTxHoldMs(uint16_t ms) { _tx_hold_ms = ms; }
+  void setScanDuty(uint8_t pct) {
+    uint8_t d = pct < 25 ? 25 : (pct > 100 ? 100 : pct);
+    if (d == _scan_duty) return;
+    _scan_duty = d;
+    _rescan_needed = true;
+  }
 
   uint32_t numSent() const { return _num_sent; }
   uint32_t numRecv() const { return _num_recv; }
@@ -163,7 +169,7 @@ private:
   /* Scan duty cycle, as a fraction of the interval. Deliberately not 100% --
      the SoftDevice needs slack to service our own advertising bursts and any
      connection. */
-  static const uint16_t SCAN_DUTY_NUM = 4, SCAN_DUTY_DEN = 5;   // 80%
+  static const uint8_t SCAN_DUTY_DEFAULT = 80;   // percent
 
   /* The scan interval is DERIVED from the burst rather than fixed, so the
      copies of one datagram land on evenly spaced scan phases.
@@ -177,8 +183,11 @@ private:
      window can then only ever cost one copy whatever the phase. */
   uint16_t scanIntervalUnits() const { return (uint16_t)(ADV_INTERVAL * _adv_repeat); }
   uint16_t scanWindowUnits() const {
-    uint32_t w = (uint32_t)scanIntervalUnits() * SCAN_DUTY_NUM / SCAN_DUTY_DEN;
-    return (uint16_t)(w < 4 ? 4 : w);          // SoftDevice minimum
+    uint16_t iv = scanIntervalUnits();
+    uint32_t w = (uint32_t)iv * _scan_duty / 100;
+    if (w < 4) w = 4;                          // SoftDevice minimum
+    if (w > iv) w = iv;                        // window may never exceed interval
+    return (uint16_t)w;
   }
 
   struct Datagram {
@@ -222,6 +231,7 @@ private:
 
   uint8_t _adv_repeat = MAX_ADV_EVTS;
   uint16_t _tx_hold_ms = 0;
+  uint8_t _scan_duty = SCAN_DUTY_DEFAULT;
   bool _rescan_needed = false;
 
   uint8_t _queue_len = 0;

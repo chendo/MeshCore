@@ -83,6 +83,7 @@ void BLEBridge::loop() {
   // Cheap, and lets both knobs be retuned over the CLI without a reboot.
   _bcast.setAdvRepeat(_prefs->bridge_adv_repeat);
   _bcast.setTxHoldMs(_prefs->bridge_ble_hold);
+  _bcast.setScanDuty(_prefs->bridge_scan_duty);
 
   _bcast.loop();
 }

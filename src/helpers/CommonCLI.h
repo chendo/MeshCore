@@ -86,6 +86,12 @@ public:
      asking the regulator for both at once. 0 = send as soon as the arbiter
      allows, which is the behaviour before this existed. */
   uint16_t bridge_ble_hold = 0;
+  /* Percentage of each scan cycle spent listening. The rest is the blind gap
+     the SoftDevice needs to service our own advertising bursts and any
+     connection, so pushing this toward 100 buys listening time at the cost of
+     everything else the radio has to do -- including transmitting the adverts
+     our peer is trying to hear. Worth measuring rather than assuming. */
+  uint8_t bridge_scan_duty = 80;
   uint32_t bridge_baud = 0;   // 9600, 19200, 38400, 57600, 115200 (default 115200)
   uint8_t bridge_channel = 0; // 1-14 (ESP-NOW only)
   char bridge_secret[16]; // for XOR encryption of bridge packets (ESP-NOW only)
@@ -143,6 +149,7 @@ private:
       def("src", _parent->bridge_pkt_src); // 0 = logTx, 1 = logRx (default logTx)
       def("adv_rep", _parent->bridge_adv_repeat); // advertising events per datagram
       def("ble_hold", _parent->bridge_ble_hold);  // ms to hold before a BLE burst
+      def("scan_duty", _parent->bridge_scan_duty); // % of each scan cycle listening
       def("baud", _parent->bridge_baud);   // 9600, 19200, 38400, 57600, 115200 (default 115200)
       def("ch", _parent->bridge_channel); // 1-14 (ESP-NOW only)
       def("secret", _parent->bridge_secret, sizeof(_parent->bridge_secret)); // for XOR encryption of bridge packets (ESP-NOW only)
