@@ -179,6 +179,12 @@ public:
   uint32_t reportCount() const { return _report_count; }
   /** Times the receive path went silent and had to be restarted. */
   uint32_t numRecoveries() const { return _num_recoveries; }
+  /** Milliseconds since the last advert report -- the quantity the liveness
+   *  check actually tests, exposed so a spurious recovery can be diagnosed
+   *  rather than inferred. */
+  uint32_t silenceMs() const {
+    return _ever_heard ? (uint32_t)(millis() - _last_report_ms) : 0;
+  }
   /** Times the SoftDevice refused to start the connectable advert. */
   uint32_t numAdvFailures() const { return _num_adv_fail; }
   /** Mean RSSI over all reports seen, as a proxy for ambient BLE activity --
@@ -336,8 +342,13 @@ private:
      Gated on having HEARD something first, so a node genuinely alone in the RF
      spectrum is never reset for it. */
   static const uint32_t SILENCE_LIMIT_MS = 300000;
-  unsigned long _last_report_ms = 0;
-  bool _ever_heard = false;
+  /* volatile: written from the BLE event task, read from the main loop. Without
+     it the compiler may cache the read across loop iterations and compare
+     against a value that never changes -- which is exactly what happened, the
+     liveness check firing twice a minute while silenceMs(), a separate call,
+     correctly reported tens of milliseconds. */
+  volatile unsigned long _last_report_ms = 0;
+  volatile bool _ever_heard = false;
   uint32_t _num_recoveries = 0;
   uint32_t _num_adv_fail = 0;
 

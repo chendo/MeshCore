@@ -1238,13 +1238,14 @@ void MyMesh::formatBridgeReply(char *reply, const char* what) {
     uint32_t up_s = (uint32_t)(uptime_millis / 1000);
     snprintf(reply, reply_size,
              "ble ingest: %lu reports, %lu ms cpu (%lu us/report), %lu.%02lu%% of %lus uptime; "
-             "mean rssi %ddB; loop %lu/s max-gap %lums; recoveries %lu; advfail %lu",
+             "mean rssi %ddB; loop %lu/s max-gap %lums; silence %lums; recoveries %lu; advfail %lu",
              (unsigned long)n, (unsigned long)(us / 1000),
              (unsigned long)(n ? us / n : 0),
              (unsigned long)(up_s ? (us / 10000) / up_s : 0),
              (unsigned long)(up_s ? ((us / 100) / up_s) % 100 : 0),
              (unsigned long)up_s, (int)bridge.meanReportRssi(),
              (unsigned long)_loop_rate, (unsigned long)_loop_gap_max_ms,
+             (unsigned long)bridge.silenceMs(),
              (unsigned long)bridge.numRecoveries(), (unsigned long)bridge.numAdvFailures());
     return;
   }

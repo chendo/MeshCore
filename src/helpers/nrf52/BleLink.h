@@ -43,8 +43,11 @@ public:
    */
   bool begin(rx_handler_t handler, const ble_gap_addr_t& self_addr);
 
-  /** Drive connection attempts and retries. Call from the main loop. */
+  /** Drive connection attempts, keepalive and retries. Call from the main loop. */
   void loop();
+
+  /** Send to every link regardless of ingress -- used for keepalive traffic. */
+  uint8_t sendKeepalive(const uint8_t* data, uint16_t len);
 
   /**
    * @brief  A peer we have authenticated over broadcast and may connect to.
@@ -85,6 +88,12 @@ private:
     unsigned long next_try_ms;
     uint16_t backoff_ms;
     uint32_t sent, recv, drops;
+    /* A connection can stay nominally up while carrying nothing -- the
+       supervision timeout only notices a radio that has gone away, not a peer
+       that has stopped talking. Heartbeats give the link a floor of one frame
+       per interval, so silence beyond a minute means it is dead and worth
+       redialling rather than holding a slot open. */
+    unsigned long last_rx_ms;
     /* Reassembly. Writes are capped at the ATT payload -- 20 bytes on the
        default 23-byte MTU -- so a frame arrives in pieces. Raising the MTU
        would cost SoftDevice RAM we do not have, and over a reliable ordered
@@ -94,6 +103,7 @@ private:
     uint8_t rx_buf[MAX_FRAME];
   };
 
+  static const uint32_t LINK_IDLE_LIMIT_MS = 60000;
   static const uint16_t BACKOFF_MIN_MS = 2000;
   static const uint16_t BACKOFF_MAX_MS = 60000;
 

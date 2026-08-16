@@ -195,9 +195,18 @@ void BLEBridge::sendHeartbeat() {
   memcpy(&frame[VERSION_SIZE + SEQ_SIZE], &timestamp, TIMESTAMP_SIZE);
 
   computeTag(frame, HEADER_SIZE, &frame[HEADER_SIZE]);
-  /* Heartbeats always broadcast, never go down a link: their whole purpose is
-     to reach a peer we have no connection to. */
-  _bcast.send(frame, (uint8_t)(HEADER_SIZE + TAG_SIZE));
+  const uint16_t hb_len = (uint16_t)(HEADER_SIZE + TAG_SIZE);
+
+  /* Broadcast, so a peer we have no connection to can still discover us. */
+  _bcast.send(frame, (uint8_t)hb_len);
+
+  /* And down every established link, as keepalive. Without this a link with no
+     packets to carry looks identical to a dead one: the supervision timeout
+     only notices a radio that has gone away, not a peer that has stopped
+     talking, so an idle check needs a guaranteed floor of traffic to measure
+     against. At one heartbeat per 15s against a 60s idle limit there are four
+     chances to miss before a link is judged dead. */
+  _link.sendKeepalive(frame, hb_len);
 }
 
 void BLEBridge::sendPacket(mesh::Packet *packet) {

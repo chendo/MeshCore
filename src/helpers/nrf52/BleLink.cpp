@@ -102,6 +102,22 @@ void BleLink::loop() {
   if (!_running) return;
   unsigned long now = millis();
 
+  /* Drop a link that has gone quiet. Heartbeats put a frame on every link each
+     interval, so a minute of silence is not a lull -- it is a connection the
+     link layer still believes in and the peer has stopped using. Disconnecting
+     returns it to IDLE, where the normal backoff redials it. */
+  for (uint8_t i = 0; i < MAX_LINKS; i++) {
+    Link& l = _links[i];
+    if (l.state != UP || l.last_rx_ms == 0) continue;
+    if ((unsigned long)(now - l.last_rx_ms) < LINK_IDLE_LIMIT_MS) continue;
+    BLEConnection* c = Bluefruit.Connection(l.conn);
+    if (c != nullptr) c->disconnect();
+    l.drops++;
+    l.state = IDLE;
+    l.conn = BLE_CONN_HANDLE_INVALID;
+    l.last_rx_ms = 0;
+  }
+
   for (uint8_t i = 0; i < MAX_LINKS; i++) {
     Link& l = _links[i];
     if (l.state != IDLE) continue;
@@ -143,6 +159,7 @@ void BleLink::onConnected(uint16_t conn) {
 
     if (s_clt[i].discover(conn) && s_cchr[i].discover() && s_cchr[i].enableNotify()) {
       l.state = UP;
+      l.last_rx_ms = millis();               // grace period before the idle check
       l.backoff_ms = BACKOFF_MIN_MS;         // a link that worked starts fresh
     } else {
       /* Connected to something that is not a bridge peer, or discovery failed.
@@ -185,6 +202,7 @@ void BleLink::feed(Link& l, uint8_t idx, const uint8_t* data, uint16_t len) {
 
     if (l.rx_have == l.rx_expect) {
       l.recv++;
+      l.last_rx_ms = millis();
       if (_handler) _handler(l.rx_buf, l.rx_expect, idx);
       l.rx_expect = l.rx_have = 0;
     }
@@ -233,6 +251,10 @@ bool BleLink::writeFragmented(uint8_t idx, const uint8_t* data, uint16_t len) {
     off += take;
   }
   return true;
+}
+
+uint8_t BleLink::sendKeepalive(const uint8_t* data, uint16_t len) {
+  return send(data, len, NO_LINK);
 }
 
 uint8_t BleLink::send(const uint8_t* data, uint16_t len, uint8_t except) {
