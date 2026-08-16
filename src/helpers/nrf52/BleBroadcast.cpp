@@ -50,6 +50,24 @@ bool BleBroadcast::begin(uint16_t company_id, rx_handler_t handler, event_chain_
      overwritten and we never see an advert report. */
   Bluefruit.setEventCallback(onBLEEvent);
 
+  /* Become the ONLY thing that decides when the connectable advert runs.
+
+     Bluefruit's BLEAdvertising assumes it owns advertising set 0 and tracks the
+     state in its own _running flag. We drive that same set directly, and its
+     stop() clears _running -- so while we hold the set for a burst, Bluefruit
+     believes advertising is simply off. Its DISCONNECTED handler acts on that
+     belief and calls start() on a set we are still using.
+
+     Afterwards neither owner retries: our finishBurst saw _restore_connectable
+     false, and Bluefruit only tries again on the NEXT disconnect. The node then
+     stays unreachable indefinitely while bridging perfectly well -- which is
+     what took out both repeaters today, each time immediately after a CLI
+     session disconnected.
+
+     With the auto-restart off there is one authority: the invariant in loop(),
+     which reasserts advertising whenever a peripheral slot is free. */
+  Bluefruit.Advertising.restartOnDisconnect(false);
+
   /* Prove we can drive the advertising set before claiming to be running.
      BLE_GAP_ADV_SET_COUNT_MAX is 1, and Bluefruit already owns that set with no
      accessor for its handle -- but it consistently allocates handle 0, which
@@ -208,7 +226,13 @@ void BleBroadcast::finishBurst() {
   /* Give the connectable CLI/DFU advert its set back. Guard on the connection
      count as well: a connection formed during the burst would make restarting
      advertising the wrong move. */
-  if (_restore_connectable && Bluefruit.Periph.connected() == 0) {
+  /* Hand the set back at once rather than waiting for loop() to notice -- but
+     decide from the CURRENT state, not from _restore_connectable. That flag is
+     a snapshot taken at burst start: a burst beginning while a client was
+     connected captured false, and if that client disconnects during the burst
+     the snapshot says "do not restore" about a node with nothing using the set
+     at all. Same invariant loop() enforces. */
+  if (Bluefruit.Periph.connected() < BleStack::periphSlots()) {
     Bluefruit.Advertising.start(0);
   }
   _restore_connectable = false;
