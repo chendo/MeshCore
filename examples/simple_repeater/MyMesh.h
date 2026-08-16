@@ -195,7 +195,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
      over, so it is worth waiting a little longer for a tighter sample. */
   static const int32_t  CLOCK_UNSET_MAX_SPREAD_S = 120;
 
-  bool     _clock_converge = false;
+  /* Mirrors _prefs.clock_converge, which is the persisted authority. */
   uint32_t _next_clock_converge_ms = 0;
   uint32_t _clock_extern_set_ms = 0;
   bool     _clock_ever_set = false;

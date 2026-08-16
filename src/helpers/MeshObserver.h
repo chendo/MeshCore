@@ -138,6 +138,11 @@ public:
   /* Floor under the outlier threshold, so a mesh that already agrees to within
      a second does not reject almost everything for being 1s out. */
   static const int32_t  CLOCK_CLIP_FLOOR_S = 2;
+  /* Half-width of the band a "consensus" has to fit inside. Deliberately much
+     tighter than the errors being rejected: a mesh whose honest members really
+     do disagree by more than a couple of minutes has no consensus worth acting
+     on, and picking a side of that would be guessing. */
+  static const int32_t  CLOCK_CLUSTER_WIDTH_S = 120;
 
   struct ClockConsensus {
     bool     valid;
