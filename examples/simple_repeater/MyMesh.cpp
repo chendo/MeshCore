@@ -1226,17 +1226,22 @@ void MyMesh::formatBridgeReply(char *reply, const char* what) {
        only. rssi is the mean over reports we were given, which is the closest
        thing to an ambient reading available: the SoftDevice will not sample
        RSSI outside a connection. */
+    /* Recoveries and advert failures live here rather than in "bridge" because
+       they are health, not throughput: a node that has silently restarted its
+       receive path three times is telling you something the packet counters
+       cannot. */
     uint32_t us = bridge.reportCpuUs(), n = bridge.reportCount();
     uint32_t up_s = (uint32_t)(uptime_millis / 1000);
     snprintf(reply, reply_size,
              "ble ingest: %lu reports, %lu ms cpu (%lu us/report), %lu.%02lu%% of %lus uptime; "
-             "mean rssi %ddB; loop %lu/s",
+             "mean rssi %ddB; loop %lu/s; recoveries %lu; advfail %lu",
              (unsigned long)n, (unsigned long)(us / 1000),
              (unsigned long)(n ? us / n : 0),
              (unsigned long)(up_s ? (us / 10000) / up_s : 0),
              (unsigned long)(up_s ? ((us / 100) / up_s) % 100 : 0),
              (unsigned long)up_s, (int)bridge.meanReportRssi(),
-             (unsigned long)_loop_rate);
+             (unsigned long)_loop_rate,
+             (unsigned long)bridge.numRecoveries(), (unsigned long)bridge.numAdvFailures());
     return;
   }
 

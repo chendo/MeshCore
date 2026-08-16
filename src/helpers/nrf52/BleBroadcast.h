@@ -177,6 +177,10 @@ public:
    */
   uint32_t reportCpuUs() const { return _report_cpu_us; }
   uint32_t reportCount() const { return _report_count; }
+  /** Times the receive path went silent and had to be restarted. */
+  uint32_t numRecoveries() const { return _num_recoveries; }
+  /** Times the SoftDevice refused to start the connectable advert. */
+  uint32_t numAdvFailures() const { return _num_adv_fail; }
   /** Mean RSSI over all reports seen, as a proxy for ambient BLE activity --
    *  there is no way to sample a true noise floor while the SoftDevice scans. */
   int8_t meanReportRssi() const {
@@ -323,6 +327,20 @@ private:
   uint32_t _num_sent = 0;
   uint32_t _num_recv = 0;
   uint32_t _num_tx_dropped = 0;
+  /* Liveness. In any populated environment a scanner sees advert reports
+     constantly -- 17/s with the whitelist on and 126/s without, measured here.
+     Going from "plenty" to "none" therefore means the receive path has wedged,
+     which nothing else detects: the node keeps bridging outbound and looks
+     entirely healthy while being deaf.
+
+     Gated on having HEARD something first, so a node genuinely alone in the RF
+     spectrum is never reset for it. */
+  static const uint32_t SILENCE_LIMIT_MS = 120000;
+  unsigned long _last_report_ms = 0;
+  bool _ever_heard = false;
+  uint32_t _num_recoveries = 0;
+  uint32_t _num_adv_fail = 0;
+
   uint32_t _report_cpu_us = 0;
   uint32_t _report_count = 0;
   int32_t  _rssi_sum = 0;

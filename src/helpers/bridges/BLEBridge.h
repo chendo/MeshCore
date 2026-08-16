@@ -128,6 +128,8 @@ public:
      what a caller has a handle to. */
   uint32_t reportCpuUs() const { return _bcast.reportCpuUs(); }
   uint32_t reportCount() const { return _bcast.reportCount(); }
+  uint32_t numRecoveries() const { return _bcast.numRecoveries(); }
+  uint32_t numAdvFailures() const { return _bcast.numAdvFailures(); }
   int8_t meanReportRssi() const { return _bcast.meanReportRssi(); }
 
   uint32_t numHeartbeatsRx() const { return _num_hb_rx; }

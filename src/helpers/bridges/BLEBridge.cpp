@@ -90,6 +90,15 @@ void BLEBridge::loop() {
   _bcast.setScanFilter(_prefs->bridge_scan_filter != 0);
   _link.loop();
 
+  /* The transport can take itself down when its receive path stops answering.
+     Rebuild it rather than leaving the bridge nominally up and permanently
+     deaf -- begin() is idempotent and re-arms scanning from scratch. */
+  if (!_bcast.isRunning()) {
+    _transport_up = false;
+    _next_start_attempt = millis() + START_RETRY_MS;
+    BRIDGE_DEBUG_PRINTLN("BLE: transport went down, will restart\n");
+  }
+
   /* Only peers that have passed the HMAC get whitelisted, so an attacker
      cannot talk their way into our scan filter -- and cannot talk everyone
      else out of it either. */

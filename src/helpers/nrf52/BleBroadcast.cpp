@@ -294,7 +294,27 @@ void BleBroadcast::loop() {
   if (_shares_adv_set && !_bursting
       && Bluefruit.Periph.connected() < BleStack::periphSlots()
       && !Bluefruit.Advertising.isRunning()) {
-    Bluefruit.Advertising.start(0);
+    /* Counted rather than ignored. If the SoftDevice is refusing, asserting the
+       invariant every pass turns into a silent spin, and the count is the only
+       way anyone finds out. */
+    if (!Bluefruit.Advertising.start(0)) _num_adv_fail++;
+  }
+
+  /* Receive-path liveness. A scanner in a populated environment hears adverts
+     constantly, so prolonged silence after having heard traffic means the
+     scanner has stopped and no error was reported -- the node still bridges
+     outbound and looks healthy from its own telemetry. Restart the scan; if the
+     stack is wedged harder than that, the next window escalates again. */
+  if (_ever_heard && (unsigned long)(millis() - _last_report_ms) > SILENCE_LIMIT_MS) {
+    _num_recoveries++;
+    _last_report_ms = millis();          // one attempt per window, not per pass
+    sd_ble_gap_scan_stop();
+    if (!armScan(true)) {
+      /* Could not even reconfigure. Drop the transport; BLEBridge watches
+         isRunning() and calls begin() again, which is the last remedy short of
+         a reboot. */
+      _running = false;
+    }
   }
 
   unsigned long now = millis();
@@ -460,6 +480,8 @@ void BleBroadcast::onBLEEvent(ble_evt_t* evt) {
            paused scanning waiting for its buffer back. */
         uint32_t t0 = micros();
         self->_report_count++;
+        self->_last_report_ms = millis();
+        self->_ever_heard = true;
         self->_rssi_sum += evt->evt.gap_evt.params.adv_report.rssi;
         self->onAdvReport(&evt->evt.gap_evt.params.adv_report);
         self->_report_cpu_us += (uint32_t)(micros() - t0);
