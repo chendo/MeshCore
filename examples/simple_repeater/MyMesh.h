@@ -188,7 +188,12 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
      consensus whole. */
   static const uint32_t CLOCK_CONVERGE_FAST_MS = 30UL * 1000UL;
   static const uint8_t  CLOCK_UNSET_MIN_SOURCES = 2;
-static const int32_t  CLOCK_UNSET_MAX_SPREAD_S = 600;
+  /* Measured on hardware: at 600s this accepted a two-source consensus and
+     landed 113s off true UTC, and because the neighbourhood's ordinary spread
+     then sat at 398s the normal path refused to refine it -- so the node stayed
+     wrong. The escape only has to be close enough for ordinary steering to take
+     over, so it is worth waiting a little longer for a tighter sample. */
+  static const int32_t  CLOCK_UNSET_MAX_SPREAD_S = 120;
 
   bool     _clock_converge = false;
   uint32_t _next_clock_converge_ms = 0;
