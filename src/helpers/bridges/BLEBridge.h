@@ -50,12 +50,21 @@
 class BLEBridge : public BridgeBase {
 public:
   /** Frame version. Bump if the layout below ever changes. */
-  static const uint8_t FRAME_VERSION = 0x01;
+  /* v2 added the sequence number. The bump is deliberate: a v1 node reads a v2
+     frame as foreign and ignores it, rather than parsing the seq as part of the
+     timestamp and acting on nonsense. Mixed-version pairs stop bridging until
+     both are flashed, which is the honest failure. */
+  static const uint8_t FRAME_VERSION = 0x02;
 
   static const size_t VERSION_SIZE = 1;
+  /* Per-sender datagram counter, so a receiver can tell a lost datagram from a
+     quiet link. Without it, loss can only be inferred from how many duplicate
+     copies of the ones that DID arrive were seen, which says nothing about the
+     ones that arrived zero times. Wraps at 65535; gaps are computed modulo. */
+  static const size_t SEQ_SIZE = 2;
   static const size_t TIMESTAMP_SIZE = 4;
   static const size_t TAG_SIZE = 8;
-  static const size_t HEADER_SIZE = VERSION_SIZE + TIMESTAMP_SIZE;
+  static const size_t HEADER_SIZE = VERSION_SIZE + SEQ_SIZE + TIMESTAMP_SIZE;
 
   /** What is left for the mesh packet: 251 - 5 - 8 = 238 bytes. ESPNowBridge
    *  manages 246, so this is near parity; a real MeshCore packet is at most
@@ -115,7 +124,8 @@ public:
    *                spot a node whose clock has drifted or reset.
    */
   bool getPeer(uint8_t idx, uint8_t addr[6], int8_t &rssi, uint32_t &age_ms,
-               uint32_t &frames, int32_t &skew_s) const;
+               uint32_t &frames, int32_t &skew_s,
+               uint32_t &copies, uint32_t &lost) const;
 
 private:
   /**
@@ -123,6 +133,13 @@ private:
    * SIG for development and testing, which is exactly what an unregistered
    * open protocol should be using.
    */
+  /* A gap larger than this is read as the peer having restarted (its counter
+     goes back to zero) rather than as that many genuinely lost datagrams, which
+     would otherwise poison the loss figure permanently after any reboot. */
+  static const uint16_t SEQ_RESET_GAP = 1000;
+
+  uint16_t _tx_seq = 0;
+
   static const uint16_t COMPANY_ID = 0xFFFF;
 
   /** HMAC key size: the full SHA-256 of the configured secret. */
@@ -142,7 +159,16 @@ private:
     unsigned long last_seen;   // by ours, for staleness and eviction
     uint8_t last_tag[TAG_SIZE];// fingerprint of the last frame accepted
     int8_t last_rssi;          // link quality to this bridge peer
-    uint32_t frames;           // accepted from this peer
+    uint32_t frames;           // accepted from this peer (distinct datagrams)
+    /* Delivery accounting. copies counts every arrival including the deliberate
+       repeats, so copies/frames is how many of the adv_rep transmissions
+       actually land -- the number that says whether raising adv_rep is buying
+       anything. lost comes from gaps in their sequence, which is the only way
+       to see a datagram that arrived zero times. */
+    uint32_t copies;
+    uint32_t lost;
+    uint16_t last_seq;
+    bool seq_valid;
     bool in_use;
   };
 
@@ -161,7 +187,10 @@ private:
   void computeTag(const uint8_t *frame, size_t len, uint8_t tag[TAG_SIZE]);
 
   /** Record an authenticated frame. Only called once the HMAC has verified. */
-  void peerAccept(const uint8_t addr[6], uint32_t timestamp, const uint8_t *tag, int8_t rssi);
+  void peerAccept(const uint8_t addr[6], uint32_t timestamp, const uint8_t *tag, int8_t rssi,
+                  uint16_t seq);
+  /** Credit a repeat of an already-authenticated frame to its peer. */
+  void peerCountCopy(const uint8_t addr[6]);
 
   /** Distinguishes a suppressed repeat from a genuine stale frame, so the
    *  telemetry can tell "working as designed" from "something is replaying". */

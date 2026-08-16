@@ -108,7 +108,12 @@ public:
   /** Advertising events per datagram, and how long a datagram waits before its
    *  burst starts. Both are applied to the NEXT burst, so changing them takes
    *  effect without a restart. */
-  void setAdvRepeat(uint8_t evts) { _adv_repeat = (evts < 1) ? 1 : evts; }
+  void setAdvRepeat(uint8_t evts) {
+    uint8_t n = (evts < 1) ? 1 : evts;
+    if (n == _adv_repeat) return;
+    _adv_repeat = n;
+    _rescan_needed = true;    // the scan cycle is derived from this
+  }
   void setTxHoldMs(uint16_t ms) { _tx_hold_ms = ms; }
 
   uint32_t numSent() const { return _num_sent; }
@@ -155,11 +160,26 @@ private:
   static const uint32_t CONNECTABLE_PERIOD_MS = BLE_BRIDGE_CONNECTABLE_PERIOD_MS;
   static const uint32_t CONNECTABLE_MIN_MS = BLE_BRIDGE_CONNECTABLE_MIN_MS;
 
-  /* Scan window/interval in 625us units: 40ms of every 50ms, i.e. 80% duty.
-     Deliberately not 100% -- the SoftDevice needs slack to service our own
-     advertising bursts and any connection. */
-  static const uint16_t SCAN_INTERVAL = 80;
-  static const uint16_t SCAN_WINDOW = 64;
+  /* Scan duty cycle, as a fraction of the interval. Deliberately not 100% --
+     the SoftDevice needs slack to service our own advertising bursts and any
+     connection. */
+  static const uint16_t SCAN_DUTY_NUM = 4, SCAN_DUTY_DEN = 5;   // 80%
+
+  /* The scan interval is DERIVED from the burst rather than fixed, so the
+     copies of one datagram land on evenly spaced scan phases.
+     
+     It matters more than it looks. With a fixed 50ms interval and copies 20ms
+     apart, the three copies fall at phases 0, 20 and 40 of a 50ms cycle -- and
+     because phase wraps, the first and last are only 10ms apart, exactly the
+     width of the blind gap. One badly placed gap could swallow BOTH, so a
+     nominal 80% duty cycle could still lose two copies in three. Setting the
+     interval to adv_repeat * ADV_INTERVAL makes the gaps uniform, and the blind
+     window can then only ever cost one copy whatever the phase. */
+  uint16_t scanIntervalUnits() const { return (uint16_t)(ADV_INTERVAL * _adv_repeat); }
+  uint16_t scanWindowUnits() const {
+    uint32_t w = (uint32_t)scanIntervalUnits() * SCAN_DUTY_NUM / SCAN_DUTY_DEN;
+    return (uint16_t)(w < 4 ? 4 : w);          // SoftDevice minimum
+  }
 
   struct Datagram {
     uint8_t len;
@@ -202,6 +222,7 @@ private:
 
   uint8_t _adv_repeat = MAX_ADV_EVTS;
   uint16_t _tx_hold_ms = 0;
+  bool _rescan_needed = false;
 
   uint8_t _queue_len = 0;
   Datagram _queue[QUEUE_SIZE];

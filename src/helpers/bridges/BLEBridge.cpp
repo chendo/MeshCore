@@ -120,10 +120,16 @@ void BLEBridge::sendPacket(mesh::Packet *packet) {
   uint8_t *frame = _tx_frame;
   frame[0] = FRAME_VERSION;
 
-  /* Sender's clock, for the receiver's replay gate. Little-endian to match the
-     advert timestamp in the mesh protocol itself. */
+  /* Counts datagrams, not transmissions: all adv_rep copies of one datagram
+     carry the same number, so a receiver counting distinct sequence values
+     measures delivery while counting arrivals measures redundancy. */
+  uint16_t seq = _tx_seq++;
+  memcpy(&frame[VERSION_SIZE], &seq, SEQ_SIZE);
+
+  /* Sender's clock. Little-endian to match the advert timestamp in the mesh
+     protocol itself. Diagnostic only -- see the note in onFrameRecv. */
   uint32_t timestamp = _rtc->getCurrentTime();
-  memcpy(&frame[VERSION_SIZE], &timestamp, TIMESTAMP_SIZE);
+  memcpy(&frame[VERSION_SIZE + SEQ_SIZE], &timestamp, TIMESTAMP_SIZE);
   memcpy(&frame[HEADER_SIZE], _staging, packet_len);
 
   /* Tag covers version, timestamp and packet -- everything before it -- so no
@@ -164,23 +170,37 @@ uint8_t BLEBridge::numPeers() const {
 }
 
 bool BLEBridge::getPeer(uint8_t idx, uint8_t addr[6], int8_t &rssi, uint32_t &age_ms,
-                        uint32_t &frames, int32_t &skew_s) const {
-  uint8_t n = 0;
+                        uint32_t &frames, int32_t &skew_s,
+                        uint32_t &copies, uint32_t &lost) const {
+  uint8_t seen = 0;
   for (uint8_t i = 0; i < MAX_PEERS; i++) {
-    if (!_peers[i].in_use) continue;
-    if (n++ != idx) continue;
-    memcpy(addr, _peers[i].addr, 6);
-    rssi = _peers[i].last_rssi;
-    age_ms = (uint32_t)(millis() - _peers[i].last_seen);
-    frames = _peers[i].frames;
-    skew_s = (int32_t)(_peers[i].last_timestamp - _rtc->getCurrentTime());
+    const PeerStamp *p = &_peers[i];
+    if (!p->in_use) continue;
+    if (seen++ != idx) continue;
+    memcpy(addr, p->addr, 6);
+    rssi = p->last_rssi;
+    age_ms = (uint32_t)(millis() - p->last_seen);
+    frames = p->frames;
+    copies = p->copies;
+    lost = p->lost;
+    uint32_t ours = _rtc->getCurrentTime();
+    skew_s = (int32_t)(p->last_timestamp - ours);
     return true;
   }
   return false;
 }
 
+void BLEBridge::peerCountCopy(const uint8_t addr[6]) {
+  for (uint8_t i = 0; i < MAX_PEERS; i++) {
+    if (_peers[i].in_use && memcmp(_peers[i].addr, addr, 6) == 0) {
+      _peers[i].copies++;
+      return;
+    }
+  }
+}
+
 void BLEBridge::peerAccept(const uint8_t addr[6], uint32_t timestamp, const uint8_t *tag,
-                           int8_t rssi) {
+                           int8_t rssi, uint16_t seq) {
   unsigned long now = millis();
   PeerStamp *slot = nullptr, *victim = nullptr;
 
@@ -201,10 +221,28 @@ void BLEBridge::peerAccept(const uint8_t addr[6], uint32_t timestamp, const uint
     slot->in_use = true;
   }
 
+  /* Gap accounting, in uint16 arithmetic so the wrap at 65535 costs nothing.
+     A gap of 1 means consecutive; anything larger is that many datagrams we
+     never saw a single copy of. */
+  if (!slot->seq_valid) {
+    slot->seq_valid = true;                       // first frame: nothing to compare
+  } else {
+    uint16_t advance = (uint16_t)(seq - slot->last_seq);
+    if (advance == 0) {
+      // same datagram, different tag -- cannot happen via dedup, ignore
+    } else if (advance > SEQ_RESET_GAP) {
+      slot->seq_valid = true;                     // they restarted; do not blame the link
+    } else {
+      slot->lost += (uint32_t)(advance - 1);
+    }
+  }
+  slot->last_seq = seq;
+
   slot->last_timestamp = timestamp;
   slot->last_seen = now;
   slot->last_rssi = rssi;
   slot->frames++;
+  slot->copies++;
   memcpy(slot->last_tag, tag, TAG_SIZE);
 }
 
@@ -225,8 +263,10 @@ void BLEBridge::onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t a
     return;
   }
 
+  uint16_t seq;
+  memcpy(&seq, &payload[VERSION_SIZE], SEQ_SIZE);
   uint32_t timestamp;
-  memcpy(&timestamp, &payload[VERSION_SIZE], TIMESTAMP_SIZE);
+  memcpy(&timestamp, &payload[VERSION_SIZE + SEQ_SIZE], TIMESTAMP_SIZE);
 
   const uint8_t *tag = &payload[signed_len];
 
@@ -244,6 +284,10 @@ void BLEBridge::onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t a
      now purely a diagnostic (see getPeer's skew_s). */
   if (isDuplicate(addr, tag)) {
     _num_dup++;
+    /* A repeat of a frame this peer was already authenticated for, so counting
+       it cannot be driven by an unauthenticated sender. This is the numerator
+       of "how many of the adv_rep copies actually arrive". */
+    peerCountCopy(addr);
     return;
   }
 
@@ -259,7 +303,7 @@ void BLEBridge::onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t a
   }
 
   /* Authenticated: only now is it safe to move this sender's high-water mark. */
-  peerAccept(addr, timestamp, tag, rssi);
+  peerAccept(addr, timestamp, tag, rssi, seq);
   _num_rx_ok++;
 
 #if WITH_STATUS_LED

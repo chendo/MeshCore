@@ -230,6 +230,19 @@ void BleBroadcast::finishBurst() {
 void BleBroadcast::loop() {
   if (!_running) return;
 
+  /* adv_repeat changed, so the scan cycle derived from it has to follow.
+     Restart rather than reconfigure: the SoftDevice takes scan params only on a
+     fresh scan_start, and a continuation call must pass NULL.
+
+     This has to happen BEFORE the early returns below -- the queue is empty on
+     an idle node, which is exactly when someone retunes adv_rep, and behind
+     that return the scanner would keep the old cycle until traffic resumed. */
+  if (_rescan_needed) {
+    _rescan_needed = false;
+    sd_ble_gap_scan_stop();
+    armScan(true);
+  }
+
   unsigned long now = millis();
 
   if (s_scan_needs_rearm) {
@@ -301,8 +314,8 @@ bool BleBroadcast::armScan(bool first) {
     memset(&sp, 0, sizeof(sp));
     sp.extended = 1;                 // the whole point: 255-byte adverts
     sp.active = 0;                   // passive; we never want scan responses
-    sp.interval = SCAN_INTERVAL;
-    sp.window = SCAN_WINDOW;
+    sp.interval = scanIntervalUnits();
+    sp.window = scanWindowUnits();
     sp.timeout = BLE_GAP_SCAN_TIMEOUT_UNLIMITED;
     sp.scan_phys = BLE_GAP_PHY_1MBPS;
     sp.filter_policy = BLE_GAP_SCAN_FP_ACCEPT_ALL;

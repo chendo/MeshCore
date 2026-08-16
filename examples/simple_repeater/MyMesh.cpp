@@ -1177,14 +1177,27 @@ void MyMesh::formatBridgeReply(char *reply, const char* what) {
     for (uint8_t i = 0; i < n && o + 30 < (int)reply_size; i++) {
       uint8_t addr[6];
       int8_t rssi;
-      uint32_t age_ms, frames;
+      uint32_t age_ms, frames, copies, lost;
       int32_t skew_s;
-      if (!bridge.getPeer(i, addr, rssi, age_ms, frames, skew_s)) break;
+      if (!bridge.getPeer(i, addr, rssi, age_ms, frames, skew_s, copies, lost)) break;
+      /* loss  = datagrams of theirs we never saw a single copy of, from gaps in
+                their sequence. This is the number that says whether the link is
+                working.
+         x     = copies actually received per datagram delivered. Against
+                bridge.adv_rep it says whether the repeats are earning their
+                airtime: x near adv_rep means the redundancy is wasted, x near
+                1.0 means it is the only reason anything arrives.
+         Fixed point throughout -- printf on this platform has no float. */
+      uint32_t denom = frames + lost;
+      unsigned long loss_x10 = denom ? (unsigned long)((uint64_t)lost * 1000 / denom) : 0;
+      unsigned long cps_x100 = frames ? (unsigned long)((uint64_t)copies * 100 / frames) : 0;
       // BLE addresses are little-endian on the wire; the high 3 bytes are what
       // identifies a device at a glance.
-      o += snprintf(&reply[o], reply_size - o, " %02X%02X%02X/%ddB/%lupkt/%lus/skew%+lds",
+      o += snprintf(&reply[o], reply_size - o,
+                    " %02X%02X%02X/%ddB/%lupkt/%lus/skew%+lds/loss%lu.%lu%%/x%lu.%02lu",
                     addr[5], addr[4], addr[3], (int)rssi,
-                    (unsigned long)frames, (unsigned long)(age_ms / 1000), (long)skew_s);
+                    (unsigned long)frames, (unsigned long)(age_ms / 1000), (long)skew_s,
+                    loss_x10 / 10, loss_x10 % 10, cps_x100 / 100, cps_x100 % 100);
     }
     if (n == 0) snprintf(reply, reply_size, "no bridge peers heard yet");
     return;
