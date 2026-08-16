@@ -251,6 +251,12 @@ public:
      FreeRTOS run-time stats it costs one increment and needs no core patch. */
   uint32_t _loop_iters = 0, _loop_rate = 0;
   unsigned long _loop_rate_ms = 0;
+  /* Longest gap ever seen between two loop() entries. This is the number a
+     hardware watchdog timeout has to clear: the WDT on this part cannot be
+     stopped once started, so any legitimate blocking operation longer than the
+     timeout becomes a reset loop. Measuring the worst case beats auditing for
+     it -- filesystem writes, LoRa transmit and BLE work all block here. */
+  unsigned long _loop_gap_max_ms = 0, _loop_last_ms = 0;
 
 #if WITH_BLE_CLI
 private:

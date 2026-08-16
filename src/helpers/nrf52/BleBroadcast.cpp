@@ -305,16 +305,22 @@ void BleBroadcast::loop() {
      scanner has stopped and no error was reported -- the node still bridges
      outbound and looks healthy from its own telemetry. Restart the scan; if the
      stack is wedged harder than that, the next window escalates again. */
-  if (_ever_heard && (unsigned long)(millis() - _last_report_ms) > SILENCE_LIMIT_MS) {
+  if (_ever_heard
+      && Bluefruit.Periph.connected() == 0 && Bluefruit.Central.connected() == 0
+      && (unsigned long)(millis() - _last_report_ms) > SILENCE_LIMIT_MS) {
+    /* An open connection is proof the stack is alive, so silence while one is
+       up says nothing about the scanner and must not trigger a cycle -- it
+       would tear down a working CLI session or peer link to fix nothing. */
     _num_recoveries++;
     _last_report_ms = millis();          // one attempt per window, not per pass
-    sd_ble_gap_scan_stop();
-    if (!armScan(true)) {
-      /* Could not even reconfigure. Drop the transport; BLEBridge watches
-         isRunning() and calls begin() again, which is the last remedy short of
-         a reboot. */
-      _running = false;
-    }
+
+    /* Cycle the whole transport rather than just re-arming the scan. Whatever
+       leaves a scanner silent for five minutes without reporting an error is
+       not something a re-arm has any particular reason to clear, and by this
+       point the node has been deaf long enough that the cost of rebuilding is
+       irrelevant. BLEBridge watches isRunning() and calls begin() again. */
+    end();
+    _running = false;
   }
 
   unsigned long now = millis();

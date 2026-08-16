@@ -335,7 +335,7 @@ private:
 
      Gated on having HEARD something first, so a node genuinely alone in the RF
      spectrum is never reset for it. */
-  static const uint32_t SILENCE_LIMIT_MS = 120000;
+  static const uint32_t SILENCE_LIMIT_MS = 300000;
   unsigned long _last_report_ms = 0;
   bool _ever_heard = false;
   uint32_t _num_recoveries = 0;
