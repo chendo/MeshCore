@@ -105,6 +105,12 @@ public:
    */
   bool hasPendingWork() const { return _bursting || _queue_len > 0; }
 
+  /** Advertising events per datagram, and how long a datagram waits before its
+   *  burst starts. Both are applied to the NEXT burst, so changing them takes
+   *  effect without a restart. */
+  void setAdvRepeat(uint8_t evts) { _adv_repeat = (evts < 1) ? 1 : evts; }
+  void setTxHoldMs(uint16_t ms) { _tx_hold_ms = ms; }
+
   uint32_t numSent() const { return _num_sent; }
   uint32_t numRecv() const { return _num_recv; }
   uint32_t numTxDropped() const { return _num_tx_dropped; }
@@ -157,6 +163,7 @@ private:
 
   struct Datagram {
     uint8_t len;
+    unsigned long queued_ms;   // for the pre-burst hold
     uint8_t buf[MAX_PAYLOAD];
   };
 
@@ -192,6 +199,9 @@ private:
   /* Rolling accounting for the connectable-advert guarantee. */
   unsigned long _window_started_ms = 0;
   uint32_t _burst_ms_in_window = 0;
+
+  uint8_t _adv_repeat = MAX_ADV_EVTS;
+  uint16_t _tx_hold_ms = 0;
 
   uint8_t _queue_len = 0;
   Datagram _queue[QUEUE_SIZE];

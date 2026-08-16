@@ -57,6 +57,18 @@ public:
   uint8_t bridge_enabled = 0; // boolean
   uint16_t bridge_delay = 0;  // milliseconds (default 500 ms)
   uint8_t bridge_pkt_src = 0; // 0 = logTx, 1 = logRx (default logTx)
+  /* How many advertising events each bridged datagram is repeated over. The
+     transport is unacknowledged, so this is the only redundancy there is: a
+     scanner at less than 100% duty cycle misses whole datagrams otherwise.
+     More repeats cost radio time and current linearly. */
+  uint8_t bridge_adv_repeat = 3;
+  /* Milliseconds to hold a datagram before broadcasting it on BLE. The bridge
+     is fed from the LoRa receive hook, so without this the BLE burst starts in
+     the moment the LoRa radio has just been active -- and on a 1W node the two
+     radios share one supply. Staggering them trades a little latency for not
+     asking the regulator for both at once. 0 = send as soon as the arbiter
+     allows, which is the behaviour before this existed. */
+  uint16_t bridge_ble_hold = 0;
   uint32_t bridge_baud = 0;   // 9600, 19200, 38400, 57600, 115200 (default 115200)
   uint8_t bridge_channel = 0; // 1-14 (ESP-NOW only)
   char bridge_secret[16]; // for XOR encryption of bridge packets (ESP-NOW only)
@@ -112,6 +124,8 @@ private:
       def("en", _parent->bridge_enabled); // boolean
       def("delay", _parent->bridge_delay);  // milliseconds (default 500 ms)
       def("src", _parent->bridge_pkt_src); // 0 = logTx, 1 = logRx (default logTx)
+      def("adv_rep", _parent->bridge_adv_repeat); // advertising events per datagram
+      def("ble_hold", _parent->bridge_ble_hold);  // ms to hold before a BLE burst
       def("baud", _parent->bridge_baud);   // 9600, 19200, 38400, 57600, 115200 (default 115200)
       def("ch", _parent->bridge_channel); // 1-14 (ESP-NOW only)
       def("secret", _parent->bridge_secret, sizeof(_parent->bridge_secret)); // for XOR encryption of bridge packets (ESP-NOW only)

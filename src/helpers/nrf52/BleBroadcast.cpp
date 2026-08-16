@@ -148,7 +148,7 @@ uint32_t BleBroadcast::configureAdvSet(const uint8_t* payload, uint8_t len) {
   adv_params.p_peer_addr = NULL;
   adv_params.interval = ADV_INTERVAL;
   adv_params.duration = 0;                 // bounded by max_adv_evts instead
-  adv_params.max_adv_evts = MAX_ADV_EVTS;
+  adv_params.max_adv_evts = _adv_repeat;
   adv_params.filter_policy = BLE_GAP_ADV_FP_ANY;
   adv_params.primary_phy = BLE_GAP_PHY_1MBPS;
   adv_params.secondary_phy = BLE_GAP_PHY_1MBPS;
@@ -168,6 +168,7 @@ bool BleBroadcast::send(const uint8_t* payload, uint8_t len) {
   }
 
   Datagram& d = _queue[_queue_len++];
+  d.queued_ms = millis();
   d.len = len;
   memcpy(d.buf, payload, len);
   return true;
@@ -276,6 +277,12 @@ void BleBroadcast::loop() {
     }
     return;
   }
+
+  /* Hold the datagram back if asked to. Checked here rather than in send() so
+     the wait runs against the arbiter's clock and a queued datagram still
+     yields to the connectable-advert reservation above. */
+  if (_tx_hold_ms != 0
+      && (unsigned long)(millis() - _queue[0].queued_ms) < _tx_hold_ms) return;
 
   if (startBurst(_queue[0])) {
     shiftQueueLeft();
