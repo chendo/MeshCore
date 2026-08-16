@@ -58,9 +58,26 @@ public:
   uint16_t bridge_delay = 0;  // milliseconds (default 500 ms)
   uint8_t bridge_pkt_src = 0; // 0 = logTx, 1 = logRx (default logTx)
   /* How many advertising events each bridged datagram is repeated over. The
-     transport is unacknowledged, so this is the only redundancy there is: a
-     scanner at less than 100% duty cycle misses whole datagrams otherwise.
-     More repeats cost radio time and current linearly. */
+     transport is unacknowledged, so this is the only redundancy there is.
+
+     Measured on a two-node link with sequence-gap accounting, each leg run to
+     convergence with a BLE central connected (which depresses scanning, so
+     these are the pessimistic end):
+
+         adv_rep    datagram loss    copies received per datagram
+            1           48.9%                 1.00
+            3            9.8%                 1.41
+            5            3.4%                 2.35
+
+     A single advert therefore lands about 51% of the time, and loss tracks
+     0.489^n closely enough across a 14x range to be predictive rather than
+     merely descriptive. Each extra copy roughly halves loss; the cost is
+     20ms of advertising per copy, against a ceiling of ~8 datagrams/s at 5
+     repeats -- far above what a repeater actually bridges.
+
+     Default stays at 3, which is what this was before it became tunable. Raise
+     it where the link matters more than the airtime; p is site-specific, so
+     measure with "bridge peers" rather than assuming these numbers. */
   uint8_t bridge_adv_repeat = 3;
   /* Milliseconds to hold a datagram before broadcasting it on BLE. The bridge
      is fed from the LoRa receive hook, so without this the BLE burst starts in
