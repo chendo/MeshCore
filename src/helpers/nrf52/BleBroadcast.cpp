@@ -309,11 +309,16 @@ void BleBroadcast::loop() {
      outbound and looks healthy from its own telemetry. Restart the scan; if the
      stack is wedged harder than that, the next window escalates again. */
   if (_ever_heard
-      && Bluefruit.Periph.connected() == 0 && Bluefruit.Central.connected() == 0
       && (unsigned long)(millis() - _last_report_ms) > SILENCE_LIMIT_MS) {
-    /* An open connection is proof the stack is alive, so silence while one is
-       up says nothing about the scanner and must not trigger a cycle -- it
-       would tear down a working CLI session or peer link to fix nothing. */
+    /* Deliberately NOT gated on having no connections. That gate seemed prudent
+       and was actively harmful: a peer link is a permanent central connection,
+       so once bridging worked the check could never fire again and a dead
+       scanner became unrecoverable -- which is exactly what happened here,
+       reports frozen at 2879 while the link happily carried frames.
+
+       A connection proves the STACK is alive. It says nothing about whether the
+       scanner is, which is the only thing this check is about. Cycling does not
+       drop connections either: end() stops scanning and bursts, not links. */
     _num_recoveries++;
     _last_report_ms = millis();          // one attempt per window, not per pass
 
@@ -330,7 +335,13 @@ void BleBroadcast::loop() {
 
   if (s_scan_needs_rearm) {
     s_scan_needs_rearm = false;
-    if (!armScan(false)) s_scan_needs_rearm = true;   // try again next loop
+    /* Escalate rather than retry the same call forever. armScan(false) is the
+       CONTINUE form -- scan_start(NULL, buffer) -- which is only valid while the
+       scanner is paused holding our buffer. Once anything actually stops it,
+       and both end() and the liveness cycle do, the continue form can never
+       succeed again: retrying it leaves the node permanently deaf while looking
+       busy. A full restart with parameters is the only thing that recovers. */
+    if (!armScan(false) && !armScan(true)) s_scan_needs_rearm = true;
   }
 
   if (_bursting) {
