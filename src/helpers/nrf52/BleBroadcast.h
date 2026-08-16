@@ -194,7 +194,9 @@ public:
    *  check actually tests, exposed so a spurious recovery can be diagnosed
    *  rather than inferred. */
   uint32_t silenceMs() const {
-    return _ever_heard ? (uint32_t)(millis() - _last_report_ms) : 0;
+    if (!_ever_heard) return 0;
+    long since = (long)(millis() - _last_report_ms);
+    return since > 0 ? (uint32_t)since : 0;    // may be briefly negative; see loop()
   }
   /** Times the SoftDevice refused to start the connectable advert. */
   uint32_t numAdvFailures() const { return _num_adv_fail; }

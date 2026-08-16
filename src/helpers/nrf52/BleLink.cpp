@@ -109,7 +109,11 @@ void BleLink::loop() {
   for (uint8_t i = 0; i < MAX_LINKS; i++) {
     Link& l = _links[i];
     if (l.state != UP || l.last_rx_ms == 0) continue;
-    if ((unsigned long)(now - l.last_rx_ms) < LINK_IDLE_LIMIT_MS) continue;
+    /* Signed, for the same reason as the scanner's silence check: last_rx_ms is
+       written from BLE event context and can land just ahead of the millis()
+       this loop captured, which unsigned would read as a very old link and
+       disconnect a perfectly healthy one. */
+    if ((long)(now - l.last_rx_ms) < (long)LINK_IDLE_LIMIT_MS) continue;
     BLEConnection* c = Bluefruit.Connection(l.conn);
     if (c != nullptr) c->disconnect();
     l.drops++;

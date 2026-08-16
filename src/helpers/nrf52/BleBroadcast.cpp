@@ -307,8 +307,16 @@ void BleBroadcast::loop() {
      stack is wedged harder than that, the next window escalates again. */
   uint32_t up_s = millis() / 1000;
   bool busy_environment = (up_s > 30) && (_report_count / (up_s ? up_s : 1) >= SILENCE_MIN_RATE_HZ);
+  /* SIGNED difference. _last_report_ms is written by the BLE task, and the loop
+     reads millis() before reading it -- so the task can update it in between,
+     leaving it fractionally AHEAD of the captured millis(). Unsigned, that
+     underflows to about four billion and sails past any threshold; at 142
+     reports a second against 17,000 loop passes, the window was hit roughly six
+     times a minute, which is exactly the spurious recovery rate observed.
+     Signed, the same case is simply a small negative number. This is the idiom
+     used elsewhere in this file for precisely that reason. */
   if (_ever_heard && busy_environment
-      && (unsigned long)(millis() - _last_report_ms) > SILENCE_LIMIT_MS) {
+      && (long)(millis() - _last_report_ms) > (long)SILENCE_LIMIT_MS) {
     /* Deliberately NOT gated on having no connections. That gate seemed prudent
        and was actively harmful: a peer link is a permanent central connection,
        so once bridging worked the check could never fire again and a dead
