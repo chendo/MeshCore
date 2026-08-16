@@ -104,6 +104,17 @@ void BLEBridge::loop() {
     _bcast.setWhitelist(wl, n);
   }
 
+  /* Timed rather than "when idle": a node that bridges occasionally would
+     otherwise still go long enough between datagrams for a peer to age out. */
+  if (_transport_up) {
+    unsigned long now = millis();
+    if (_next_hb_ms == 0) _next_hb_ms = now + HEARTBEAT_MS;
+    else if ((long)(now - _next_hb_ms) >= 0) {
+      _next_hb_ms = now + HEARTBEAT_MS;
+      sendHeartbeat();
+    }
+  }
+
   _bcast.loop();
 }
 
@@ -112,6 +123,21 @@ void BLEBridge::computeTag(const uint8_t *frame, size_t len, uint8_t tag[TAG_SIZ
   sha.resetHMAC(_key, KEY_SIZE);
   sha.update(frame, len);
   sha.finalizeHMAC(_key, KEY_SIZE, tag, TAG_SIZE);
+}
+
+void BLEBridge::sendHeartbeat() {
+  uint8_t *frame = _tx_frame;
+  frame[0] = FRAME_HEARTBEAT;
+
+  /* Shares the datagram counter with real traffic, so sequence gaps measure
+     the link continuously instead of only while something is being bridged. */
+  uint16_t seq = _tx_seq++;
+  memcpy(&frame[VERSION_SIZE], &seq, SEQ_SIZE);
+  uint32_t timestamp = _rtc->getCurrentTime();
+  memcpy(&frame[VERSION_SIZE + SEQ_SIZE], &timestamp, TIMESTAMP_SIZE);
+
+  computeTag(frame, HEADER_SIZE, &frame[HEADER_SIZE]);
+  _bcast.send(frame, (uint8_t)(HEADER_SIZE + TAG_SIZE));
 }
 
 void BLEBridge::sendPacket(mesh::Packet *packet) {
@@ -274,7 +300,11 @@ void BLEBridge::onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t a
      impossibly large. 0xFFFF is the SIG's shared development company ID, so
      other people's beacons legitimately arrive here and must be counted, or the
      telemetry stops adding up. */
-  if (len < HEADER_SIZE + TAG_SIZE + 1 || payload[0] != FRAME_VERSION) {
+  const bool is_hb = (payload[0] == FRAME_HEARTBEAT);
+  /* A heartbeat carries no packet, so it is one byte shorter than the minimum
+     a data frame may be. */
+  if ((payload[0] != FRAME_VERSION && !is_hb) ||
+      len < HEADER_SIZE + TAG_SIZE + (is_hb ? 0 : 1)) {
     _num_foreign++;
     return;
   }
@@ -327,6 +357,16 @@ void BLEBridge::onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t a
 
   /* Authenticated: only now is it safe to move this sender's high-water mark. */
   peerAccept(addr, addr_type, timestamp, tag, rssi, seq);
+
+  if (is_hb) {
+    /* Everything a heartbeat exists for has now happened: the peer is known,
+       its address is learnable for a future connection, and the sequence gap
+       accounting has advanced. There is no packet to hand upward. */
+    _num_hb_rx++;
+    BRIDGE_DEBUG_PRINTLN("BLE: heartbeat from peer, rssi=%d\n", (int)rssi);
+    return;
+  }
+
   _num_rx_ok++;
 
 #if WITH_STATUS_LED

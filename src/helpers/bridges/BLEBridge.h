@@ -55,6 +55,24 @@ public:
      timestamp and acting on nonsense. Mixed-version pairs stop bridging until
      both are flashed, which is the honest failure. */
   static const uint8_t FRAME_VERSION = 0x02;
+  /* A frame carrying no packet, sent on a timer so a node that has nothing to
+     bridge is still discoverable.
+
+     Not decoration: discovery currently depends on having traffic, and on a
+     cross-band bridge the quiet side is exactly the side that has none. Live
+     example -- the Mid repeater had transmitted ONE datagram since boot because
+     its band was silent, so the Narrow repeater had never heard it existed and
+     reported "no bridge peers heard yet" while happily being heard itself. A
+     peer address that is never learned also means a connection can never be
+     dialled, so this is a prerequisite for connection-oriented bridging, not
+     just a monitoring aid.
+
+     Its own frame type rather than an empty data frame, so a receiver does not
+     allocate a packet buffer only to fail parsing it. A node that predates this
+     sees an unknown version and counts it as foreign, which is the right
+     degradation. */
+  static const uint8_t FRAME_HEARTBEAT = 0x03;
+  static const uint32_t HEARTBEAT_MS = 15000;
 
   static const size_t VERSION_SIZE = 1;
   /* Per-sender datagram counter, so a receiver can tell a lost datagram from a
@@ -111,6 +129,7 @@ public:
   uint32_t reportCount() const { return _bcast.reportCount(); }
   int8_t meanReportRssi() const { return _bcast.meanReportRssi(); }
 
+  uint32_t numHeartbeatsRx() const { return _num_hb_rx; }
   uint32_t numRxOk() const { return _num_rx_ok; }
   uint32_t numDup() const { return _num_dup; }
   uint32_t numBadTag() const { return _num_bad_tag; }
@@ -145,6 +164,9 @@ private:
   static const uint16_t SEQ_RESET_GAP = 1000;
 
   uint16_t _tx_seq = 0;
+  unsigned long _next_hb_ms = 0;
+  uint32_t _num_hb_rx = 0;
+  void sendHeartbeat();
 
   static const uint16_t COMPANY_ID = 0xFFFF;
 

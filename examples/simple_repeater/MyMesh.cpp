@@ -1234,11 +1234,12 @@ void MyMesh::formatBridgeReply(char *reply, const char* what) {
   // Say so rather than let a green-looking line imply otherwise.
   const bool default_secret = (strcmp(_prefs.bridge_secret, "LVSITANOS") == 0);
   snprintf(reply, reply_size,
-           "ble bridge %s%s: tx %lu drop %lu | rx seen %lu ok %lu dup %lu bad %lu other %lu | peers %d",
+           "ble bridge %s%s: tx %lu drop %lu | rx seen %lu ok %lu hb %lu dup %lu bad %lu other %lu | peers %d",
            bridge.isTransportUp() ? "up" : (bridge.isRunning() ? "starting" : "off"),
            default_secret ? " [DEFAULT SECRET - anyone can inject]" : "",
            (unsigned long)bridge.numSent(), (unsigned long)bridge.numTxDropped(),
            (unsigned long)bridge.numSeen(), (unsigned long)bridge.numRxOk(),
+           (unsigned long)bridge.numHeartbeatsRx(),
            (unsigned long)bridge.numDup(), (unsigned long)bridge.numBadTag(),
            (unsigned long)bridge.numForeign(), (int)bridge.numPeers());
 }
