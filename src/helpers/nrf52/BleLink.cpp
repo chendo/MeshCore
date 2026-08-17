@@ -122,6 +122,30 @@ void BleLink::loop() {
     l.last_rx_ms = 0;
   }
 
+  /* Prove group membership, or lose the slot.
+     Connecting says nothing about belonging to our bridge: BleLink dials on
+     discovery and address tie-break, and the group tag is only checked per
+     frame afterwards. So a node with a DIFFERENT secret connects perfectly
+     happily, occupies a central slot, and has every frame discarded -- an
+     expensive way to achieve nothing, and invisible without the split bad-tag
+     counter. A correctly-keyed peer authenticates within one heartbeat
+     interval; anything that has not by now is not ours. */
+  for (uint8_t i = 0; i < MAX_LINKS; i++) {
+    Link& l = _links[i];
+    if (l.state != UP || l.authed || l.up_ms == 0) continue;
+    if ((long)(now - l.up_ms) < (long)AUTH_GRACE_MS) continue;
+    BLEConnection* c = Bluefruit.Connection(l.conn);
+    if (c != nullptr) c->disconnect();
+    l.unauthed_drops++;
+    l.state = IDLE;
+    l.conn = BLE_CONN_HANDLE_INVALID;
+    l.last_rx_ms = 0;
+    /* Back off hard rather than redialling immediately: a peer that cannot
+       authenticate now will not authenticate in two seconds either. */
+    l.backoff_ms = BACKOFF_MAX_MS;
+    l.next_try_ms = now + l.backoff_ms;
+  }
+
   for (uint8_t i = 0; i < MAX_LINKS; i++) {
     Link& l = _links[i];
     if (l.state != IDLE) continue;
@@ -163,11 +187,13 @@ void BleLink::onConnected(uint16_t conn) {
 
     l.conn = conn;
     l.state = DISCOVERING;
-    l.rx_expect = l.rx_have = 0;
+    l.rx_expect = l.rx_have = 0; l.rx_hdr_have = 0;
 
     if (s_clt[i].discover(conn) && s_cchr[i].discover() && s_cchr[i].enableNotify()) {
       l.state = UP;
       l.last_rx_ms = millis();               // grace period before the idle check
+      l.up_ms = millis();                    // start of the authentication window
+      l.authed = false;                      // GATT discovery proves protocol, not group
       l.backoff_ms = BACKOFF_MIN_MS;         // a link that worked starts fresh
     } else {
       /* Connected to something that is not a bridge peer, or discovery failed.
@@ -188,32 +214,72 @@ void BleLink::onDisconnected(uint16_t conn, uint8_t reason) {
   _topology_changed = true;
   l.state = IDLE;
   l.conn = BLE_CONN_HANDLE_INVALID;
-  l.rx_expect = l.rx_have = 0;
+  l.rx_expect = l.rx_have = 0; l.rx_hdr_have = 0;
   (void)reason;                              // surfaced through getLink's counters
 }
 
-/* Length-prefixed reassembly. The link is reliable and ordered, so a two-byte
-   header and a running count is all the framing needed -- no sequence numbers,
-   no gap handling, no timeouts. */
-void BleLink::feed(Link& l, uint8_t idx, const uint8_t* data, uint16_t len) {
-  while (len > 0) {
-    if (l.rx_expect == 0) {
-      if (len < 2) return;                   // a header never splits in practice
-      l.rx_expect = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
-      data += 2; len -= 2;
-      l.rx_have = 0;
-      if (l.rx_expect == 0 || l.rx_expect > MAX_FRAME) { l.rx_expect = 0; return; }
-    }
-    uint16_t want = l.rx_expect - l.rx_have;
-    uint16_t take = len < want ? len : want;
-    memcpy(&l.rx_buf[l.rx_have], data, take);
-    l.rx_have += take; data += take; len -= take;
+void BleLink::markAuthed(uint8_t idx) {
+  if (idx == NO_LINK) { _in_authed = true; return; }
+  if (idx < MAX_LINKS) _links[idx].authed = true;
+}
 
-    if (l.rx_have == l.rx_expect) {
-      l.recv++;
-      l.last_rx_ms = millis();
-      if (_handler) _handler(l.rx_buf, l.rx_expect, idx);
-      l.rx_expect = l.rx_have = 0;
+void BleLink::feed(Link& l, uint8_t idx, const uint8_t* data, uint16_t len) {
+  reassemble(l.rx_hdr, l.rx_hdr_have, l.rx_expect, l.rx_have, l.rx_buf,
+             l.rx_started_ms, l.rx_resyncs, l.recv, l.last_rx_ms, idx, data, len);
+}
+
+/* SYNC-marked, length-prefixed reassembly, resynchronising and self-limiting.
+   One implementation for both directions: the outward links and the inbound
+   peer previously had separate copies of this loop, and therefore separate
+   copies of the same bug. */
+void BleLink::reassemble(uint8_t* hdr, uint8_t& hdr_have,
+                         uint16_t& expect, uint16_t& have, uint8_t* buf,
+                         unsigned long& started_ms, uint32_t& resyncs,
+                         uint32_t& recv, unsigned long& last_rx_ms,
+                         uint8_t idx, const uint8_t* data, uint16_t len) {
+  /* Abandon a frame that stopped arriving. writeFragmented() gives up when a
+     chunk write fails, having already sent the header, so without this we wait
+     forever for a tail that is never coming -- and consume the NEXT frame as
+     that tail. Signed comparison, as everywhere else in this file. */
+  if ((hdr_have != 0 || expect != 0)
+      && (long)(millis() - started_ms) > (long)RX_STALE_MS) {
+    hdr_have = 0; expect = 0; have = 0; resyncs++;
+  }
+
+  while (len > 0) {
+    if (expect == 0) {
+      /* Collect the header a byte at a time, hunting for SYNC. Byte-wise
+         because a header can straddle two writes -- the old code returned with
+         fewer than two bytes left and silently dropped them. Hunting because
+         after a truncated frame the stream is misaligned, and the marker is the
+         only way back to a frame boundary. */
+      while (len > 0 && hdr_have < HDR_SIZE) {
+        uint8_t b = *data++; len--;
+        if (hdr_have == 0 && b != FRAME_SYNC) { resyncs++; continue; }
+        hdr[hdr_have++] = b;
+      }
+      if (hdr_have < HDR_SIZE) { started_ms = millis(); return; }   // resume on the next write
+
+      expect = (uint16_t)hdr[1] | ((uint16_t)hdr[2] << 8);
+      hdr_have = 0;
+      have = 0;
+      started_ms = millis();
+      if (expect == 0 || expect > MAX_FRAME) {   // a SYNC that was really payload
+        expect = 0; resyncs++;
+        continue;
+      }
+    }
+
+    uint16_t want = expect - have;
+    uint16_t take = len < want ? len : want;
+    memcpy(&buf[have], data, take);
+    have += take; data += take; len -= take;
+
+    if (have == expect) {
+      recv++;
+      last_rx_ms = millis();
+      if (_handler) _handler(buf, expect, idx);
+      expect = 0; have = 0;
     }
   }
 }
@@ -225,38 +291,65 @@ void BleLink::onNotify(uint8_t idx, const uint8_t* data, uint16_t len) {
 void BleLink::onWritten(uint16_t conn, const uint8_t* data, uint16_t len) {
   /* A peer dialled US. Reassembled separately from the outward links: it has no
      Link slot, because we did not choose it and cannot dial it back. */
-  if (_in_conn != conn) { _in_conn = conn; _in_expect = _in_have = 0; }
-  while (len > 0) {
-    if (_in_expect == 0) {
-      if (len < 2) return;
-      _in_expect = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
-      data += 2; len -= 2; _in_have = 0;
-      if (_in_expect == 0 || _in_expect > MAX_FRAME) { _in_expect = 0; return; }
-    }
-    uint16_t want = _in_expect - _in_have;
-    uint16_t take = len < want ? len : want;
-    memcpy(&_in_buf[_in_have], data, take);
-    _in_have += take; data += take; len -= take;
-    if (_in_have == _in_expect) {
-      _in_recv++;
-      if (_handler) _handler(_in_buf, _in_expect, NO_LINK);
-      _in_expect = _in_have = 0;
-    }
+  if (_in_conn != conn) {
+    _in_conn = conn;
+    _in_expect = _in_have = 0; _in_hdr_have = 0;
   }
+  static unsigned long s_in_last_rx_ms = 0;    // unused here; the peer link has no idle timer
+  reassemble(_in_hdr, _in_hdr_have, _in_expect, _in_have, _in_buf,
+             _in_started_ms, _in_resyncs, _in_recv, s_in_last_rx_ms, NO_LINK, data, len);
+}
+
+/* One chunk, waiting for TX credit rather than giving up on it.
+
+   Write-without-response consumes a SoftDevice TX buffer per packet, and
+   BLEClientCharacteristic::write() simply breaks out and returns 0 when none is
+   free ("if (!conn->getWriteCmdPacket()) break;"). writeFragmented pushes
+   ceil(len/20) packets back to back with no flow control, so anything bigger
+   than a few credits ran the pool dry mid-frame -- and the old code treated
+   that as fatal and abandoned the frame with its header already on the wire.
+   The receiver was then left holding a partial frame, consumed the next frame
+   as its missing tail, and handed the bridge a spliced packet that failed its
+   HMAC. That is the entire 34% link loss: heartbeats fit in one credit and
+   always arrived, multi-packet mesh frames did not.
+
+   Credits are returned as connection events complete, so the wait is bounded by
+   the connection interval (20-30ms here), not by anything unbounded. */
+bool BleLink::writeChunk(uint8_t idx, const uint8_t* p, uint16_t n) {
+  for (uint8_t attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
+    if (s_cchr[idx].write(p, n) == n) return true;
+    delay(2);                      // let a connection event hand credits back
+  }
+  return false;
+}
+
+bool BleLink::notifyChunk(const uint8_t* p, uint16_t n) {
+  for (uint8_t attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
+    if (s_chr.notify(p, n)) return true;
+    delay(2);
+  }
+  return false;
 }
 
 bool BleLink::writeFragmented(uint8_t idx, const uint8_t* data, uint16_t len) {
-  uint8_t hdr[2] = { (uint8_t)(len & 0xFF), (uint8_t)(len >> 8) };
   uint8_t first[CHUNK];
-  memcpy(first, hdr, 2);
-  uint16_t n = (uint16_t)(len < CHUNK - 2 ? len : CHUNK - 2);
-  memcpy(&first[2], data, n);
-  if (s_cchr[idx].write(first, (uint16_t)(n + 2)) == 0) return false;
+  first[0] = FRAME_SYNC;
+  first[1] = (uint8_t)(len & 0xFF);
+  first[2] = (uint8_t)(len >> 8);
+  uint16_t n = (uint16_t)(len < CHUNK - HDR_SIZE ? len : CHUNK - HDR_SIZE);
+  memcpy(&first[HDR_SIZE], data, n);
+  if (!writeChunk(idx, first, (uint16_t)(n + HDR_SIZE))) { _tx_abandoned++; return false; }
 
   uint16_t off = n;
   while (off < len) {
     uint16_t take = (uint16_t)((len - off) < CHUNK ? (len - off) : CHUNK);
-    if (s_cchr[idx].write(&data[off], take) == 0) return false;
+    if (!writeChunk(idx, &data[off], take)) {
+      /* Still possible after all the retries. Counted, because a frame
+         abandoned here is the one thing that can desynchronise the peer -- and
+         the SYNC marker means it now costs one frame instead of the stream. */
+      _tx_abandoned++;
+      return false;
+    }
     off += take;
   }
   return true;
@@ -279,17 +372,23 @@ uint8_t BleLink::send(const uint8_t* data, uint16_t len, uint8_t except) {
      since on that link the roles are the other way round. */
   if (_in_conn != BLE_CONN_HANDLE_INVALID && except != NO_LINK - 1) {
     uint8_t hdr[CHUNK];
-    hdr[0] = (uint8_t)(len & 0xFF); hdr[1] = (uint8_t)(len >> 8);
-    uint16_t f = (uint16_t)(len < CHUNK - 2 ? len : CHUNK - 2);
-    memcpy(&hdr[2], data, f);
-    if (s_chr.notify(hdr, (uint16_t)(f + 2))) {
+    hdr[0] = FRAME_SYNC;
+    hdr[1] = (uint8_t)(len & 0xFF); hdr[2] = (uint8_t)(len >> 8);
+    uint16_t f = (uint16_t)(len < CHUNK - HDR_SIZE ? len : CHUNK - HDR_SIZE);
+    memcpy(&hdr[HDR_SIZE], data, f);
+    /* Same credit exhaustion as the client path -- notifications draw on the
+       same TX pool, and the old code simply broke out of the loop mid-frame. */
+    if (notifyChunk(hdr, (uint16_t)(f + HDR_SIZE))) {
       uint16_t off = f;
+      bool ok = true;
       while (off < len) {
         uint16_t take = (uint16_t)((len - off) < CHUNK ? (len - off) : CHUNK);
-        if (!s_chr.notify(&data[off], take)) break;
+        if (!notifyChunk(&data[off], take)) { ok = false; break; }
         off += take;
       }
-      n++;
+      if (ok) n++; else _tx_abandoned++;
+    } else {
+      _tx_abandoned++;
     }
   }
   return n;

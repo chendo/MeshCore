@@ -74,6 +74,11 @@ public:
     bool c = _topology_changed; _topology_changed = false; return c;
   }
 
+  /** Called by the bridge when a frame from this link passes the group tag --
+   *  the only proof that the peer belongs to our bridge. NO_LINK refers to the
+   *  inbound peer. */
+  void markAuthed(uint8_t idx);
+
   uint8_t numUp() const;
   bool getLink(uint8_t idx, ble_gap_addr_t& addr, bool& up, int8_t& rssi,
                uint32_t& sent, uint32_t& recv, uint32_t& drops) const;
@@ -107,7 +112,45 @@ private:
     uint16_t rx_expect;
     uint16_t rx_have;
     uint8_t rx_buf[MAX_FRAME];
+    /* Header bytes collected so far. A header CAN straddle two writes, and the
+       old code simply returned when fewer than two bytes remained, discarding
+       them and starting the next write mid-header. */
+    uint8_t rx_hdr[3];
+    uint8_t rx_hdr_have;
+    /* Group membership, proven by one frame passing the bridge's tag check.
+       Set via markAuthed() from BLEBridge, which owns the key. */
+    bool authed;
+    unsigned long up_ms;
+    uint32_t unauthed_drops;
+    /* When the frame in progress started, for the staleness timeout. */
+    unsigned long rx_started_ms;
+    uint32_t rx_resyncs;
   };
+
+  /* Framing: [SYNC][len lo][len hi].
+     The sync byte exists because the original assumption -- "the link is
+     reliable and ordered, so a length prefix is all the framing needed, no gap
+     handling, no timeouts" -- fails in the one case that matters.
+     writeFragmented() abandons a frame if any chunk write fails, having ALREADY
+     sent the header and part of the payload, and the receiver has no way to
+     know. Without a marker the next frame is appended into the abandoned one
+     and the stream desynchronises permanently: every later frame reassembles
+     across a boundary, still looks well-formed, and fails its HMAC. That is
+     precisely what the split bad-tag counter caught -- 0 on broadcast, climbing
+     steadily on the link.
+     With a marker the receiver hunts for the next SYNC and recovers on the very
+     next frame. */
+  static const uint8_t  FRAME_SYNC = 0xA5;
+  static const uint8_t  HDR_SIZE = 3;
+  /* A frame that stops arriving is abandoned rather than waiting forever for
+     bytes that will never come. Generous: it only has to exceed the gap between
+     frames, not meet any transmission deadline. */
+  static const uint32_t RX_STALE_MS = 3000;
+
+  /* How long a link may stay up without a single frame passing the group tag.
+     Comfortably longer than the 15s heartbeat, so an ordinary peer is never at
+     risk; short enough that a foreign one is not squatting on a slot. */
+  static const uint32_t AUTH_GRACE_MS = 45000;
 
   static const uint32_t LINK_IDLE_LIMIT_MS = 60000;
   static const uint16_t BACKOFF_MIN_MS = 2000;
@@ -118,8 +161,19 @@ private:
   void onNotify(uint8_t idx, const uint8_t* data, uint16_t len);
   void onWritten(uint16_t conn, const uint8_t* data, uint16_t len);
   void feed(Link& l, uint8_t idx, const uint8_t* data, uint16_t len);
+  /* Shared by the outward links and the inbound peer -- see the .cpp. */
+  void reassemble(uint8_t* hdr, uint8_t& hdr_have,
+                  uint16_t& expect, uint16_t& have, uint8_t* buf,
+                  unsigned long& started_ms, uint32_t& resyncs,
+                  uint32_t& recv, unsigned long& last_rx_ms,
+                  uint8_t idx, const uint8_t* data, uint16_t len);
   int findByConn(uint16_t conn) const;
   bool writeFragmented(uint8_t idx, const uint8_t* data, uint16_t len);
+  bool writeChunk(uint8_t idx, const uint8_t* p, uint16_t n);
+  bool notifyChunk(const uint8_t* p, uint16_t n);
+  /* Retries per chunk while the SoftDevice has no TX credit. 20 x 2ms covers
+     roughly two connection intervals, which is when credits come back. */
+  static const uint8_t WRITE_ATTEMPTS = 20;
 
   static void connect_cb(uint16_t conn);
   static void disconnect_cb(uint16_t conn, uint8_t reason);
@@ -138,5 +192,14 @@ private:
   uint16_t _in_conn = BLE_CONN_HANDLE_INVALID;
   uint16_t _in_expect = 0, _in_have = 0;
   uint8_t _in_buf[MAX_FRAME];
+  uint8_t _in_hdr[3];
+  uint8_t _in_hdr_have = 0;
+  bool _in_authed = false;
+  /* Frames given up on mid-transmission after exhausting the retries. Each one
+     can desynchronise the peer for a single frame; sustained counts mean the
+     credit pressure is worse than the retry budget can absorb. */
+  uint32_t _tx_abandoned = 0;
+  unsigned long _in_started_ms = 0;
+  uint32_t _in_resyncs = 0;
   uint32_t _in_recv = 0;
 };
