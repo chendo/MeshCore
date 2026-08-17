@@ -162,6 +162,13 @@ void BleLink::loop() {
     l.next_try_ms = now + l.backoff_ms;
   }
 
+  /* Push queued frames out as credits allow. Nothing blocks: whatever the
+     SoftDevice will not take now resumes on the next pass. */
+  for (uint8_t i = 0; i < MAX_LINKS; i++) {
+    if (_links[i].state == UP) drain(_links[i], i);
+  }
+  drainInbound();
+
   for (uint8_t i = 0; i < MAX_LINKS; i++) {
     Link& l = _links[i];
     if (l.state != IDLE) continue;
@@ -253,10 +260,10 @@ void BleLink::reassemble(uint8_t* hdr, uint8_t& hdr_have,
                          unsigned long& started_ms, uint32_t& resyncs,
                          uint32_t& recv, unsigned long& last_rx_ms,
                          uint8_t idx, const uint8_t* data, uint16_t len) {
-  /* Abandon a frame that stopped arriving. writeFragmented() gives up when a
-     chunk write fails, having already sent the header, so without this we wait
-     forever for a tail that is never coming -- and consume the NEXT frame as
-     that tail. Signed comparison, as everywhere else in this file. */
+  /* Abandon a frame that stopped arriving. A sender can still stop mid-frame --
+     a link that drops between chunks, or a peer running older firmware -- so
+     without this we wait forever for a tail that is never coming, and consume
+     the NEXT frame as that tail. Signed comparison, as everywhere else in this file. */
   if ((hdr_have != 0 || expect != 0)
       && (long)(millis() - started_ms) > (long)RX_STALE_MS) {
     hdr_have = 0; expect = 0; have = 0; resyncs++;
@@ -316,63 +323,47 @@ void BleLink::onWritten(uint16_t conn, const uint8_t* data, uint16_t len) {
              _in_started_ms, _in_resyncs, _in_recv, s_in_last_rx_ms, NO_LINK, data, len);
 }
 
-/* One chunk, waiting for TX credit rather than giving up on it.
-
-   Write-without-response consumes a SoftDevice TX buffer per packet, and
-   BLEClientCharacteristic::write() simply breaks out and returns 0 when none is
-   free ("if (!conn->getWriteCmdPacket()) break;"). writeFragmented pushes
-   ceil(len/20) packets back to back with no flow control, so anything bigger
-   than a few credits ran the pool dry mid-frame -- and the old code treated
-   that as fatal and abandoned the frame with its header already on the wire.
-   The receiver was then left holding a partial frame, consumed the next frame
-   as its missing tail, and handed the bridge a spliced packet that failed its
-   HMAC. That is the entire 34% link loss: heartbeats fit in one credit and
-   always arrived, multi-packet mesh frames did not.
-
-   Credits are returned as connection events complete, so the wait is bounded by
-   the connection interval (20-30ms here), not by anything unbounded. */
-bool BleLink::writeChunk(uint8_t idx, const uint8_t* p, uint16_t n) {
-  for (uint8_t attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
-    if (s_cchr[idx].write(p, n) == n) return true;
-    delay(2);                      // let a connection event hand credits back
-  }
-  return false;
+uint8_t BleLink::sendKeepalive(const uint8_t* data, uint16_t len) {
+  return send(data, len, NO_LINK);
 }
 
-bool BleLink::notifyChunk(const uint8_t* p, uint16_t n) {
-  for (uint8_t attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
-    if (s_chr.notify(p, n)) return true;
-    delay(2);
-  }
-  return false;
-}
-
-bool BleLink::writeFragmented(uint8_t idx, const uint8_t* data, uint16_t len) {
-  uint8_t first[MAX_CHUNK];
-  first[0] = FRAME_SYNC;
-  first[1] = (uint8_t)(len & 0xFF);
-  first[2] = (uint8_t)(len >> 8);
-  uint16_t n = (uint16_t)(len < CHUNK - HDR_SIZE ? len : CHUNK - HDR_SIZE);
-  memcpy(&first[HDR_SIZE], data, n);
-  if (!writeChunk(idx, first, (uint16_t)(n + HDR_SIZE))) { _tx_abandoned++; return false; }
-
-  uint16_t off = n;
-  while (off < len) {
-    uint16_t take = (uint16_t)((len - off) < CHUNK ? (len - off) : CHUNK);
-    if (!writeChunk(idx, &data[off], take)) {
-      /* Still possible after all the retries. Counted, because a frame
-         abandoned here is the one thing that can desynchronise the peer -- and
-         the SYNC marker means it now costs one frame instead of the stream. */
-      _tx_abandoned++;
-      return false;
-    }
-    off += take;
-  }
+/* Copy a framed datagram into one destination's queue. Never blocks; a full
+   queue is a drop, counted, which is honest backpressure rather than an
+   unbounded wait. */
+bool BleLink::enqueue(Link& l, const uint8_t* data, uint16_t len) {
+  if (l.txq_count >= TXQ_DEPTH) { l.tx_dropped++; return false; }
+  uint8_t slot = (uint8_t)((l.txq_head + l.txq_count) % TXQ_DEPTH);
+  uint8_t* b = l.txq[slot];
+  b[0] = FRAME_SYNC;
+  b[1] = (uint8_t)(len & 0xFF);
+  b[2] = (uint8_t)(len >> 8);
+  memcpy(&b[HDR_SIZE], data, len);
+  l.txq_len[slot] = (uint16_t)(len + HDR_SIZE);
+  l.txq_count++;
   return true;
 }
 
-uint8_t BleLink::sendKeepalive(const uint8_t* data, uint16_t len) {
-  return send(data, len, NO_LINK);
+/* Push as much of the queue as the SoftDevice will take, then stop. Called
+   every loop() pass; whatever is left resumes next time from tx_off. */
+void BleLink::drain(Link& l, uint8_t idx) {
+  while (l.txq_count > 0) {
+    const uint8_t* b = l.txq[l.txq_head];
+    uint16_t total = l.txq_len[l.txq_head];
+
+    while (l.tx_off < total) {
+      uint16_t rem = (uint16_t)(total - l.tx_off);
+      uint16_t take = rem < CHUNK ? rem : CHUNK;
+      /* One attempt. No credit means no credit; we return and try again next
+         pass rather than spinning or sleeping here. */
+      if (s_cchr[idx].write(&b[l.tx_off], take) != take) return;
+      l.tx_off = (uint16_t)(l.tx_off + take);
+    }
+
+    l.txq_head = (uint8_t)((l.txq_head + 1) % TXQ_DEPTH);
+    l.txq_count--;
+    l.tx_off = 0;
+    l.sent++;
+  }
 }
 
 uint8_t BleLink::send(const uint8_t* data, uint16_t len, uint8_t except) {
@@ -381,33 +372,49 @@ uint8_t BleLink::send(const uint8_t* data, uint16_t len, uint8_t except) {
 
   for (uint8_t i = 0; i < MAX_LINKS; i++) {
     if (_links[i].state != UP || i == except) continue;
-    if (writeFragmented(i, data, len)) { _links[i].sent++; n++; }
+    if (enqueue(_links[i], data, len)) n++;
   }
 
   /* The inbound peer, if one is attached. Notified rather than written to,
      since on that link the roles are the other way round. */
   if (_in_conn != BLE_CONN_HANDLE_INVALID && except != NO_LINK - 1) {
-    uint8_t hdr[MAX_CHUNK];
-    hdr[0] = FRAME_SYNC;
-    hdr[1] = (uint8_t)(len & 0xFF); hdr[2] = (uint8_t)(len >> 8);
-    uint16_t f = (uint16_t)(len < CHUNK - HDR_SIZE ? len : CHUNK - HDR_SIZE);
-    memcpy(&hdr[HDR_SIZE], data, f);
-    /* Same credit exhaustion as the client path -- notifications draw on the
-       same TX pool, and the old code simply broke out of the loop mid-frame. */
-    if (notifyChunk(hdr, (uint16_t)(f + HDR_SIZE))) {
-      uint16_t off = f;
-      bool ok = true;
-      while (off < len) {
-        uint16_t take = (uint16_t)((len - off) < CHUNK ? (len - off) : CHUNK);
-        if (!notifyChunk(&data[off], take)) { ok = false; break; }
-        off += take;
-      }
-      if (ok) n++; else _tx_abandoned++;
-    } else {
-      _tx_abandoned++;
-    }
+    if (enqueueInbound(data, len)) n++;
   }
   return n;
+}
+
+bool BleLink::enqueueInbound(const uint8_t* data, uint16_t len) {
+  if (_in_txq_count >= TXQ_DEPTH) { _tx_dropped_in++; return false; }
+  uint8_t slot = (uint8_t)((_in_txq_head + _in_txq_count) % TXQ_DEPTH);
+  uint8_t* b = _in_txq[slot];
+  b[0] = FRAME_SYNC;
+  b[1] = (uint8_t)(len & 0xFF);
+  b[2] = (uint8_t)(len >> 8);
+  memcpy(&b[HDR_SIZE], data, len);
+  _in_txq_len[slot] = (uint16_t)(len + HDR_SIZE);
+  _in_txq_count++;
+  return true;
+}
+
+void BleLink::drainInbound() {
+  if (_in_conn == BLE_CONN_HANDLE_INVALID) {
+    _in_txq_count = 0; _in_txq_head = 0; _in_tx_off = 0;   // peer gone; nothing to send it
+    return;
+  }
+  while (_in_txq_count > 0) {
+    const uint8_t* b = _in_txq[_in_txq_head];
+    uint16_t total = _in_txq_len[_in_txq_head];
+    while (_in_tx_off < total) {
+      uint16_t rem = (uint16_t)(total - _in_tx_off);
+      uint16_t take = rem < CHUNK ? rem : CHUNK;
+      if (!s_chr.notify(&b[_in_tx_off], take)) return;     // no credit; resume next pass
+      _in_tx_off = (uint16_t)(_in_tx_off + take);
+    }
+    _in_txq_head = (uint8_t)((_in_txq_head + 1) % TXQ_DEPTH);
+    _in_txq_count--;
+    _in_tx_off = 0;
+    _in_recv_sent++;
+  }
 }
 
 uint8_t BleLink::numUp() const {
