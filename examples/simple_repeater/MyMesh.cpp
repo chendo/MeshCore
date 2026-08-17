@@ -959,7 +959,14 @@ void MyMesh::begin(FILESYSTEM *fs) {
   mesh::Mesh::begin();
 
 #ifdef LOOP_WATCHDOG_MS
-  LoopWatchdog::begin(LOOP_WATCHDOG_MS);
+  /* Deliberately NOT tightened to LOOP_WATCHDOG_MS here. main.cpp armed the
+     watchdog with the generous boot limit before any of this ran, and the
+     remainder of begin() -- loadPrefs, acl.load, region_map.load, then the
+     SoftDevice role ladder in startBLE which can cycle Bluefruit.begin()
+     several times -- still has to complete before the main loop ever runs.
+     Imposing the 30s runtime limit at this point would reset the node partway
+     through a slow-but-legitimate boot and loop it forever. The limit tightens
+     on the first loop pass, once there is a loop to watch. */
 #endif
   _fs = fs;
   // load persisted prefs
@@ -1542,6 +1549,13 @@ void MyMesh::loop() {
     _loop_iters++;
 #ifdef LOOP_WATCHDOG_MS
     LoopWatchdog::feed();
+    /* First pass proves the loop is actually running, which is the only point
+       at which the tight runtime limit is safe to impose. Until now the boot
+       limit from main.cpp has been covering setup(). */
+    if (!_wdog_tightened) {
+      _wdog_tightened = true;
+      LoopWatchdog::setLimit(LOOP_WATCHDOG_MS);
+    }
 #endif
     if (lt - _loop_rate_ms >= 1000) {
       _loop_rate = _loop_iters;

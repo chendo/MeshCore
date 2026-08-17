@@ -76,7 +76,7 @@ struct NeighbourInfo {
 };
 
 #ifndef FIRMWARE_BUILD_DATE
-  #define FIRMWARE_BUILD_DATE   "14 Aug 2026"
+  #define FIRMWARE_BUILD_DATE   "17 Aug 2026"
 #endif
 
 #ifndef FIRMWARE_VERSION
@@ -280,6 +280,11 @@ public:
      timeout becomes a reset loop. Measuring the worst case beats auditing for
      it -- filesystem writes, LoRa transmit and BLE work all block here. */
   unsigned long _loop_gap_max_ms = 0, _loop_last_ms = 0;
+#ifdef LOOP_WATCHDOG_MS
+  /* Latches on the first loop pass, where the watchdog drops from the boot
+     limit to the runtime limit. See loop(). */
+  bool _wdog_tightened = false;
+#endif
 
   /* LoRa watchdog. Both repeaters have been found with a completely dead radio
      -- zero packets sent or received for over an hour, correct config, repeat
