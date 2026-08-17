@@ -34,4 +34,13 @@ bool ensure(const char* name, uint8_t prph, uint8_t central);
 uint8_t periphSlots();
 uint8_t centralSlots();
 
+/** Negotiated ATT MTU and TX queue depth. Both are shed BEFORE connection slots
+ *  when the SoftDevice's RAM requirement will not fit what the linker reserved,
+ *  so these report what the node actually settled for. Worth surfacing: an MTU
+ *  of 23 means the link fragments every frame, and a queue depth of 1 means it
+ *  cannot pipeline the fragments -- which together were a third of link traffic
+ *  being discarded. */
+uint16_t mtu();
+uint8_t txQueueSize();
+
 }
