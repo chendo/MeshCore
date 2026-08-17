@@ -252,8 +252,15 @@ private:
 
   /* Scan duty cycle, as a fraction of the interval. Deliberately not 100% --
      the SoftDevice needs slack to service our own advertising bursts and any
-     connection. */
-  static const uint8_t SCAN_DUTY_DEFAULT = 80;   // percent
+     connection.
+
+     50%: listening dominates BLE energy (~4.6mA continuous while scanning)
+     and, measured, buys far less delivery than expected -- at 100% duty there
+     is no blind time whatsoever and per-copy delivery was still only ~14%,
+     so the losses are congestion, not gaps. Keep this in step with
+     NodePrefs::bridge_scan_duty, which is the persisted authority; this is
+     only the value used before prefs load. */
+  static const uint8_t SCAN_DUTY_DEFAULT = 50;   // percent
 
   /* The scan interval is DERIVED from the burst rather than fixed, so the
      copies of one datagram land on evenly spaced scan phases.
