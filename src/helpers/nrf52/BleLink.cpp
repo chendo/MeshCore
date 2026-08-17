@@ -384,13 +384,35 @@ void BleLink::drain(Link& l, uint8_t idx) {
     const uint8_t* b = l.txq[l.txq_head];
     uint16_t total = l.txq_len[l.txq_head];
 
+    /* Clamp to what THIS connection negotiated, not what we asked the stack for
+       at boot. Hand write() more than the peer's ATT payload and it splits the
+       buffer internally, then returns `len - remaining` -- a PARTIAL count --
+       if that split runs out of TX credits partway. Treating a partial as
+       "nothing sent" and retrying from the same offset puts the
+       already-transmitted bytes on the wire a SECOND time, mid-frame, and the
+       peer's reassembled frame then fails its HMAC.
+
+       That was the residual link loss. The link layer acknowledges and
+       retransmits until delivery, exactly as this class was built to rely on --
+       it delivered everything faithfully, and we handed it duplicated bytes.
+       One packet per write restores the all-or-nothing behaviour the loop
+       below assumes. */
+    uint16_t cap = CHUNK;
+    BLEConnection* c = Bluefruit.Connection(l.conn);
+    if (c != nullptr) {
+      uint16_t mp = (uint16_t)(c->getMtu() - 3);
+      if (mp < cap) cap = mp;
+    }
+
     while (l.tx_off < total) {
       uint16_t rem = (uint16_t)(total - l.tx_off);
-      uint16_t take = rem < CHUNK ? rem : CHUNK;
-      /* One attempt. No credit means no credit; we return and try again next
-         pass rather than spinning or sleeping here. */
-      if (s_cchr[idx].write(&b[l.tx_off], take) != take) return;
-      l.tx_off = (uint16_t)(l.tx_off + take);
+      uint16_t take = rem < cap ? rem : cap;
+      /* One attempt. No credit means no credit; return and resume next pass.
+         Advance by what was ACTUALLY accepted, so a partial can never be
+         retransmitted even if the stack splits despite the clamp. */
+      uint16_t wrote = s_cchr[idx].write(&b[l.tx_off], take);
+      l.tx_off = (uint16_t)(l.tx_off + wrote);
+      if (wrote != take) return;
     }
 
     l.txq_head = (uint8_t)((l.txq_head + 1) % TXQ_DEPTH);
@@ -438,9 +460,22 @@ void BleLink::drainInbound() {
   while (_in_txq_count > 0) {
     const uint8_t* b = _in_txq[_in_txq_head];
     uint16_t total = _in_txq_len[_in_txq_head];
+    /* Same clamp, and notify() needs it MORE than write() does: it splits
+       internally too, but returns only a bool -- "if (!conn->getHvnPacket())
+       return false;" fires AFTER it may already have queued packets, so a
+       partial send is indistinguishable from no send and the bytes cannot be
+       accounted for. Keeping every notify to a single packet is the only way
+       false reliably means nothing left. */
+    uint16_t cap = CHUNK;
+    BLEConnection* c = Bluefruit.Connection(_in_conn);
+    if (c != nullptr) {
+      uint16_t mp = (uint16_t)(c->getMtu() - 3);
+      if (mp < cap) cap = mp;
+    }
+
     while (_in_tx_off < total) {
       uint16_t rem = (uint16_t)(total - _in_tx_off);
-      uint16_t take = rem < CHUNK ? rem : CHUNK;
+      uint16_t take = rem < cap ? rem : cap;
       if (!s_chr.notify(&b[_in_tx_off], take)) return;     // no credit; resume next pass
       _in_tx_off = (uint16_t)(_in_tx_off + take);
     }
