@@ -6,6 +6,8 @@ namespace BleStack {
 
 static bool s_done = false;
 static uint8_t s_prph = 1, s_central = 0;
+static uint16_t s_mtu = 23;
+static uint8_t s_qsize = 1;
 
 bool ensure(const char* name, uint8_t prph, uint8_t central) {
   if (!s_done) {
@@ -25,15 +27,55 @@ bool ensure(const char* name, uint8_t prph, uint8_t central) {
          Each failed attempt leaves the SoftDevice enabled but unconfigured --
          sd_softdevice_enable() succeeds before the config does not -- so it has
          to come down before the next try or that one fails on INVALID_STATE. */
+      /* Buffer tier, shed BEFORE connection slots.
+
+         The link's fragmentation trouble was really a buffer shortage: the
+         SoftDevice's write-command and notify queues default to ONE packet
+         (BLE_GATTC_WRITE_CMD_TX_QUEUE_SIZE_DEFAULT == 1), so the second chunk of
+         any fragmented frame was refused outright and the frame abandoned with
+         its header already sent. A deeper queue lets the fragments queue; a
+         larger MTU is better still, because most bridge frames then fit in a
+         single write and are never fragmented at all.
+
+         Both cost SoftDevice RAM from the same 24KB that is already tight
+         enough to be shedding connection slots -- see below -- so they are
+         asked for first and given up first. Losing MTU costs throughput; losing
+         a central slot costs the peer link entirely, which is the thing all of
+         this exists to fix. The ORDER matters more than either value. */
+      struct Tier { uint16_t mtu; uint8_t qsize; };
+      static const Tier TIERS[] = {
+        { 247, 7 },      // nothing we send needs fragmenting
+        { 185, 4 },      // most frames single-write
+        { 123, 3 },
+        {  69, 2 },
+        {  23, 1 },      // stock: fragments everything, queue of one
+      };
+      const uint8_t NUM_TIERS = (uint8_t)(sizeof(TIERS) / sizeof(TIERS[0]));
+      uint8_t tier = 0;
+
       bool up = false;
       while (!up) {
+        Bluefruit.configPrphConn(TIERS[tier].mtu, BLE_GAP_EVENT_LENGTH_DEFAULT,
+                                 TIERS[tier].qsize, TIERS[tier].qsize);
+        Bluefruit.configCentralConn(TIERS[tier].mtu, BLE_GAP_EVENT_LENGTH_DEFAULT,
+                                    TIERS[tier].qsize, TIERS[tier].qsize);
         if (Bluefruit.begin(prph, central)) {
           s_prph = prph;
           s_central = central;
+          s_mtu = TIERS[tier].mtu;
+          s_qsize = TIERS[tier].qsize;
           up = true;
           break;
         }
         sd_softdevice_disable();
+
+        /* Buffers before connections. */
+        if (tier + 1 < NUM_TIERS) { tier++; continue; }
+
+        /* Out of buffer tiers: now shed slots, and retry the whole buffer
+           ladder at the smaller connection count -- a slot freed may pay for a
+           bigger MTU, which is the trade we actually want. */
+        tier = 0;
         /* Shed INBOUND links first and keep the outbound ones. Measured on a
            RAK3401: (4,3) down to (4,0) were all refused and (3,0) accepted, so
            roughly three connections fit -- but spending all three on peers
@@ -58,5 +100,7 @@ bool ensure(const char* name, uint8_t prph, uint8_t central) {
 
 uint8_t periphSlots()  { return s_prph; }
 uint8_t centralSlots() { return s_central; }
+uint16_t mtu()         { return s_mtu; }
+uint8_t txQueueSize()  { return s_qsize; }
 
 }

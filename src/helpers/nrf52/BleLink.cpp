@@ -1,4 +1,5 @@
 #include "BleLink.h"
+#include "BleStack.h"
 
 #include <string.h>
 
@@ -35,9 +36,15 @@ static BLEClientCharacteristic s_cchr[BleLink::MAX_LINKS] = {
 
 static BleLink* s_instance = nullptr;
 
-/* ATT payload on the default 23-byte MTU. Raising the MTU would buy fewer
-   fragments at the cost of SoftDevice RAM the role counts already exhausted. */
-static const uint16_t CHUNK = 20;
+/* Largest single write. Follows the MTU the stack actually negotiated rather
+   than assuming the 23-byte minimum: at MTU 247 a whole bridge frame fits in
+   one write and is never fragmented, which removes the entire class of
+   desynchronisation bug this transport had. BleStack sheds MTU before
+   connection slots, so this can still come back as 20 on a RAM-starved node --
+   in which case fragmentation still works, just with more packets. */
+static const uint16_t MAX_CHUNK = 244;          // MTU 247 - 3 bytes ATT overhead
+static uint16_t s_chunk = 20;                   // resolved in begin(), after the stack is up
+#define CHUNK s_chunk
 
 bool BleLink::begin(rx_handler_t handler, const ble_gap_addr_t& self_addr) {
   if (_running) return true;
@@ -45,6 +52,15 @@ bool BleLink::begin(rx_handler_t handler, const ble_gap_addr_t& self_addr) {
   _handler = handler;
   memcpy(&_self, &self_addr, sizeof(_self));
   memset(_links, 0, sizeof(_links));
+
+  /* Resolve the write size from what the stack actually negotiated. BleStack
+     has already run its ladder by now, so this is the real MTU, not a hope. */
+  {
+    uint16_t m = BleStack::mtu();
+    if (m < 23) m = 23;
+    uint16_t c = (uint16_t)(m - 3);             // ATT opcode + handle
+    s_chunk = c > MAX_CHUNK ? MAX_CHUNK : c;
+  }
 
   s_svc.begin();                       // must precede its characteristics
   s_chr.setProperties(CHR_PROPS_WRITE_WO_RESP | CHR_PROPS_NOTIFY);
@@ -332,7 +348,7 @@ bool BleLink::notifyChunk(const uint8_t* p, uint16_t n) {
 }
 
 bool BleLink::writeFragmented(uint8_t idx, const uint8_t* data, uint16_t len) {
-  uint8_t first[CHUNK];
+  uint8_t first[MAX_CHUNK];
   first[0] = FRAME_SYNC;
   first[1] = (uint8_t)(len & 0xFF);
   first[2] = (uint8_t)(len >> 8);
@@ -371,7 +387,7 @@ uint8_t BleLink::send(const uint8_t* data, uint16_t len, uint8_t except) {
   /* The inbound peer, if one is attached. Notified rather than written to,
      since on that link the roles are the other way round. */
   if (_in_conn != BLE_CONN_HANDLE_INVALID && except != NO_LINK - 1) {
-    uint8_t hdr[CHUNK];
+    uint8_t hdr[MAX_CHUNK];
     hdr[0] = FRAME_SYNC;
     hdr[1] = (uint8_t)(len & 0xFF); hdr[2] = (uint8_t)(len >> 8);
     uint16_t f = (uint16_t)(len < CHUNK - HDR_SIZE ? len : CHUNK - HDR_SIZE);
