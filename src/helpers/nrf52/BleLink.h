@@ -92,6 +92,26 @@ private:
 
   enum State : uint8_t { EMPTY = 0, IDLE, CONNECTING, DISCOVERING, UP };
 
+  /* Framing: [SYNC][len lo][len hi].
+     The sync byte exists because the original assumption -- "the link is
+     reliable and ordered, so a length prefix is all the framing needed, no gap
+     handling, no timeouts" -- fails in the one case that matters.
+     The sender used to abandon a frame when a chunk write was refused, having
+     ALREADY put the header on the wire, and the receiver had no way to know.
+     Without a marker the next frame is appended into the abandoned one
+     and the stream desynchronises permanently: every later frame reassembles
+     across a boundary, still looks well-formed, and fails its HMAC. That is
+     precisely what the split bad-tag counter caught -- 0 on broadcast, climbing
+     steadily on the link.
+     With a marker the receiver hunts for the next SYNC and recovers on the very
+     next frame. */
+  static const uint8_t  FRAME_SYNC = 0xA5;
+  static const uint8_t  HDR_SIZE = 3;
+  /* Frames buffered per destination. Four is roughly a second of bridge
+     traffic at the rates observed, which comfortably covers the 20-30ms a
+     connection event takes to hand TX credits back. */
+  static const uint8_t  TXQ_DEPTH = 4;
+
   struct Link {
     ble_gap_addr_t addr;
     uint16_t conn;
@@ -125,23 +145,22 @@ private:
     /* When the frame in progress started, for the staleness timeout. */
     unsigned long rx_started_ms;
     uint32_t rx_resyncs;
+
+    /* Outbound queue. send() copies a fully framed datagram in and returns
+       immediately; loop() pushes it out as TX credits allow, resuming from
+       tx_off wherever the last pass stopped.
+
+       Nothing here blocks, and that is the point. send() is reachable from the
+       BLE event task at TASK_PRIO_HIGH, so the earlier retry-with-delay() would
+       have stalled a context that preempts both the main loop and the watchdog
+       meant to notice a stall. */
+    uint8_t  txq[TXQ_DEPTH][MAX_FRAME + HDR_SIZE];
+    uint16_t txq_len[TXQ_DEPTH];
+    uint16_t tx_off;                     // progress into the head entry
+    uint8_t  txq_head, txq_count;
+    uint32_t tx_dropped;                 // queue full: honest backpressure
   };
 
-  /* Framing: [SYNC][len lo][len hi].
-     The sync byte exists because the original assumption -- "the link is
-     reliable and ordered, so a length prefix is all the framing needed, no gap
-     handling, no timeouts" -- fails in the one case that matters.
-     writeFragmented() abandons a frame if any chunk write fails, having ALREADY
-     sent the header and part of the payload, and the receiver has no way to
-     know. Without a marker the next frame is appended into the abandoned one
-     and the stream desynchronises permanently: every later frame reassembles
-     across a boundary, still looks well-formed, and fails its HMAC. That is
-     precisely what the split bad-tag counter caught -- 0 on broadcast, climbing
-     steadily on the link.
-     With a marker the receiver hunts for the next SYNC and recovers on the very
-     next frame. */
-  static const uint8_t  FRAME_SYNC = 0xA5;
-  static const uint8_t  HDR_SIZE = 3;
   /* A frame that stops arriving is abandoned rather than waiting forever for
      bytes that will never come. Generous: it only has to exceed the gap between
      frames, not meet any transmission deadline. */
@@ -168,12 +187,10 @@ private:
                   uint32_t& recv, unsigned long& last_rx_ms,
                   uint8_t idx, const uint8_t* data, uint16_t len);
   int findByConn(uint16_t conn) const;
-  bool writeFragmented(uint8_t idx, const uint8_t* data, uint16_t len);
-  bool writeChunk(uint8_t idx, const uint8_t* p, uint16_t n);
-  bool notifyChunk(const uint8_t* p, uint16_t n);
-  /* Retries per chunk while the SoftDevice has no TX credit. 20 x 2ms covers
-     roughly two connection intervals, which is when credits come back. */
-  static const uint8_t WRITE_ATTEMPTS = 20;
+  bool enqueue(Link& l, const uint8_t* data, uint16_t len);
+  void drain(Link& l, uint8_t idx);
+  bool enqueueInbound(const uint8_t* data, uint16_t len);
+  void drainInbound();
 
   static void connect_cb(uint16_t conn);
   static void disconnect_cb(uint16_t conn, uint8_t reason);
@@ -195,10 +212,14 @@ private:
   uint8_t _in_hdr[3];
   uint8_t _in_hdr_have = 0;
   bool _in_authed = false;
-  /* Frames given up on mid-transmission after exhausting the retries. Each one
-     can desynchronise the peer for a single frame; sustained counts mean the
-     credit pressure is worse than the retry budget can absorb. */
-  uint32_t _tx_abandoned = 0;
+  /* Same queue for the inbound peer, which is notified rather than written to
+     but draws on the same TX pool and had the same mid-frame abandonment. */
+  uint8_t  _in_txq[TXQ_DEPTH][MAX_FRAME + HDR_SIZE];
+  uint16_t _in_txq_len[TXQ_DEPTH];
+  uint16_t _in_tx_off = 0;
+  uint8_t  _in_txq_head = 0, _in_txq_count = 0;
+  uint32_t _tx_dropped_in = 0;
+  uint32_t _in_recv_sent = 0;
   unsigned long _in_started_ms = 0;
   uint32_t _in_resyncs = 0;
   uint32_t _in_recv = 0;
