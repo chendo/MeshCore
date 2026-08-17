@@ -346,6 +346,12 @@ private:
   static const uint32_t SCAN_RETRY_MS = 1000;
   unsigned long _next_scan_try_ms = 0;
 
+  /* Same hazard on the advertising side. The connectable advert is re-asserted
+     every pass, so a SoftDevice that persistently refuses turns that assertion
+     into the identical unpaced spin. Only failures are paced -- see loop(). */
+  static const uint32_t ADV_RETRY_MS = 1000;
+  unsigned long _next_adv_try_ms = 0;
+
   uint8_t _queue_len = 0;
   Datagram _queue[QUEUE_SIZE];
 

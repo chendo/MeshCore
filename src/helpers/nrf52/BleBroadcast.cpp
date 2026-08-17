@@ -293,11 +293,26 @@ void BleBroadcast::loop() {
      is the worst possible time to lose the way in. */
   if (_shares_adv_set && !_bursting
       && Bluefruit.Periph.connected() < BleStack::periphSlots()
-      && !Bluefruit.Advertising.isRunning()) {
+      && !Bluefruit.Advertising.isRunning()
+      && (long)(millis() - _next_adv_try_ms) >= 0) {
     /* Counted rather than ignored. If the SoftDevice is refusing, asserting the
        invariant every pass turns into a silent spin, and the count is the only
-       way anyone finds out. */
-    if (!Bluefruit.Advertising.start(0)) _num_adv_fail++;
+       way anyone finds out.
+
+       Counting alone was not enough. At ~17,000 loop passes a second a
+       persistent refusal meant 17,000 adv_set_configure + adv_start calls a
+       second -- the same shape as the scan_start spin that starved the stack
+       and took BLE down completely. So pace the FAILURES, not the attempts:
+       a success leaves the next pass immediately eligible, which keeps the
+       invariant tight after a burst ends, while a refusal backs off to once a
+       second. Signed comparison for the same reason as everywhere else here --
+       the deadline can sit ahead of millis(). */
+    if (Bluefruit.Advertising.start(0)) {
+      _next_adv_try_ms = millis();          // took: no delay before the next assert
+    } else {
+      _num_adv_fail++;
+      _next_adv_try_ms = millis() + ADV_RETRY_MS;   // refusing: stop hammering it
+    }
   }
 
   /* Receive-path liveness. A scanner in a populated environment hears adverts
