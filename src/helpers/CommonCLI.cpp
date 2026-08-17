@@ -121,7 +121,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {  // Legacy 
     // sanitise bad bridge pref values
     _prefs->bridge_enabled = constrain(_prefs->bridge_enabled, 0, 1);
     _prefs->bridge_delay = constrain(_prefs->bridge_delay, 0, 10000);
-    _prefs->bridge_pkt_src = constrain(_prefs->bridge_pkt_src, 0, 1);
+    _prefs->bridge_pkt_src = constrain(_prefs->bridge_pkt_src, 0, 2);   // 2 = both
     _prefs->bridge_adv_repeat = constrain(_prefs->bridge_adv_repeat, 1, 10);
     _prefs->bridge_ble_hold = constrain(_prefs->bridge_ble_hold, 0, 5000);
     _prefs->bridge_scan_duty = constrain(_prefs->bridge_scan_duty, 25, 100);
@@ -776,7 +776,12 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     savePrefs();
     strcpy(reply, "OK");
   } else if (memcmp(config, "bridge.source ", 14) == 0) {
-    _prefs->bridge_pkt_src = memcmp(&config[14], "rx", 2) == 0;
+    /* "both" is the correct setting for an actual bridge and is the default;
+       rx and tx remain for the cases where one direction is deliberately not
+       wanted. Anything unrecognised falls back to tx, the old behaviour. */
+    if (memcmp(&config[14], "both", 4) == 0)    _prefs->bridge_pkt_src = 2;
+    else if (memcmp(&config[14], "rx", 2) == 0) _prefs->bridge_pkt_src = 1;
+    else                                        _prefs->bridge_pkt_src = 0;
     savePrefs();
     strcpy(reply, "OK");
 #endif
@@ -978,7 +983,8 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "bridge.scan_filter", 18) == 0) {
     sprintf(reply, "> %s", _prefs->bridge_scan_filter ? "on" : "off");
   } else if (memcmp(config, "bridge.source", 13) == 0) {
-    sprintf(reply, "> %s", _prefs->bridge_pkt_src ? "logRx" : "logTx");
+    sprintf(reply, "> %s", _prefs->bridge_pkt_src == 2 ? "both"
+                         : _prefs->bridge_pkt_src == 1 ? "logRx" : "logTx");
 #endif
 #ifdef WITH_RS232_BRIDGE
   } else if (memcmp(config, "bridge.baud", 11) == 0) {

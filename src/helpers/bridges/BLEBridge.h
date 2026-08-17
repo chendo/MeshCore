@@ -143,7 +143,21 @@ public:
   }
   uint32_t numRxOk() const { return _num_rx_ok; }
   uint32_t numDup() const { return _num_dup; }
-  uint32_t numBadTag() const { return _num_bad_tag; }
+  /** Tag failures, split by the transport they arrived on -- the two mean
+   *  opposite things and a single total cannot be acted on.
+   *
+   *  BROADCAST failures are expected background: company ID 0xFFFF is the SIG's
+   *  shared development ID, so anyone's beacon can reach the tag check, and a
+   *  neighbouring bridge group running a different secret lands here by design.
+   *
+   *  LINK failures are NOT expected. The p2p link is connection-oriented and the
+   *  controller retransmits until delivery or supervision timeout, so bytes do
+   *  not arrive corrupted. A non-trivial count here means our own framing is
+   *  wrong -- most likely the length-prefixed reassembly in BleLink -- and is a
+   *  bug rather than noise. */
+  uint32_t numBadTagBcast() const { return _num_bad_tag_bcast; }
+  uint32_t numBadTagLink() const { return _num_bad_tag_link; }
+  uint32_t numBadTag() const { return _num_bad_tag_bcast + _num_bad_tag_link; }
   /** Adverts carrying our company ID that are not our protocol at all. 0xFFFF
    *  is the SIG's shared development ID, so other people's beacons land here;
    *  a large count is ambient noise, not a fault. */
@@ -264,7 +278,8 @@ private:
 
   PeerStamp _peers[MAX_PEERS];
 
-  uint32_t _num_bad_tag = 0;
+  uint32_t _num_bad_tag_bcast = 0;   // foreign/other-group traffic: expected
+  uint32_t _num_bad_tag_link = 0;    // over an acked connection: a framing bug
   uint32_t _num_dup = 0;
   uint32_t _num_foreign = 0;
   uint32_t _num_rx_ok = 0;

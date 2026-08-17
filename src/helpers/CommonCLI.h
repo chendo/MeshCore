@@ -56,7 +56,22 @@ public:
   // Bridge settings
   uint8_t bridge_enabled = 0; // boolean
   uint16_t bridge_delay = 0;  // milliseconds (default 500 ms)
-  uint8_t bridge_pkt_src = 0; // 0 = logTx, 1 = logRx (default logTx)
+  /* 0 = logTx, 1 = logRx, 2 = both. BOTH is the only setting that is actually
+     a bridge, and is the default; the other two exist for when one direction
+     is deliberately unwanted.
+       - RX alone: the far side hears our whole band, but this node's own
+         adverts and replies are transmissions, so they never cross and the
+         node cannot be reached from the other side at all.
+       - TX alone: the node is reachable, but only packets our routing policy
+         chose to relay ever cross. It drops duplicates and hop-exceeded
+         packets as old news on THIS band, while the far band may never have
+         heard them -- dedup is per-band, the bridge crosses bands.
+     Together they make the two bridge nodes behave as if they were sitting
+     next to each other, which is the whole point.
+     Loop-safe: the echo of a relayed packet returning to its origin is dropped
+     by BridgeBase::_seen_packets at the far end, which already marked it on
+     the way out. One wasted crossing, no loop. */
+  uint8_t bridge_pkt_src = 2;
   /* How many advertising events each bridged datagram is repeated over. The
      transport is unacknowledged, so this is the only redundancy there is.
 
@@ -90,8 +105,24 @@ public:
      the SoftDevice needs to service our own advertising bursts and any
      connection, so pushing this toward 100 buys listening time at the cost of
      everything else the radio has to do -- including transmitting the adverts
-     our peer is trying to hear. Worth measuring rather than assuming. */
-  uint8_t bridge_scan_duty = 80;
+     our peer is trying to hear.
+
+     50%, because listening is nearly the whole BLE energy budget and it buys
+     much less than it appears to. At 100% duty the window equals the interval,
+     so there is NO blind time at all -- and measured delivery was still only
+     36.6% per heartbeat, which back-solves to ~14% per copy. Almost every lost
+     advert is lost to congestion (this node sees ~136 foreign adverts a second)
+     and to the scanner being paused on every report, NOT to the blind gap. So
+     duty trades roughly linearly against energy while barely moving delivery:
+     scanning costs ~4.6mA continuous, and halving it saves ~2.3mA -- about
+     55mAh a day, doubling scan-only battery life -- while still hearing a peer
+     within five minutes ~99% of the time.
+
+     Traffic does not depend on this: the P2P GATT link carries packets with
+     controller-level retries and costs ~55uA, about 1.5% of what scanning
+     costs. Broadcast is really a discovery channel, and discovery is not
+     latency-critical. */
+  uint8_t bridge_scan_duty = 50;
   /* Filter scanning to known peers in the link layer. Off by default: a
      whitelisted node is deaf to anyone it has not already authenticated, which
      is the right trade on a fixed site and the wrong one while bringing a mesh

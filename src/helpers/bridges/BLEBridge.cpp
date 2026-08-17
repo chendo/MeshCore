@@ -158,14 +158,27 @@ void BLEBridge::onLinkFrame(const uint8_t* data, uint16_t len, uint8_t link_idx)
   computeTag(data, signed_len, expected);
   if (memcmp(expected, &data[signed_len], TAG_SIZE) != 0) {
     /* Still checked. BLE authenticates the LINK; the group tag is what says
-       this peer belongs to our bridge rather than merely speaking the protocol. */
-    _num_bad_tag++;
+       this peer belongs to our bridge rather than merely speaking the protocol.
+
+       Counted separately from the broadcast path. Arriving here means bytes
+       crossed an acknowledged connection and STILL failed the tag -- the
+       controller does not deliver corrupt payloads, so this is our own framing
+       (reassembly in BleLink), not interference. Any sustained count is a bug. */
+    _num_bad_tag_link++;
     return;
   }
+
+  /* Tag passed, so this peer is genuinely one of ours -- the only evidence of
+     group membership there is. Told to BleLink so it can drop a link that never
+     produces it instead of holding the slot open forever. Heartbeats count:
+     they are tagged too, and they are what a quiet peer sends. */
+  _link.markAuthed(link_idx);
 
   if (is_hb) { _num_hb_rx++; return; }
 
   _num_rx_ok++;
+
+
   mesh::Packet *pkt = _mgr->allocNew();
   if (!pkt) return;
   if (pkt->readFrom(&data[HEADER_SIZE], (uint8_t)(signed_len - HEADER_SIZE))) {
@@ -433,8 +446,9 @@ void BLEBridge::onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t a
   if (memcmp(expected, tag, TAG_SIZE) != 0) {
     /* Wrong group secret, or someone playing. This is the same role
        ESPNowBridge's checksum plays: it is what keeps neighbouring bridge
-       groups from bleeding into each other. */
-    _num_bad_tag++;
+       groups from bleeding into each other. Expected background on an open
+       band -- see numBadTagBcast(). */
+    _num_bad_tag_bcast++;
     BRIDGE_DEBUG_PRINTLN("BLE: RX bad tag, len=%d rssi=%d\n", (int)len, (int)rssi);
     return;
   }
@@ -459,6 +473,7 @@ void BLEBridge::onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t a
   StatusLed::bleRx();
 #endif
   BRIDGE_DEBUG_PRINTLN("BLE: RX, payload_len=%d rssi=%d\n", (int)packet_len, (int)rssi);
+
 
   mesh::Packet *pkt = _mgr->allocNew();
   if (!pkt) return;
