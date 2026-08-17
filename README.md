@@ -5,6 +5,9 @@
 > every packet they transmit, so traffic crosses between them without spending a
 > LoRa hop. Boards like the RAK3401 have no WiFi, so ESP-NOW is unavailable to
 > them and BLE is the only 2.4 GHz radio they have.
+>
+> **[docs/ble_bridge.md](docs/ble_bridge.md)** — quickstart, settings
+> reference, and how to read the diagnostics.
 
 ## What it is for
 
