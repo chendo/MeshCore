@@ -487,7 +487,14 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 #ifdef WITH_BRIDGE
-  if (_prefs.bridge_pkt_src == 1) {
+  /* RECEIVE side of the bridge (modes rx and both).
+     This is what makes the two bridge nodes behave as though they were sitting
+     next to each other: everything this node HEARS on its band is offered to
+     the other one. It has to be what we heard, not merely what we chose to
+     relay -- our routing policy drops duplicates and hop-exceeded packets
+     because they are old news ON THIS BAND, while the far band may never have
+     seen them at all. Dedup is per-band; the bridge crosses bands. */
+  if (_prefs.bridge_pkt_src >= 1) {
     bridge.sendPacket(pkt);
   }
 #endif
@@ -516,7 +523,17 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
   StatusLed::loraTx();
 #endif
 #ifdef WITH_BRIDGE
-  if (_prefs.bridge_pkt_src == 0) {
+  /* TRANSMIT side of the bridge (modes tx and both).
+     Without this the node itself is unreachable across the bridge: it can be
+     addressed, but its adverts and its replies are transmissions rather than
+     receptions, so they never cross and the answer never comes back.
+
+     This also re-offers packets we relayed after receiving them over the
+     bridge. That echo is bounded, not a loop -- BridgeBase::_seen_packets at
+     the far end has already marked them and drops them on arrival, which is
+     what its dup counter has been recording all along. One wasted crossing per
+     packet, and the loop terminates. */
+  if (_prefs.bridge_pkt_src != 1) {
     bridge.sendPacket(pkt);
   }
 #endif
@@ -869,6 +886,13 @@ void MyMesh::sendNodeDiscoverReq() {
     sendZeroHop(pkt);
   }
 }
+
+#if WITH_MESH_OBSERVER && defined(WITH_BLE_BRIDGE)
+/* The bridge's raw-observer hook is a plain function pointer with no context
+   argument, so the trampoline installed in begin() needs a way back to the
+   instance. One node, one MyMesh. */
+static MyMesh* s_obs_self = nullptr;
+#endif
 
 MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondClock &ms, mesh::RNG &rng,
                mesh::RTCClock &rtc, mesh::MeshTables &tables)
@@ -1280,13 +1304,14 @@ void MyMesh::formatBridgeReply(char *reply, const char* what) {
   // Say so rather than let a green-looking line imply otherwise.
   const bool default_secret = (strcmp(_prefs.bridge_secret, "LVSITANOS") == 0);
   snprintf(reply, reply_size,
-           "ble bridge %s%s: tx %lu drop %lu | rx seen %lu ok %lu hb %lu dup %lu bad %lu other %lu | peers %d",
+           "ble bridge %s%s: tx %lu drop %lu | rx seen %lu ok %lu hb %lu dup %lu bad %lu/L%lu other %lu | peers %d",
            bridge.isTransportUp() ? "up" : (bridge.isRunning() ? "starting" : "off"),
            default_secret ? " [DEFAULT SECRET - anyone can inject]" : "",
            (unsigned long)bridge.numSent(), (unsigned long)bridge.numTxDropped(),
            (unsigned long)bridge.numSeen(), (unsigned long)bridge.numRxOk(),
            (unsigned long)bridge.numHeartbeatsRx(),
-           (unsigned long)bridge.numDup(), (unsigned long)bridge.numBadTag(),
+           (unsigned long)bridge.numDup(), (unsigned long)bridge.numBadTagBcast(),
+           (unsigned long)bridge.numBadTagLink(),
            (unsigned long)bridge.numForeign(), (int)bridge.numPeers());
 }
 #endif
