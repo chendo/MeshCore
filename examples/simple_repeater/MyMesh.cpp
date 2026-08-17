@@ -887,13 +887,6 @@ void MyMesh::sendNodeDiscoverReq() {
   }
 }
 
-#if WITH_MESH_OBSERVER && defined(WITH_BLE_BRIDGE)
-/* The bridge's raw-observer hook is a plain function pointer with no context
-   argument, so the trampoline installed in begin() needs a way back to the
-   instance. One node, one MyMesh. */
-static MyMesh* s_obs_self = nullptr;
-#endif
-
 MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondClock &ms, mesh::RNG &rng,
                mesh::RTCClock &rtc, mesh::MeshTables &tables)
     : mesh::Mesh(radio, ms, rng, rtc, *new StaticPoolPacketManager(32), tables),
