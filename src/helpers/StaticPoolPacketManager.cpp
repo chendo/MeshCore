@@ -9,6 +9,7 @@ PacketQueue::PacketQueue(int max_entries) {
 }
 
 int PacketQueue::countBefore(uint32_t now) const {
+  PacketQueueLock lock;
   if (now == 0xFFFFFFFF) return _num;  // sentinel: count all entries regardless of schedule
 
   int n = 0;
@@ -20,6 +21,7 @@ int PacketQueue::countBefore(uint32_t now) const {
 }
 
 mesh::Packet* PacketQueue::get(uint32_t now) {
+  PacketQueueLock lock;
   uint8_t min_pri = 0xFF;
   int best_idx = -1;
   for (int j = 0; j < _num; j++) {
@@ -44,7 +46,8 @@ mesh::Packet* PacketQueue::get(uint32_t now) {
 }
 
 mesh::Packet* PacketQueue::removeByIdx(int i) {
-  if (i >= _num) return NULL;  // invalid index
+  PacketQueueLock lock;
+  if (i < 0 || i >= _num) return NULL;  // invalid index
 
   mesh::Packet* item = _table[i];
   _num--;
@@ -58,7 +61,13 @@ mesh::Packet* PacketQueue::removeByIdx(int i) {
 }
 
 bool PacketQueue::add(mesh::Packet* packet, uint8_t priority, uint32_t scheduled_for) {
-  if (_num == _size) {
+  PacketQueueLock lock;
+  /* >=, not ==. An equality test is a latch: if _num ever gets past _size --
+     which an unsynchronised increment from two priorities could do -- the
+     condition never matches again and this function writes past the end of
+     three heap arrays on every call for the rest of the boot. The lock above
+     should make that unreachable; this makes it non-catastrophic if it is not. */
+  if (_num >= _size) {
     return false;
   }
   _table[_num] = packet;
