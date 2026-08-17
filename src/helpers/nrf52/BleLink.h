@@ -46,6 +46,11 @@ public:
   /** Drive connection attempts, keepalive and retries. Call from the main loop. */
   void loop();
 
+  /** Tear every link down and stop. Disconnects rather than merely forgetting:
+   *  a link left connected keeps a peripheral slot occupied on the far side,
+   *  and a node with no free peripheral slot stops advertising entirely. */
+  void end();
+
   /** Send to every link regardless of ingress -- used for keepalive traffic. */
   uint8_t sendKeepalive(const uint8_t* data, uint16_t len);
 

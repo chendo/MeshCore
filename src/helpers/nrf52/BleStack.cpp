@@ -56,37 +56,59 @@ bool ensure(const char* name, uint8_t prph, uint8_t central) {
       const uint8_t req_prph = prph, req_central = central;
       bool up = false;
 
-      for (uint8_t tier = 0; tier < NUM_TIERS && !up; tier++) {
-        Bluefruit.configPrphConn(TIERS[tier].mtu, BLE_GAP_EVENT_LENGTH_DEFAULT,
-                                 TIERS[tier].qsize, TIERS[tier].qsize);
-        Bluefruit.configCentralConn(TIERS[tier].mtu, BLE_GAP_EVENT_LENGTH_DEFAULT,
-                                    TIERS[tier].qsize, TIERS[tier].qsize);
+      /* Tier at or above which the queue-of-one bug is actually fixed. q3 lets
+         fragments pipeline and MTU 123 carries a 105-byte frame in one write,
+         which is most bridge traffic. Everything above this is throughput, not
+         correctness.
 
-        /* Only the last tier -- which is the old stock behaviour anyway -- may
-           give up the outward link entirely. */
-        const uint8_t min_central = (tier + 1 == NUM_TIERS) ? 0 : 1;
+         MEASURED on a RAK3401: the top tier (247/q7) fitted only at 1p/1c. That
+         is too steep -- one peripheral slot puts the CLI and an inbound peer
+         link in competition, so connecting to manage a node would lock its peer
+         out. A slot is a capability; the MTU above tier 2 is an optimisation.
+
+         So: hold the requested slots and take the best buffers that fit
+         alongside them, down to LAST_GOOD_TIER. Only when even that will not
+         fit do we start trading slots away -- and only when slots are exhausted
+         do we accept the poor tiers, which are the old stock behaviour. */
+      const uint8_t LAST_GOOD_TIER = 2;          // 123 / q3
+
+      for (uint8_t pass = 0; pass < 2 && !up; pass++) {
+        const uint8_t first_tier = (pass == 0) ? 0 : (uint8_t)(LAST_GOOD_TIER + 1);
+        const uint8_t last_tier  = (pass == 0) ? LAST_GOOD_TIER : (uint8_t)(NUM_TIERS - 1);
+        if (first_tier >= NUM_TIERS) break;
 
         uint8_t p = req_prph, c = req_central;
         for (;;) {
-          if (Bluefruit.begin(p, c)) {
-            s_prph = p; s_central = c;
-            s_mtu = TIERS[tier].mtu; s_qsize = TIERS[tier].qsize;
-            up = true;
-            break;
+          for (uint8_t tier = first_tier; tier <= last_tier && !up; tier++) {
+            Bluefruit.configPrphConn(TIERS[tier].mtu, BLE_GAP_EVENT_LENGTH_DEFAULT,
+                                     TIERS[tier].qsize, TIERS[tier].qsize);
+            Bluefruit.configCentralConn(TIERS[tier].mtu, BLE_GAP_EVENT_LENGTH_DEFAULT,
+                                        TIERS[tier].qsize, TIERS[tier].qsize);
+            if (Bluefruit.begin(p, c)) {
+              s_prph = p; s_central = c;
+              s_mtu = TIERS[tier].mtu; s_qsize = TIERS[tier].qsize;
+              up = true;
+            } else {
+              /* Each failed attempt leaves the SoftDevice enabled but
+                 unconfigured, so it has to come down or the next try fails on
+                 INVALID_STATE. */
+              sd_softdevice_disable();
+            }
           }
-          sd_softdevice_disable();
+          if (up) break;
 
-          /* Shed OUTBOUND spares first, then the inbound slot, and only as a
-             last resort the final outward link. Measured on a RAK3401: (4,3)
+          /* Shed OUTBOUND spares first, then the inbound slot, and only in the
+             second pass the final outward link. Measured on a RAK3401: (4,3)
              down to (4,0) were all refused and (3,0) accepted, so roughly three
              connections fit at stock buffers -- fewer with real ones. A node is
              always reachable on its one remaining peripheral slot (the CLI),
              and a peer we cannot accept inward will be dialled BY us instead --
-             which is exactly why the last central slot is the one to keep. */
-          if (c > 1)               c--;
-          else if (p > 1)          p--;
+             which is why the last central slot is the one to keep. */
+          const uint8_t min_central = (pass == 1) ? 0 : 1;
+          if (c > 1)                c--;
+          else if (p > 1)           p--;
           else if (c > min_central) c--;
-          else break;                            // this tier cannot fit; try a smaller one
+          else break;                            // exhausted; let the next pass try
         }
       }
       if (!up) return false;                     // even (1,0) at stock buffers: no BLE at all

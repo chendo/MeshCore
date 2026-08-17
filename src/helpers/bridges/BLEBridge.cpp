@@ -57,6 +57,9 @@ void BLEBridge::end() {
   BRIDGE_DEBUG_PRINTLN("BLE: stopping\n");
 
   if (_transport_up) {
+    /* Links first. Leaving them connected would hold a peripheral slot on the
+       peer, which stops IT advertising -- see BleLink::end(). */
+    _link.end();
     _bcast.end();
     _transport_up = false;
   }
