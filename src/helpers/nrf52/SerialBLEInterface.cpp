@@ -245,9 +245,20 @@ bool SerialBLEInterface::isValidConnection(uint16_t handle, bool requireWaitingF
 }
 
 bool SerialBLEInterface::isAdvertising() const {
-  ble_gap_addr_t adv_addr;
-  uint32_t err_code = sd_ble_gap_adv_addr_get(0, &adv_addr);
-  return (err_code == NRF_SUCCESS);
+  /* Ask whether advertising is RUNNING, not whether the set exists.
+     This used to be sd_ble_gap_adv_addr_get(0, ...), which succeeds whenever
+     advertising set 0 is CONFIGURED -- and it always is, because the bridge
+     configures it at startup. The watchdog below was therefore testing a value
+     that is permanently true, and could never fire.
+
+     That mattered. There is ONE advertising set on this SoftDevice
+     (BLE_GAP_ADV_SET_COUNT_MAX == 1), shared between the bridge's broadcast
+     bursts and this connectable advert, and the only thing re-asserting the
+     connectable advert was BleBroadcast::loop(). Stop the bridge and nothing
+     restored it: the node kept running -- main loop, LEDs, LoRa -- while being
+     completely undiscoverable for CLI or DFU. Observed exactly that on the
+     Mid-band node, which needed a physical reset to come back. */
+  return Bluefruit.Advertising.isRunning();
 }
 
 void SerialBLEInterface::enable() {
@@ -353,6 +364,14 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
       
       if (!isAdvertising()) {
         BLE_DEBUG_PRINTLN("SerialBLEInterface: advertising watchdog - advertising stopped, restarting");
+        /* This is the LAST line of defence for reaching a node at all, so it
+           deliberately does not care what else wants the advertising set. It
+           can land during one of the bridge's ~60ms broadcast bursts and cost
+           that datagram -- at one check per 10s that is well under 1% of
+           bursts, against broadcast that is lossy by nature and a peer link
+           that carries the real traffic anyway. Losing an occasional datagram
+           is a trade worth making to never again have a node running happily
+           with no way in. */
         Bluefruit.Advertising.start(0);
       }
     }

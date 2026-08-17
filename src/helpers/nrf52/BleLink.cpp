@@ -82,6 +82,40 @@ bool BleLink::begin(rx_handler_t handler, const ble_gap_addr_t& self_addr) {
   return true;
 }
 
+void BleLink::end() {
+  if (!_running) return;
+  _running = false;
+
+  /* Actually disconnect. Stopping the bridge while leaving its GATT links up is
+     worse than useless: the peer holds a connection to a node that will never
+     answer, and because the advertiser only advertises while a peripheral slot
+     is FREE (see BleBroadcast), a node with a single peripheral slot then stays
+     INVISIBLE -- no CLI, no DFU -- with its bridge switched off. That is
+     precisely how the production node became unflashable. */
+  for (uint8_t i = 0; i < MAX_LINKS; i++) {
+    Link& l = _links[i];
+    if (l.state == UP || l.state == DISCOVERING || l.state == CONNECTING) {
+      BLEConnection* c = Bluefruit.Connection(l.conn);
+      if (c != nullptr) c->disconnect();
+    }
+    l.state = EMPTY;
+    l.conn = BLE_CONN_HANDLE_INVALID;
+    l.txq_count = 0; l.txq_head = 0; l.tx_off = 0;
+    l.rx_expect = l.rx_have = 0; l.rx_hdr_have = 0;
+    l.authed = false; l.up_ms = 0;
+  }
+
+  if (_in_conn != BLE_CONN_HANDLE_INVALID) {
+    BLEConnection* c = Bluefruit.Connection(_in_conn);
+    if (c != nullptr) c->disconnect();
+    _in_conn = BLE_CONN_HANDLE_INVALID;
+  }
+  _in_txq_count = 0; _in_txq_head = 0; _in_tx_off = 0;
+  _in_expect = _in_have = 0; _in_hdr_have = 0;
+  _in_authed = false;
+  _topology_changed = true;                  // caller must re-arm scanning
+}
+
 bool BleLink::weInitiateTo(const ble_gap_addr_t& peer) const {
   /* Addresses are little-endian on the wire; compare from the most significant
      byte so the ordering matches how a human reads them. Equality cannot happen
