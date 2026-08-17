@@ -1264,6 +1264,19 @@ void MyMesh::formatBridgeReply(char *reply, const char* what) {
     return;
   }
 
+  if (memcmp(what, "cpu reset", 9) == 0) {
+    /* max-gap is a high-water mark that nothing otherwise clears, so a single
+       transient poisons it for the rest of the uptime and the number stops
+       answering "is the loop healthy NOW". Both repeaters sat at ~2s purely
+       because a CLI "set" wrote prefs -- a flash write blocks for about 1.6s
+       while the SoftDevice arbitrates -- which says nothing about steady-state
+       behaviour. Being able to zero it is what makes the measurement usable. */
+    _loop_gap_max_ms = 0;
+    _loop_last_ms = 0;
+    strcpy(reply, "OK - loop stats reset");
+    return;
+  }
+
   if (memcmp(what, "cpu", 3) == 0) {
     /* What advert ingestion costs. The link layer decodes every advert on air
        whether or not the whitelist lets it through, so filtering moves this
