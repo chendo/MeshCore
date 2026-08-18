@@ -254,7 +254,14 @@ void BleBroadcast::finishBurst() {
 bool BleBroadcast::presenceAdvert() {
   const char* nm = _presence_name[0] ? _presence_name : "MeshCore";
   uint8_t nlen = (uint8_t)strlen(nm);
-  if (nlen > 20) nlen = 20;
+  /* A legacy advert carries 31 bytes TOTAL. Flags cost 3 and the status block
+     costs 8, leaving 20 for the name AD structure -- 2 of overhead and 18 of
+     text. Overshooting is not a soft failure: sd_ble_gap_adv_set_configure
+     rejects the whole advert and the node stays invisible, which is the exact
+     failure this beacon exists to prevent. The production node's name is 19
+     characters, so this truncation is load-bearing, not theoretical. */
+  const uint8_t NAME_BUDGET = 31 - 3 /*flags*/ - 8 /*mfg block*/ - 2 /*name hdr*/;
+  if (nlen > NAME_BUDGET) nlen = NAME_BUDGET;
 
   uint8_t i = 0;
   _adv_buf[i++] = 2; _adv_buf[i++] = 0x01; _adv_buf[i++] = 0x04;  // Flags: BR/EDR not supported
