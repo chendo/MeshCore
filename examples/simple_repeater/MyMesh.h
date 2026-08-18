@@ -36,6 +36,7 @@
 #include <helpers/IdentityStore.h>
 #include <helpers/SimpleMeshTables.h>
 #include <helpers/StaticPoolPacketManager.h>
+#include <helpers/BatteryEstimator.h>
 #include <helpers/StatsFormatHelper.h>
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/RegionMap.h>
@@ -280,6 +281,10 @@ public:
      timeout becomes a reset loop. Measuring the worst case beats auditing for
      it -- filesystem writes, LoRa transmit and BLE work all block here. */
   unsigned long _loop_gap_max_ms = 0, _loop_last_ms = 0;
+
+  /* Charge/discharge inference from voltage alone -- there is no current
+     sensing on this hardware. See BatteryEstimator.h. */
+  BatteryEstimator _batt;
 #ifdef LOOP_WATCHDOG_MS
   /* Latches on the first loop pass, where the watchdog drops from the boot
      limit to the runtime limit. See loop(). */

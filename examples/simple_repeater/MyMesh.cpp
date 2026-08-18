@@ -1005,6 +1005,13 @@ void MyMesh::begin(FILESYSTEM *fs) {
      through a slow-but-legitimate boot and loop it forever. The limit tightens
      on the first loop pass, once there is a loop to watch. */
 #endif
+  /* Capacity is the one thing the estimator cannot infer, so it has to be
+     told. 0 leaves current and power unreported rather than guessed. */
+#ifndef BATTERY_CAPACITY_MAH
+  #define BATTERY_CAPACITY_MAH 0
+#endif
+  _batt.begin(BATTERY_CAPACITY_MAH);
+
   _fs = fs;
   // load persisted prefs
   _cli.loadPrefs(_fs);
@@ -1274,6 +1281,26 @@ void MyMesh::formatBridgeReply(char *reply, const char* what) {
                     loss_x10 / 10, loss_x10 % 10, cps_x100 / 100, cps_x100 % 100);
     }
     if (n == 0) snprintf(reply, reply_size, "no bridge peers heard yet");
+    return;
+  }
+
+  if (memcmp(what, "power", 5) == 0) {
+    /* Charge/discharge inferred from voltage alone -- this hardware has no
+       current sensing. Rates are NET (charger minus our own draw while
+       charging). q is confidence: 2 good, 1 fair, 0 poor -- poor means we are
+       on the flat middle of the lithium curve where voltage barely moves with
+       charge, and the estimate should not be leaned on. */
+    int32_t ma = _batt.milliAmps();
+    int32_t hrs = _batt.hoursRemaining(PWRMGT_VOLTAGE_BOOTLOCK);
+    char eta[24];
+    if (hrs < 0)       strcpy(eta, "eta unknown");
+    else if (ma > 0)   snprintf(eta, sizeof(eta), "full in %ldh", (long)hrs);
+    else               snprintf(eta, sizeof(eta), "cutoff in %ldh", (long)hrs);
+    snprintf(reply, reply_size,
+             "power: %umV %u%% %+ldmA %+ldmW (%+ldmV/hr); %s; q%u n%u",
+             (unsigned)_batt.latestMv(), (unsigned)_batt.percent(),
+             (long)ma, (long)_batt.milliWatts(), (long)_batt.mvPerHour(),
+             eta, (unsigned)_batt.sampleQuality(), (unsigned)_batt.numSamples());
     return;
   }
 
@@ -1602,6 +1629,9 @@ void MyMesh::loop() {
     }
     _loop_last_ms = lt;
     _loop_iters++;
+    /* Gate the ADC read on due(): the loop runs ~16k times a second and an
+       ADC conversion is not free. One sample a minute is all this needs. */
+    if (_batt.due()) _batt.update(board.getBattMilliVolts());
 #ifdef LOOP_WATCHDOG_MS
     LoopWatchdog::feed();
     /* First pass proves the loop is actually running, which is the only point
