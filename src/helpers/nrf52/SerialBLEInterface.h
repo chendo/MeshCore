@@ -14,7 +14,22 @@
 #include <bluefruit.h>
 
 #ifndef BLE_TX_POWER
-#define BLE_TX_POWER 4
+/* Maximum the nRF52840 supports. Was 4dBm, which is fine on a bench and not
+   fine on a sited repeater: the production node sits at -65dBm from its bridge
+   peer and repeatedly could not be FOUND from a laptop, while its p2p link was
+   carrying traffic perfectly the whole time. Discovery is the weakest link in
+   the chain, because an advert is a single unacknowledged packet -- if it is
+   missed there is no retry, whereas a connection retransmits until it lands.
+
+   +8dBm is 4dB over the old value, worth roughly 1.6x range. It costs nothing
+   that matters: advertising TX duty is a few hundred microseconds per 152ms
+   interval, about 0.2%, so even at 14.8mA while keyed the average is ~0.02mA
+   against the ~2.3mA the scanner already draws continuously.
+
+   BleBroadcast picks this up too -- it passes Bluefruit.getTxPower() to
+   sd_ble_gap_tx_power_set for its own advertising set -- so bridge datagrams
+   get the same gain. */
+#define BLE_TX_POWER 8
 #endif
 
 class SerialBLEInterface : public BaseSerialInterface {
