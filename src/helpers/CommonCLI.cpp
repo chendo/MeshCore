@@ -453,6 +453,9 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       _callbacks->formatRadioStatsReply(reply);
     } else if (memcmp(command, "stats-core", 10) == 0 && (command[10] == 0 || command[10] == ' ')) {
       _callbacks->formatStatsReply(reply);
+    } else if (memcmp(command, "power", 5) == 0 && (command[5] == 0 || command[5] == ' ')) {
+      /* Battery, not bridge -- reachable on any build with an estimator. */
+      _callbacks->formatBridgeReply(reply, "power");
     } else if (memcmp(command, "bridge", 6) == 0 && (command[6] == 0 || command[6] == ' ')) {
       _callbacks->formatBridgeReply(reply, (command[6] == ' ') ? &command[7] : "");
     } else {
