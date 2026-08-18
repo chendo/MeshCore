@@ -205,10 +205,7 @@ public:
   /** Name and battery shown in the presence beacon -- see presenceAdvert().
    *  Safe to call every loop; it only copies when something changed. */
   void setPresenceInfo(const char* name, uint16_t batt_mv) {
-    if (name && strncmp(_presence_name, name, sizeof(_presence_name) - 1) != 0) {
-      strncpy(_presence_name, name, sizeof(_presence_name) - 1);
-      _presence_name[sizeof(_presence_name) - 1] = 0;
-    }
+    (void)name;                                     // beacon identifies by MAC
     _presence_batt_dv = (uint8_t)(batt_mv / 100);   // decivolts: 3.7V -> 37
   }
   /** Mean RSSI over all reports seen, as a proxy for ambient BLE activity --
@@ -376,9 +373,9 @@ private:
      see the node is alive, read its status out of the advert, and know to go
      and free a slot. */
   static const uint32_t PRESENCE_INTERVAL_MS = 3000;
-  char _presence_name[24] = {0};
   uint8_t _presence_batt_dv = 0;
   unsigned long _next_presence_ms = 0;
+  bool _presence_running = false;
   bool presenceAdvert();
 
   /* Same hazard on the advertising side. The connectable advert is re-asserted
