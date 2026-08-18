@@ -31,6 +31,17 @@
  *     usually the number you actually want: it is what decides whether the
  *     battery is winning.
  *
+ *   - It CANNOT see constant-voltage charging. Near full, a charger stops
+ *     raising the voltage and tapers the current instead, so dV/dt goes to zero
+ *     while real current is still flowing. This will report ~0mA and "full"
+ *     long before the cell actually is. Treat a stalled reading above ~4.1V as
+ *     "in CV, still charging", not "finished".
+ *   - While charging, the terminal sits ABOVE the resting voltage by I x ESR,
+ *     so the absolute state of charge reads high. The derivative is largely
+ *     unaffected while the current is steady -- the offset cancels between the
+ *     two endpoints -- which is why the mA figure is more trustworthy than the
+ *     percentage during a charge.
+ *
  * Deliberately long window. The rates involved are tens of millivolts per HOUR
  * against an ADC that jitters a few millivolts sample to sample, so a short
  * window measures noise. A least-squares fit over hours is what makes the
@@ -166,8 +177,8 @@ private:
   struct Point { uint16_t mv; uint16_t soc10; };
   static uint16_t soc10FromMv(uint16_t mv) {
     static const Point CURVE[] = {
-      { 3000,   0 }, { 3300,  10 }, { 3400,  30 }, { 3500,  60 },
-      { 3600, 120 }, { 3650, 180 }, { 3700, 250 }, { 3750, 350 },
+      { 3000,   0 }, { 3300,  50 }, { 3400,  80 }, { 3500, 100 },
+      { 3600, 150 }, { 3650, 200 }, { 3700, 250 }, { 3750, 350 },
       { 3800, 450 }, { 3850, 550 }, { 3900, 650 }, { 4000, 800 },
       { 4100, 900 }, { 4200, 1000 },
     };
