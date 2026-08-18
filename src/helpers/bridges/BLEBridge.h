@@ -142,6 +142,10 @@ public:
                    uint32_t* rx_age_s = nullptr, uint32_t* queued = nullptr) const {
     return _link.getLink(i, a, up, rssi, sent, recv, drops, rx_age_s, queued);
   }
+  /** Name/battery for the non-connectable presence beacon. */
+  void setPresenceInfo(const char* name, uint16_t batt_mv) { _bcast.setPresenceInfo(name, batt_mv); }
+  uint32_t numPresenceAdverts() const { return _bcast.numPresenceAdverts(); }
+
   uint32_t numRxOk() const { return _num_rx_ok; }
   uint32_t numDup() const { return _num_dup; }
   /** Tag failures, split by the transport they arrived on -- the two mean
