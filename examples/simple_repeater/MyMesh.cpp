@@ -1641,6 +1641,13 @@ void MyMesh::loop() {
     /* Gate the ADC read on due(): the loop runs ~16k times a second and an
        ADC conversion is not free. One sample a minute is all this needs. */
     if (_batt.due()) _batt.update(board.getBattMilliVolts());
+#ifdef WITH_BLE_BRIDGE
+    /* Keep the presence beacon's payload current. It is what a scanner sees
+       when this node has no free peripheral slot and cannot advertise
+       connectably -- name and battery are enough to triage it without ever
+       opening a connection. */
+    bridge.setPresenceInfo(_prefs.node_name, _batt.latestMv());
+#endif
 #ifdef LOOP_WATCHDOG_MS
     LoopWatchdog::feed();
     /* First pass proves the loop is actually running, which is the only point

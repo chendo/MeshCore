@@ -242,6 +242,59 @@ void BleBroadcast::finishBurst() {
   _restore_connectable = false;
 }
 
+
+/* A non-connectable advert carrying our name, run when the connectable one
+   cannot. Deliberately uses the ordinary (not extended) advertising type with a
+   Complete Local Name AD structure, because that is what a phone or laptop
+   scanner shows in its device list -- an extended manufacturer-data advert is
+   invisible to most of them.
+
+   Payload after the name is a small status block so the node can be triaged
+   without connecting at all: version, battery decivolts, and uptime minutes. */
+bool BleBroadcast::presenceAdvert() {
+  const char* nm = _presence_name[0] ? _presence_name : "MeshCore";
+  uint8_t nlen = (uint8_t)strlen(nm);
+  if (nlen > 20) nlen = 20;
+
+  uint8_t i = 0;
+  _adv_buf[i++] = 2; _adv_buf[i++] = 0x01; _adv_buf[i++] = 0x04;  // Flags: BR/EDR not supported
+  _adv_buf[i++] = (uint8_t)(nlen + 1);
+  _adv_buf[i++] = 0x09;                                            // Complete Local Name
+  memcpy(&_adv_buf[i], nm, nlen); i += nlen;
+
+  /* Manufacturer data: [company][ver][batt dV][uptime min lo][hi] */
+  _adv_buf[i++] = 7;
+  _adv_buf[i++] = 0xFF;
+  _adv_buf[i++] = (uint8_t)(_company_id & 0xFF);
+  _adv_buf[i++] = (uint8_t)(_company_id >> 8);
+  _adv_buf[i++] = 0x01;                                            // presence record version
+  _adv_buf[i++] = _presence_batt_dv;
+  uint16_t up_min = (uint16_t)(millis() / 60000UL);
+  _adv_buf[i++] = (uint8_t)(up_min & 0xFF);
+  _adv_buf[i++] = (uint8_t)(up_min >> 8);
+  _adv_len = i;
+
+  ble_gap_adv_data_t adv_data;
+  memset(&adv_data, 0, sizeof(adv_data));
+  adv_data.adv_data.p_data = _adv_buf;
+  adv_data.adv_data.len = _adv_len;
+
+  ble_gap_adv_params_t adv_params;
+  memset(&adv_params, 0, sizeof(adv_params));
+  /* Scannable, so scanners that ask for a scan response still list it, and
+     NON-connectable so it needs no free connection slot. */
+  adv_params.properties.type = BLE_GAP_ADV_TYPE_NONCONNECTABLE_SCANNABLE_UNDIRECTED;
+  adv_params.primary_phy = BLE_GAP_PHY_1MBPS;
+  adv_params.secondary_phy = BLE_GAP_PHY_1MBPS;
+  adv_params.interval = 244;                     // 152.5ms, same as the connectable advert
+  adv_params.duration = (uint16_t)(PRESENCE_INTERVAL_MS / 10);
+  adv_params.filter_policy = BLE_GAP_ADV_FP_ANY;
+
+  sd_ble_gap_adv_stop(_adv_handle);
+  if (sd_ble_gap_adv_set_configure(&_adv_handle, &adv_data, &adv_params) != NRF_SUCCESS) return false;
+  return sd_ble_gap_adv_start(_adv_handle, 1) == NRF_SUCCESS;
+}
+
 void BleBroadcast::loop() {
   if (!_running) return;
 
@@ -313,6 +366,18 @@ void BleBroadcast::loop() {
       _num_adv_fail++;
       _next_adv_try_ms = millis() + ADV_RETRY_MS;   // refusing: stop hammering it
     }
+  }
+
+  /* Nothing connectable is running and nothing is bursting -- so either every
+     peripheral slot is taken or the SoftDevice refused. Either way the node is
+     currently invisible to every scanner, which is how both repeaters came to
+     be "missing" tonight while bridging perfectly. Fall back to a
+     non-connectable presence beacon, which needs no connection slot. */
+  if (_shares_adv_set && !_bursting
+      && !Bluefruit.Advertising.isRunning()
+      && (long)(millis() - _next_presence_ms) >= 0) {
+    _next_presence_ms = millis() + PRESENCE_INTERVAL_MS;
+    if (presenceAdvert()) _num_presence++;
   }
 
   /* Receive-path liveness. A scanner in a populated environment hears adverts

@@ -200,6 +200,17 @@ public:
   }
   /** Times the SoftDevice refused to start the connectable advert. */
   uint32_t numAdvFailures() const { return _num_adv_fail; }
+  uint32_t numPresenceAdverts() const { return _num_presence; }
+
+  /** Name and battery shown in the presence beacon -- see presenceAdvert().
+   *  Safe to call every loop; it only copies when something changed. */
+  void setPresenceInfo(const char* name, uint16_t batt_mv) {
+    if (name && strncmp(_presence_name, name, sizeof(_presence_name) - 1) != 0) {
+      strncpy(_presence_name, name, sizeof(_presence_name) - 1);
+      _presence_name[sizeof(_presence_name) - 1] = 0;
+    }
+    _presence_batt_dv = (uint8_t)(batt_mv / 100);   // decivolts: 3.7V -> 37
+  }
   /** Mean RSSI over all reports seen, as a proxy for ambient BLE activity --
    *  there is no way to sample a true noise floor while the SoftDevice scans. */
   int8_t meanReportRssi() const {
@@ -353,6 +364,23 @@ private:
   static const uint32_t SCAN_RETRY_MS = 1000;
   unsigned long _next_scan_try_ms = 0;
 
+  /* Presence beacon. When the connectable advert cannot run -- which happens
+     whenever a peer link occupies the last peripheral slot, because the
+     SoftDevice will not start a CONNECTABLE advert with no free connection --
+     the node vanishes from every scanner even though it is working perfectly.
+     Observed on both repeaters: whichever one ACCEPTED the bridge link went
+     invisible, and they swapped roles when the link re-established.
+
+     A NON-connectable advert needs no connection slot, so it always works.
+     Being findable-but-unconnectable is far better than being absent: you can
+     see the node is alive, read its status out of the advert, and know to go
+     and free a slot. */
+  static const uint32_t PRESENCE_INTERVAL_MS = 3000;
+  char _presence_name[24] = {0};
+  uint8_t _presence_batt_dv = 0;
+  unsigned long _next_presence_ms = 0;
+  bool presenceAdvert();
+
   /* Same hazard on the advertising side. The connectable advert is re-asserted
      every pass, so a SoftDevice that persistently refuses turns that assertion
      into the identical unpaced spin. Only failures are paced -- see loop(). */
@@ -405,6 +433,7 @@ private:
   volatile bool _ever_heard = false;
   uint32_t _num_recoveries = 0;
   uint32_t _num_adv_fail = 0;
+  uint32_t _num_presence = 0;
 
   uint32_t _report_cpu_us = 0;
   uint32_t _report_count = 0;
