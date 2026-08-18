@@ -1239,12 +1239,21 @@ void MyMesh::formatBridgeReply(char *reply, const char* what) {
        acknowledging and retrying for us; anything else means this peer is
        still being served by broadcast, with its measured loss. */
     int o = snprintf(reply, reply_size, "%d link(s) up:", (int)bridge.numLinks());
-    for (uint8_t i = 0; i < BleLink::MAX_LINKS && o + 28 < (int)reply_size; i++) {
+    for (uint8_t i = 0; i < BleLink::MAX_LINKS && o + 48 < (int)reply_size; i++) {
       ble_gap_addr_t a; bool up; int8_t rssi; uint32_t sent, recv, drops;
-      if (!bridge.getLinkInfo(i, a, up, rssi, sent, recv, drops)) continue;
-      o += snprintf(&reply[o], reply_size - o, " %02X%02X%02X/%s/tx%lu/rx%lu/drop%lu",
+      uint32_t rx_age = 0xFFFFFFFF, queued = 0;
+      if (!bridge.getLinkInfo(i, a, up, rssi, sent, recv, drops, &rx_age, &queued)) continue;
+      /* rx age matters more than the counters: totals cannot tell a link that
+         is carrying traffic from one that is nominally up and has been silent
+         for an hour. Heartbeats put a frame on every link each interval, so
+         anything past ~15s is already suspect. */
+      char age[12];
+      if (rx_age == 0xFFFFFFFF) strcpy(age, "never");
+      else snprintf(age, sizeof(age), "%lus", (unsigned long)rx_age);
+      o += snprintf(&reply[o], reply_size - o, " %02X%02X%02X/%s/tx%lu/rx%lu/drop%lu/q%lu/rx@%s",
                     a.addr[5], a.addr[4], a.addr[3], up ? "up" : "dialling",
-                    (unsigned long)sent, (unsigned long)recv, (unsigned long)drops);
+                    (unsigned long)sent, (unsigned long)recv, (unsigned long)drops,
+                    (unsigned long)queued, age);
     }
     if (o <= 14) snprintf(reply, reply_size, "no peer links (broadcast only)");
     return;

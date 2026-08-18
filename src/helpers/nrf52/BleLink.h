@@ -85,8 +85,12 @@ public:
   void markAuthed(uint8_t idx);
 
   uint8_t numUp() const;
+  /** @param rx_age_s  optional: seconds since the last frame arrived, or
+   *                    0xFFFFFFFF if nothing ever has.
+   *  @param queued     optional: frames still waiting in this link's TX queue. */
   bool getLink(uint8_t idx, ble_gap_addr_t& addr, bool& up, int8_t& rssi,
-               uint32_t& sent, uint32_t& recv, uint32_t& drops) const;
+               uint32_t& sent, uint32_t& recv, uint32_t& drops,
+               uint32_t* rx_age_s = nullptr, uint32_t* queued = nullptr) const;
 
 private:
   /* Only the numerically lower address dials, so a pair converges on exactly

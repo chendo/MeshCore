@@ -138,8 +138,9 @@ public:
      retried by the link layer rather than hoped for. */
   uint8_t numLinks() const { return _link.numUp(); }
   bool getLinkInfo(uint8_t i, ble_gap_addr_t& a, bool& up, int8_t& rssi,
-                   uint32_t& sent, uint32_t& recv, uint32_t& drops) const {
-    return _link.getLink(i, a, up, rssi, sent, recv, drops);
+                   uint32_t& sent, uint32_t& recv, uint32_t& drops,
+                   uint32_t* rx_age_s = nullptr, uint32_t* queued = nullptr) const {
+    return _link.getLink(i, a, up, rssi, sent, recv, drops, rx_age_s, queued);
   }
   uint32_t numRxOk() const { return _num_rx_ok; }
   uint32_t numDup() const { return _num_dup; }
