@@ -201,6 +201,7 @@ public:
   /** Times the SoftDevice refused to start the connectable advert. */
   uint32_t numAdvFailures() const { return _num_adv_fail; }
   uint32_t numPresenceAdverts() const { return _num_presence; }
+  uint32_t presenceError() const { return _presence_err; }
 
   /** Name and battery shown in the presence beacon -- see presenceAdvert().
    *  Safe to call every loop; it only copies when something changed. */
@@ -376,6 +377,7 @@ private:
   uint8_t _presence_batt_dv = 0;
   unsigned long _next_presence_ms = 0;
   bool _presence_running = false;
+  uint32_t _presence_err = 0;   // last SoftDevice error, 0 = none
   bool presenceAdvert();
 
   /* Same hazard on the advertising side. The connectable advert is re-asserted
