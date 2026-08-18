@@ -20,8 +20,9 @@
  * Accuracy, honestly:
  *
  *   - Best near the ends of the curve, where mV per percent is large.
- *   - Worst between about 3.70 and 3.95V, where the cell gives up 40% of its
- *     charge across ~250mV. Expect wide error bars there; sampleQuality()
+ *   - Worst between about 3.69 and 3.91V, where the cell gives up 55% of its
+ *     charge across barely 220mV -- under 4mV per percent, which is close to
+ *     the ADC's own noise. Expect wide error bars there; sampleQuality()
  *     reports it rather than pretending otherwise.
  *   - Voltage is read under load, so it sits below open-circuit by I x ESR.
  *     At tens of milliamps and ~100mOhm that is a few mV -- negligible against
@@ -154,7 +155,7 @@ public:
   uint8_t sampleQuality() const {
     if (_n < MAX_SAMPLES / 4) return 0;
     uint16_t mv = latestMv();
-    if (mv >= 3700 && mv <= 3950) return _n >= MAX_SAMPLES ? 1 : 0;
+    if (mv >= 3690 && mv <= 3910) return _n >= MAX_SAMPLES ? 1 : 0;
     return _n >= MAX_SAMPLES / 2 ? 2 : 1;
   }
 
@@ -176,11 +177,25 @@ private:
      shape is what matters -- flat through the middle, steep at both ends. */
   struct Point { uint16_t mv; uint16_t soc10; };
   static uint16_t soc10FromMv(uint16_t mv) {
+    /* Measured resting-voltage curve for a single lithium-polymer cell.
+       Source: voltagebasics.com LiPo voltage-vs-SoC table, which is stated to
+       apply "when the cell is at rest" -- which is our case: a repeater draws
+       tens of mA from a 6Ah pack, about 0.008C, so terminal voltage sits
+       essentially at open-circuit.
+
+       Note how brutally non-linear this really is, and how wrong a linear
+       reading of volts would be:
+         3.84 - 3.73V  covers 50% -> 20% of charge  (3.7mV per percent)
+         3.61 - 3.27V  covers  5% ->  0%            (68mV per percent)
+       The middle is nearly flat and the bottom is a cliff. A node reading
+       3.5V is not "half empty", it is empty. */
     static const Point CURVE[] = {
-      { 3000,   0 }, { 3300,  50 }, { 3400,  80 }, { 3500, 100 },
-      { 3600, 150 }, { 3650, 200 }, { 3700, 250 }, { 3750, 350 },
-      { 3800, 450 }, { 3850, 550 }, { 3900, 650 }, { 4000, 800 },
-      { 4100, 900 }, { 4200, 1000 },
+      { 3270,   0 }, { 3610,  50 }, { 3690, 100 }, { 3710, 150 },
+      { 3730, 200 }, { 3750, 250 }, { 3770, 300 }, { 3790, 350 },
+      { 3800, 400 }, { 3820, 450 }, { 3840, 500 }, { 3850, 550 },
+      { 3870, 600 }, { 3910, 650 }, { 3950, 700 }, { 3980, 750 },
+      { 4020, 800 }, { 4080, 850 }, { 4110, 900 }, { 4150, 950 },
+      { 4200, 1000 },
     };
     const uint8_t N = sizeof(CURVE) / sizeof(CURVE[0]);
     if (mv <= CURVE[0].mv) return 0;
