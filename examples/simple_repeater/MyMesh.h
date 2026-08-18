@@ -90,6 +90,7 @@ struct NeighbourInfo {
 
 #ifdef LOOP_WATCHDOG_MS
   #include <helpers/nrf52/LoopWatchdog.h>
+#endif
 #if WITH_MESH_OBSERVER
   #include "helpers/MeshObserver.h"
 #endif

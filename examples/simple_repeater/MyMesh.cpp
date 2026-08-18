@@ -496,6 +496,7 @@ const char *MyMesh::getLogDateTime() {
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 #if WITH_STATUS_LED
   StatusLed::loraRx();
+#endif
 #if WITH_MESH_OBSERVER
   _obs.observeRx(raw, len, (int8_t)(snr * 4));   // peers, hops, types, relay confirms
 #endif
@@ -572,6 +573,7 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
 #if WITH_STATUS_LED
   StatusLed::loraTx();
+#endif
 #if WITH_MESH_OBSERVER
   // only the header byte matters here: observeTx uses it to spot floods, which
   // are the only transmissions that can come back to us relayed
@@ -1054,6 +1056,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // Without this the observer holds no clock, so every advert timestamp is
   // discarded on the null check and clock readings never happen at all.
   _obs.setClock(getRTCClock());
+#endif
   _fs = fs;
   // load persisted prefs
   _cli.loadPrefs(_fs);
