@@ -298,18 +298,33 @@ bool BleBroadcast::presenceAdvert() {
 
   ble_gap_adv_params_t adv_params;
   memset(&adv_params, 0, sizeof(adv_params));
-  /* Scannable, so scanners that ask for a scan response still list it, and
-     NON-connectable so it needs no free connection slot. */
-  adv_params.properties.type = BLE_GAP_ADV_TYPE_NONCONNECTABLE_SCANNABLE_UNDIRECTED;
+  /* Legacy NON-connectable, NON-scannable (ADV_NONCONN_IND).
+     Non-connectable is the point: it needs no free connection slot.
+     Non-SCANNABLE because ble_gap.h is explicit that scan response data "can
+     only be specified for a type that is scannable" -- I first chose the
+     scannable type while supplying no scan response, which is exactly the kind
+     of thing the SoftDevice rejects. This type carries the full 31 bytes of
+     advertising data on its own and needs no second buffer, and it is the same
+     family as the burst path that already works here. */
+  adv_params.properties.type = BLE_GAP_ADV_TYPE_NONCONNECTABLE_NONSCANNABLE_UNDIRECTED;
   adv_params.primary_phy = BLE_GAP_PHY_1MBPS;
   adv_params.secondary_phy = BLE_GAP_PHY_1MBPS;
   adv_params.interval = 244;                     // 152.5ms, same as the connectable advert
   adv_params.duration = (uint16_t)(PRESENCE_INTERVAL_MS / 10);
   adv_params.filter_policy = BLE_GAP_ADV_FP_ANY;
 
+  /* Record WHY it failed. The first version returned a bare false, so a beacon
+     that never once configured looked identical to one that was simply not due
+     -- and it took a hardware session to notice it had never run at all. An
+     error that cannot be read is an error that will be assumed away. */
   sd_ble_gap_adv_stop(_adv_handle);
-  if (sd_ble_gap_adv_set_configure(&_adv_handle, &adv_data, &adv_params) != NRF_SUCCESS) return false;
-  if (sd_ble_gap_adv_start(_adv_handle, 1) != NRF_SUCCESS) return false;
+  _presence_err = sd_ble_gap_adv_set_configure(&_adv_handle, &adv_data, &adv_params);
+  if (_presence_err != NRF_SUCCESS) return false;
+  /* conn_cfg_tag is documented as ignored for non-connectable advertising, but
+     pass the default rather than an arbitrary tag -- matching the burst path
+     above, which is the code here that is known to work. */
+  _presence_err = sd_ble_gap_adv_start(_adv_handle, BLE_CONN_CFG_TAG_DEFAULT);
+  if (_presence_err != NRF_SUCCESS) return false;
   _presence_running = true;
   return true;
 }

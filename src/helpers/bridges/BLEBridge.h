@@ -145,6 +145,7 @@ public:
   /** Name/battery for the non-connectable presence beacon. */
   void setPresenceInfo(const char* name, uint16_t batt_mv) { _bcast.setPresenceInfo(name, batt_mv); }
   uint32_t numPresenceAdverts() const { return _bcast.numPresenceAdverts(); }
+  uint32_t presenceError() const { return _bcast.presenceError(); }
 
   uint32_t numRxOk() const { return _num_rx_ok; }
   uint32_t numDup() const { return _num_dup; }

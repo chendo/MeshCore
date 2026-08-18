@@ -1411,14 +1411,18 @@ void MyMesh::formatBleReply(char *reply) {
      not fit silently degrades to the single-peripheral fallback -- which looks
      identical from outside until something tries to open a second link. */
   snprintf(reply, 160,
-           "ble on, PIN %06lu (new every boot), connected=%s; slots %up/%uc mtu %u q%u",
+           "ble on, PIN %06lu, connected=%s; slots %up/%uc mtu %u q%u; beacon %lu err 0x%lX",
            (unsigned long)_ble_pin,
            (_ble != nullptr && _ble->isConnected()) ? "yes" : "no",
            (unsigned)BleStack::periphSlots(), (unsigned)BleStack::centralSlots(),
            /* What the RAM ladder actually settled for. mtu 23 means every link
               frame is fragmented; q1 means the fragments cannot be pipelined,
               which together discarded a third of link traffic. */
-           (unsigned)BleStack::mtu(), (unsigned)BleStack::txQueueSize());
+           (unsigned)BleStack::mtu(), (unsigned)BleStack::txQueueSize(),
+           /* Presence beacon: how many have gone out, and the last SoftDevice
+              error if any. A silent zero here means it never ran. */
+           (unsigned long)bridge.numPresenceAdverts(),
+           (unsigned long)bridge.presenceError());
 }
 
 void MyMesh::bleLoop() {
