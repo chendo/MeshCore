@@ -494,13 +494,24 @@ uint8_t BleLink::numUp() const {
 }
 
 bool BleLink::getLink(uint8_t idx, ble_gap_addr_t& addr, bool& up, int8_t& rssi,
-                      uint32_t& sent, uint32_t& recv, uint32_t& drops) const {
+                      uint32_t& sent, uint32_t& recv, uint32_t& drops,
+                      uint32_t* rx_age_s, uint32_t* queued) const {
   if (idx >= MAX_LINKS || _links[idx].state == EMPTY) return false;
   const Link& l = _links[idx];
   memcpy(&addr, &l.addr, sizeof(addr));
   up = (l.state == UP);
   rssi = 0;                                  // filled by the RSSI report, if started
   sent = l.sent; recv = l.recv; drops = l.drops;
+  /* Seconds since anything last arrived on this link. Counters alone cannot
+     distinguish a link carrying traffic from one that is nominally up and has
+     been silent for an hour -- the supervision timeout only notices a radio
+     that vanished, not a peer that went quiet. Signed, because last_rx_ms is
+     written from BLE event context and can land just ahead of this millis(). */
+  if (rx_age_s) {
+    *rx_age_s = (l.last_rx_ms == 0) ? 0xFFFFFFFF
+              : (uint32_t)(((long)(millis() - l.last_rx_ms)) / 1000);
+  }
+  if (queued) *queued = l.txq_count;
   return true;
 }
 
