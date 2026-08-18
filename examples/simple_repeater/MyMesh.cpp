@@ -493,9 +493,38 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
      the other one. It has to be what we heard, not merely what we chose to
      relay -- our routing policy drops duplicates and hop-exceeded packets
      because they are old news ON THIS BAND, while the far band may never have
-     seen them at all. Dedup is per-band; the bridge crosses bands. */
+     seen them at all. Dedup is per-band; the bridge crosses bands.
+
+     APPEND OURSELVES TO THE PATH FIRST. logRx runs at Dispatcher.cpp:238,
+     BEFORE routeRecvPacket() appends this node's hash at Mesh.cpp:349 -- so the
+     copy we bridge would otherwise describe a route that never mentions us, and
+     the far side would relay it as though the packet had arrived from thin air.
+     The bridge would be a tunnel, not a hop.
+
+     That is not cosmetic. The path IS the return route for direct packets, and
+     the bridge is the only link between the two bands: omit ourselves and a
+     reply is routed back through hops that cannot carry it. Flood traffic
+     survives because it is broadcast; anything direct does not.
+
+     The later logTx copy carries the same hash but is dropped by the bridge's
+     own dedup -- calculatePacketHash() covers the payload and not the path, so
+     both copies hash alike and the first one through wins. Making that first
+     copy the correct one is the whole fix.
+
+     Restore the count afterwards so local processing is untouched; only the
+     count bits change, and hash bytes past the count are ignored. Floods only:
+     a direct packet follows a fixed path that we must not rewrite. */
   if (_prefs.bridge_pkt_src >= 1) {
+    const uint8_t n = pkt->getPathHashCount();
+    const uint8_t hsz = pkt->getPathHashSize();
+    bool appended = false;
+    if (pkt->isRouteFlood() && (n + 1) * hsz <= MAX_PATH_SIZE) {
+      self_id.copyHashTo(&pkt->path[n * hsz], hsz);
+      pkt->setPathHashCount(n + 1);
+      appended = true;
+    }
     bridge.sendPacket(pkt);
+    if (appended) pkt->setPathHashCount(n);
   }
 #endif
 
