@@ -252,7 +252,17 @@ void BleBroadcast::finishBurst() {
    Payload after the name is a small status block so the node can be triaged
    without connecting at all: version, battery decivolts, and uptime minutes. */
 bool BleBroadcast::presenceAdvert() {
-  const char* nm = _presence_name[0] ? _presence_name : "MeshCore";
+  /* Hydra-<last 3 bytes of MAC>. Deliberately NOT the node name: it is short,
+     fixed-width, unique, and identical to what the device reports elsewhere, so
+     a scanner shows the same handle no matter which advert it caught. A node
+     name can be 30 characters and would blow the 31-byte legacy budget. */
+  char nm[16];
+  ble_gap_addr_t self;
+  if (sd_ble_gap_addr_get(&self) == NRF_SUCCESS) {
+    snprintf(nm, sizeof(nm), "Hydra-%02X%02X%02X", self.addr[2], self.addr[1], self.addr[0]);
+  } else {
+    strcpy(nm, "Hydra-------");
+  }
   uint8_t nlen = (uint8_t)strlen(nm);
   /* A legacy advert carries 31 bytes TOTAL. Flags cost 3 and the status block
      costs 8, leaving 20 for the name AD structure -- 2 of overhead and 18 of
@@ -299,7 +309,9 @@ bool BleBroadcast::presenceAdvert() {
 
   sd_ble_gap_adv_stop(_adv_handle);
   if (sd_ble_gap_adv_set_configure(&_adv_handle, &adv_data, &adv_params) != NRF_SUCCESS) return false;
-  return sd_ble_gap_adv_start(_adv_handle, 1) == NRF_SUCCESS;
+  if (sd_ble_gap_adv_start(_adv_handle, 1) != NRF_SUCCESS) return false;
+  _presence_running = true;
+  return true;
 }
 
 void BleBroadcast::loop() {
@@ -351,8 +363,20 @@ void BleBroadcast::loop() {
      connections meant a node with a link stopped advertising entirely -- so its
      CLI and DFU became unreachable the moment bridging started working, which
      is the worst possible time to lose the way in. */
-  if (_shares_adv_set && !_bursting
-      && Bluefruit.Periph.connected() < BleStack::periphSlots()
+  /* Exactly one owner of the advertising set at a time. The connectable advert
+     is preferred whenever a peripheral slot is free; only when one is NOT free
+     does the presence beacon take over. Without this split the two fight: my
+     raw sd_ble_gap_adv_start is invisible to Bluefruit.Advertising.isRunning(),
+     so the connectable path would restart every pass and stomp the beacon --
+     the same three-owners bug this file already carries scars from. */
+  const bool slot_free = (Bluefruit.Periph.connected() < BleStack::periphSlots());
+
+  if (_shares_adv_set && !_bursting && slot_free && _presence_running) {
+    sd_ble_gap_adv_stop(_adv_handle);      // hand the set back to the connectable advert
+    _presence_running = false;
+  }
+
+  if (_shares_adv_set && !_bursting && slot_free
       && !Bluefruit.Advertising.isRunning()
       && (long)(millis() - _next_adv_try_ms) >= 0) {
     /* Counted rather than ignored. If the SoftDevice is refusing, asserting the
@@ -380,8 +404,7 @@ void BleBroadcast::loop() {
      currently invisible to every scanner, which is how both repeaters came to
      be "missing" tonight while bridging perfectly. Fall back to a
      non-connectable presence beacon, which needs no connection slot. */
-  if (_shares_adv_set && !_bursting
-      && !Bluefruit.Advertising.isRunning()
+  if (_shares_adv_set && !_bursting && !slot_free
       && (long)(millis() - _next_presence_ms) >= 0) {
     _next_presence_ms = millis() + PRESENCE_INTERVAL_MS;
     if (presenceAdvert()) _num_presence++;
