@@ -198,23 +198,53 @@ void MeshObserver::notePeersInPath(const uint8_t* frame, int len, int8_t snr4) {
   }
 }
 
-void MeshObserver::noteAdvert(const uint8_t* frame, int len, int8_t snr4) {
-  if (((frame[0] >> 2) & 0x0F) != 4) return;          // PAYLOAD_TYPE_ADVERT
+bool MeshObserver::parseAdvert(const uint8_t* frame, int len,
+                               const uint8_t*& pub, uint8_t& hops,
+                               uint32_t& their_ts) const {
+  if (frame == nullptr || len < 2) return false;
+  if (((frame[0] >> 2) & 0x0F) != 4) return false;    // PAYLOAD_TYPE_ADVERT
 
   uint8_t route = frame[0] & 0x03;
   int o = 1;
   if (route == 0 || route == 3) o += 4;
-  if (o >= len) return;
+  if (o >= len) return false;
   uint8_t pl = frame[o++];
-  uint8_t hops = pl & 63;
+  hops = pl & 63;
   uint8_t sz = (pl >> 6) + 1;
-  if (sz > 3 || o + hops * sz > len) return;
+  if (sz > 3 || o + hops * sz > len) return false;
   o += hops * sz;
 
   // payload: [pub_key 32][timestamp 4][signature 64][app_data]
-  if (o + 100 > len) return;
-  const uint8_t* pub = &frame[o];
-  if (isSelf(pub, 4)) return;                         // never record ourselves
+  if (o + 100 > len) return false;
+  pub = &frame[o];
+  if (isSelf(pub, 4)) return false;                   // never record ourselves
+
+  memcpy(&their_ts, &frame[o + 32], 4);
+  return true;
+}
+
+void MeshObserver::observeBridgedAdvert(const uint8_t* frame, int len) {
+  if (_clock == nullptr) return;
+
+  const uint8_t* pub;
+  uint8_t hops;
+  uint32_t their_ts;
+  if (!parseAdvert(frame, len, pub, hops, their_ts)) return;
+  if (their_ts < MIN_SANE_EPOCH) return;
+
+  /* Clock evidence ONLY -- see the header for why the peer table and the
+     histograms are deliberately left alone. noteClockSample keys on the
+     originator, so an advert reaching us over both the radio and the bridge
+     updates one slot rather than counting as two agreeing sources. */
+  noteSighting(pub, their_ts, hops);
+  noteClockSample(pub, hops, their_ts);
+}
+
+void MeshObserver::noteAdvert(const uint8_t* frame, int len, int8_t snr4) {
+  const uint8_t* pub;
+  uint8_t hops;
+  uint32_t their_ts;
+  if (!parseAdvert(frame, len, pub, hops, their_ts)) return;
 
   // An empty path means we received the originator's own transmission, so it is
   // one hop away. Otherwise it sits beyond the forwarders that did relay it.
@@ -228,8 +258,6 @@ void MeshObserver::noteAdvert(const uint8_t* frame, int len, int8_t snr4) {
   int32_t  clock_delta = 0;
   bool     have_clock = false;
   if (_clock != nullptr) {
-    uint32_t their_ts;
-    memcpy(&their_ts, &frame[o + 32], 4);           // [pub_key 32][timestamp 4]
     uint32_t ours = _clock->getCurrentTime();
     if (their_ts >= MIN_SANE_EPOCH) {
       noteSighting(pub, their_ts, hops);
@@ -274,8 +302,11 @@ void MeshObserver::noteAdvert(const uint8_t* frame, int len, int8_t snr4) {
     e.clock_n++;
   }
 
-  const uint8_t* ad = &frame[o + 100];
-  int ad_len = len - (o + 100);
+  /* app_data sits after [pub_key 32][timestamp 4][signature 64]. parseAdvert
+     handed back `pub`, which points at the start of that payload, so the
+     offset it computed is recovered here rather than duplicated. */
+  const uint8_t* ad = pub + 100;
+  int ad_len = len - (int)(pub - frame) - 100;
   if (ad_len <= 0) return;
   uint8_t fl = ad[0];
   int i = 1;

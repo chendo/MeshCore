@@ -49,7 +49,21 @@ public:
   static constexpr uint16_t BRIDGE_LENGTH_SIZE = sizeof(uint16_t);
   static constexpr uint16_t BRIDGE_CHECKSUM_SIZE = sizeof(uint16_t);
 
+  /**
+   * @brief Observe the raw bytes of an authenticated packet arriving over a bridge.
+   *
+   * A bridged packet is queued straight inbound and never reaches logRxRaw, so
+   * nothing hooked to the radio receive path sees it. Right for anything
+   * describing what this node can HEAR; wrong for the adverts' timestamps, which
+   * are a node's only clock source when it is alone on its band.
+   */
+  typedef void (*RawObserver)(const uint8_t *raw, uint8_t len);
+  static void setRawObserver(RawObserver o) { _raw_observer = o; }
+
 protected:
+  /** Installed by the application; see setRawObserver. */
+  static RawObserver _raw_observer;
+
   /** Tracks bridge state */
   bool _initialized = false;
 

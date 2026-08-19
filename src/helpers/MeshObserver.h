@@ -205,6 +205,21 @@ public:
   // the packet log stores it).
   void observeRx(const uint8_t* frame, int len, int8_t snr4);
 
+  // Feed an advert that arrived over a BRIDGE rather than the radio.
+  //
+  // Clock samples only. Deliberately does NOT touch the peer table, the hop or
+  // type histograms, the frame counter or any RSSI/SNR statistic: every one of
+  // those answers "what can this node hear", and a bridged packet was heard by
+  // a node on a different band. Counting it would put nodes in our neighbour
+  // table that our radio has never received a single symbol from.
+  //
+  // The timestamp inside it is unaffected by any of that. A bridge peer is
+  // authenticated (HMAC over the whole frame), so an advert relayed by one is
+  // if anything better evidence than a promiscuously overheard one -- and on a
+  // node alone on its band it is the ONLY evidence available. Without this a
+  // bridge node can never set its clock at all.
+  void observeBridgedAdvert(const uint8_t* frame, int len);
+
   // Feed every frame WE transmit. Only floods can come back to us relayed, so
   // only those are tracked. `stream` distinguishes identities on a shared radio;
   // a single-identity node leaves it at 0.
@@ -306,6 +321,14 @@ private:
   int  evictionVictim(uint32_t now) const;
   void notePeersInPath(const uint8_t* frame, int len, int8_t snr4);
   void noteAdvert(const uint8_t* frame, int len, int8_t snr4);
+  /* Shared advert parse: true if the frame is a well-formed advert from
+     somebody other than us, yielding the originator's key, its hop count and
+     the timestamp it claimed. The timestamp is NOT range-checked here --
+     callers decide, because the peer table still wants an advert whose clock
+     is nonsense while the clock estimator must reject it. Used by both the
+     radio path and the bridge path so the two cannot drift apart on framing. */
+  bool parseAdvert(const uint8_t* frame, int len,
+                   const uint8_t*& pub, uint8_t& hops, uint32_t& their_ts) const;
   int  selfIndex(const uint8_t* hash, uint8_t width) const;   // -1 if not ours
   bool isSelf(const uint8_t* hash, uint8_t width) const { return selfIndex(hash, width) >= 0; }
 
