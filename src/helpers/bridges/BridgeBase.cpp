@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 
+BridgeBase::RawObserver BridgeBase::_raw_observer = nullptr;
+
 bool BridgeBase::isRunning() const {
   return _initialized;
 }

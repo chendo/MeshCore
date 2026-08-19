@@ -140,6 +140,12 @@ void ESPNowBridge::onDataRecv(const uint8_t *mac, const uint8_t *data, int32_t l
 
   BRIDGE_DEBUG_PRINTLN("RX, payload_len=%d\n", payloadLen);
 
+  /* Authenticated and parsed: the only point at which a bridged packet is
+     visible to anything hooked to a receive path -- it is queued straight
+     inbound and never passes logRxRaw. Clock evidence only; see
+     MeshObserver::observeBridgedAdvert. */
+  if (_raw_observer) _raw_observer(decrypted + BRIDGE_CHECKSUM_SIZE, (uint8_t)payloadLen);
+
   // Create mesh packet
   mesh::Packet *pkt = _instance->_mgr->allocNew();
   if (!pkt) return;

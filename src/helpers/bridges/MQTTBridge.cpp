@@ -274,6 +274,12 @@ void MQTTBridge::handleMqttData(const uint8_t *data, size_t len) {
     return;
   }
 
+  /* Authenticated and parsed: the only point at which a bridged packet is
+     visible to anything hooked to a receive path -- it is queued straight
+     inbound and never passes logRxRaw. Clock evidence only; see
+     MeshObserver::observeBridgedAdvert. */
+  if (_raw_observer) _raw_observer(decrypted + BRIDGE_CHECKSUM_SIZE, (uint8_t)payloadLen);
+
   mesh::Packet *pkt = _mgr->allocNew();
   if (!pkt) {
     return;

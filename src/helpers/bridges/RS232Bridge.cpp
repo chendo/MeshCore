@@ -82,6 +82,7 @@ void RS232Bridge::loop() {
 
           if (validateChecksum(_rx_buffer + 4, len, received_checksum)) {
             BRIDGE_DEBUG_PRINTLN("RX, len=%d crc=0x%04x\n", len, received_checksum);
+            if (_raw_observer) _raw_observer(_rx_buffer + 4, (uint8_t)len);
             mesh::Packet *pkt = _mgr->allocNew();
             if (pkt) {
               if (pkt->readFrom(_rx_buffer + 4, len)) {

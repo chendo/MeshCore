@@ -1256,6 +1256,13 @@ void MyMesh::sendNodeDiscoverReq() {
   }
 }
 
+#if WITH_MESH_OBSERVER && (defined(WITH_BLE_BRIDGE) || defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_MQTT_BRIDGE))
+/* The bridge's raw-observer hook is a plain function pointer with no context
+   argument, so the trampoline installed in begin() needs a way back to the
+   instance. One node, one MyMesh. */
+static MyMesh* s_obs_self = nullptr;
+#endif
+
 MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondClock &ms, mesh::RNG &rng,
                mesh::RTCClock &rtc, mesh::MeshTables &tables)
     : mesh::Mesh(radio, ms, rng, rtc, *new StaticPoolPacketManager(32), tables),
@@ -1375,6 +1382,20 @@ void MyMesh::begin(FILESYSTEM *fs, ArchiveStorage* archive) {
   // discarded and clock_n never leaves zero -- the skew column in "peers" has
   // been empty for this reason, not because nothing was heard.
   _obs.setClock(getRTCClock());
+
+  #if defined(WITH_BLE_BRIDGE) || defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_MQTT_BRIDGE)
+  /* Adverts arriving over the bridge are clock sources too. Without this a
+     bridge node alone on its band never takes a single sample: it hears
+     nothing on its own radio, and bridged packets are queued straight inbound
+     without passing logRxRaw.
+
+     Static trampoline because the hook is a plain function pointer; there is
+     one MyMesh per node, established at construction. */
+  s_obs_self = this;
+  BridgeBase::setRawObserver([](const uint8_t* raw, uint8_t len) {
+    if (s_obs_self) s_obs_self->_obs.observeBridgedAdvert(raw, (int)len);
+  });
+  #endif
 #endif
   _fs = fs;
   _archive = archive;

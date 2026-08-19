@@ -265,6 +265,10 @@ void BLEBridge::onFrameRecv(const uint8_t *payload, uint8_t len, const uint8_t a
 #endif
   BRIDGE_DEBUG_PRINTLN("BLE: RX, payload_len=%d rssi=%d\n", (int)packet_len, (int)rssi);
 
+  /* Authenticated and not a repeat: the only point at which a bridged packet is
+     visible to anything hooked to a receive path. */
+  if (_raw_observer) _raw_observer(&payload[HEADER_SIZE], (uint8_t)packet_len);
+
   mesh::Packet *pkt = _mgr->allocNew();
   if (!pkt) return;
 
