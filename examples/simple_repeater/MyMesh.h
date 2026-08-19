@@ -77,7 +77,12 @@ struct NeighbourInfo {
 };
 
 #ifndef FIRMWARE_BUILD_DATE
-  #define FIRMWARE_BUILD_DATE   "17 Aug 2026"
+  /* build.sh sets this; a plain `pio run` does not, and the literal that used to
+     sit here then reported a date the image was NOT built on. That is worse than
+     no date at all: it reads as confirmation while carrying no information, so a
+     freshly flashed node looks identical to one running a week-old image.
+     __DATE__ costs a rebuild of this translation unit and cannot go stale. */
+  #define FIRMWARE_BUILD_DATE   __DATE__
 #endif
 
 #ifndef FIRMWARE_VERSION
