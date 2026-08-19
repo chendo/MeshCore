@@ -924,6 +924,13 @@ void MyMesh::sendNodeDiscoverReq() {
   }
 }
 
+#if WITH_MESH_OBSERVER && defined(WITH_BLE_BRIDGE)
+/* The bridge's raw-observer hook is a plain function pointer with no context
+   argument, so the trampoline installed in begin() needs a way back to the
+   instance. One node, one MyMesh. */
+static MyMesh* s_obs_self = nullptr;
+#endif
+
 MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondClock &ms, mesh::RNG &rng,
                mesh::RTCClock &rtc, mesh::MeshTables &tables)
     : mesh::Mesh(radio, ms, rng, rtc, *new StaticPoolPacketManager(32), tables),
@@ -1036,6 +1043,22 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // Without this the observer holds no clock, so every advert timestamp is
   // discarded on the null check and clock readings never happen at all.
   _obs.setClock(getRTCClock());
+
+  #if defined(WITH_BLE_BRIDGE)
+  /* Adverts arriving over the bridge are clock sources too. Without this a
+     bridge node alone on its band never takes a single sample: it hears
+     nothing on its own radio, and bridged packets are queued straight inbound
+     without passing logRxRaw. That is exactly the state the Mid-band node was
+     found in -- 0 usable of 0 samples after an hour, while the bridge itself
+     was reporting the peer's clock skew to the second.
+
+     Static trampoline because the hook is a plain function pointer; there is
+     one MyMesh per node, established at construction. */
+  s_obs_self = this;
+  BridgeBase::setRawObserver([](const uint8_t* raw, uint8_t len) {
+    if (s_obs_self) s_obs_self->_obs.observeBridgedAdvert(raw, (int)len);
+  });
+  #endif
 #endif
   _fs = fs;
   // load persisted prefs
