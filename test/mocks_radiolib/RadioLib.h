@@ -1,16 +1,17 @@
 #pragma once
 
-// Test stand-in for RadioLib, big enough to build RadioLibWrappers.cpp on the
-// host. Only what that file touches is here; the error codes are copied from
-// RadioLib's TypeDef.h and must stay in step with it.
+// This is a test replacement for RadioLib. It is large enough to build
+// RadioLibWrappers.cpp on the host. It holds only what that file uses. The
+// error codes come from the TypeDef.h file of RadioLib. They must always agree
+// with that file.
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 
-// RadioLib.h drags in Arduino.h in a firmware build; these two are all that
-// RadioLibWrappers.cpp gets from it.
+// In a firmware build, RadioLib.h also includes Arduino.h. RadioLibWrappers.cpp
+// uses only these two items from it.
 using std::max;
 using std::min;
 inline long random(long lo, long hi) { return lo + (hi - lo) / 2; }
@@ -37,24 +38,25 @@ class PhysicalLayer {
 public:
   virtual ~PhysicalLayer() = default;
 
-  // --- driven by the test ---
+  // --- the test sets these fields ---
   void (*packet_action)(void) = nullptr;
-  int16_t read_data_result = RADIOLIB_ERR_NONE;   // what readData() reports
-  size_t  packet_length = 0;                      // what getPacketLength() reports
-  uint8_t packet_bytes[256] = {0};                // what readData() delivers
+  int16_t read_data_result = RADIOLIB_ERR_NONE;   // the value that readData() reports
+  size_t  packet_length = 0;                      // the value that getPacketLength() reports
+  uint8_t packet_bytes[256] = {0};                // the bytes that readData() gives out
   float   rssi = -100.0f, snr = 5.0f;
   int16_t scan_result = RADIOLIB_CHANNEL_FREE;
 
-  // The modem settings getTimeOnAir() answers for. Defaults are MeshCore's own
-  // preset: SF8, 62.5 kHz, 4/5, 32-symbol preamble, explicit header, CRC on.
+  // getTimeOnAir() uses these modem settings. The default values are the
+  // MeshCore preset: SF8, 62.5 kHz, 4/5, a 32-symbol preamble, an explicit
+  // header, and CRC on.
   uint8_t  cfg_sf = 8;
   float    cfg_bw_khz = 62.5f;
-  uint8_t  cfg_cr = 5;               // 4/x denominator
+  uint8_t  cfg_cr = 5;               // the denominator of 4/x
   uint16_t cfg_preamble = 32;
   bool     cfg_implicit_header = false, cfg_crc = true, cfg_ldro = false;
 
-  // Stand in for the DIO interrupt: RadioLibWrapper installs its own ISR in
-  // begin(), and its receive path only runs once that ISR has fired.
+  // This function replaces the DIO interrupt. RadioLibWrapper installs its own
+  // ISR in begin(). Its receive path runs only after that ISR occurs.
   void firePacketReceived() { if (packet_action) packet_action(); }
   void deliver(const uint8_t* bytes, size_t len, int16_t result) {
     memcpy(packet_bytes, bytes, len);
@@ -63,7 +65,7 @@ public:
     firePacketReceived();
   }
 
-  // --- the surface RadioLibWrappers.cpp uses ---
+  // --- the functions that RadioLibWrappers.cpp uses ---
   virtual void setPacketReceivedAction(void (*func)(void)) { packet_action = func; }
   virtual int16_t setPreambleLength(size_t) { return RADIOLIB_ERR_NONE; }
   virtual int16_t sleep() { return RADIOLIB_ERR_NONE; }
@@ -78,9 +80,11 @@ public:
     memcpy(data, packet_bytes, len);
     return read_data_result;
   }
-  // Semtech's time-on-air, section 4.1.1.7 of the SX1276 datasheet and 6.1.4 of
-  // the SX1268's -- written out longhand rather than lifted from RadioLib, so
-  // that agreeing with the driver is evidence and not a tautology.
+  // This is the Semtech time-on-air calculation. See section 4.1.1.7 of the
+  // SX1276 datasheet and section 6.1.4 of the SX1268 datasheet. The code here is
+  // written out in full from the datasheet. It is not a copy of the RadioLib
+  // code. Thus, when this result agrees with the driver, the agreement is
+  // evidence. It is not a comparison of the code with itself.
   virtual RadioLibTime_t calculateTimeOnAir(ModemType_t modem, DataRate_t dr, PacketConfig_t pc, size_t len) {
     if (modem != RADIOLIB_MODEM_LORA) return 0;
     double sym_us = (double)(1u << dr.lora.spreadingFactor) * 1000.0 / dr.lora.bandwidth;

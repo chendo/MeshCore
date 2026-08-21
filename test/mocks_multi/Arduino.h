@@ -1,5 +1,6 @@
 #pragma once
-// Minimal Arduino surface for native tests of the multi-identity components.
+// This is a small Arduino interface for the native tests of the
+// multi-identity components.
 #include <cstdint>
 #include <cstring>
 #include <cstdio>

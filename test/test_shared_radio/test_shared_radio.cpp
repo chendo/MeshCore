@@ -1,7 +1,8 @@
-// SharedRadioCore: the arbiter that lets several mesh identities share one
-// half-duplex LoRa radio. These tests cover the behaviours that were found the
-// hard way on hardware — RX fan-out accounting, TX serialisation, the on-board
-// loopback that lets identities hear each other, and runtime port activation.
+// SharedRadioCore is the arbiter. It lets several mesh identities share one
+// half-duplex LoRa radio. These tests cover the behaviour that the developers
+// found on hardware with difficulty: the RX fan-out counts, the TX order, the
+// on-board loopback that lets the identities hear each other, and the port
+// activation at run time.
 
 #include <gtest/gtest.h>
 #include "helpers/SharedRadio.h"
@@ -11,11 +12,11 @@ FakeSerial Serial;
 
 namespace {
 
-// A scriptable stand-in for the physical radio.
+// This class replaces the physical radio. The test controls it.
 class FakeRadio : public mesh::Radio {
 public:
   std::vector<std::vector<uint8_t>> sent;
-  std::vector<uint8_t> pending_rx;      // next frame recvRaw() will hand out
+  std::vector<uint8_t> pending_rx;      // the next frame that recvRaw() gives out
   bool send_ok = true;
   bool send_complete = true;
   int  begin_calls = 0;
@@ -44,13 +45,13 @@ public:
   void onSendFinished() override { finish_calls++; }
   bool receiving = false;
   bool isReceiving() override { return receiving; }
-  uint8_t rx_cr = 0;                  // coding rate of the frame recvRaw() just handed out
+  uint8_t rx_cr = 0;                  // the coding rate of the frame that recvRaw() gave out
   uint8_t getLastRxCodingRate() const override { return rx_cr; }
   float getLastSNR() const override { return 5.5f; }
   float getLastRSSI() const override { return -88; }
   uint32_t getEstAirtimeFor(int len) override { return (uint32_t)len; }
   uint32_t getEstAirtimeForCR(int len, uint8_t cr) override {
-    return cr ? (uint32_t)len * cr : getEstAirtimeFor(len);   // 1 ms/byte per 4/x step
+    return cr ? (uint32_t)len * cr : getEstAirtimeFor(len);   // 1 ms per byte for each 4/x step
   }
 };
 
@@ -79,7 +80,7 @@ TEST(SharedRadio, EveryPortReceivesTheFrameExactlyOnce) {
   EXPECT_EQ(0x11, buf[0]);
   EXPECT_EQ(3, take(f.b, buf));
   EXPECT_EQ(3, take(f.c, buf));
-  // second read by the same port yields nothing
+  // a second read by the same port gives nothing
   EXPECT_EQ(0, take(f.a, buf));
 }
 
@@ -89,9 +90,9 @@ TEST(SharedRadio, ASlowPortStillReceivesEveryFrameInOrder) {
   uint8_t buf[MAX_TRANS_UNIT];
   ASSERT_EQ(1, take(f.a, buf));
 
-  // A second frame arrives while b and c are still behind. It must be taken off
-  // the radio immediately — waiting for them is how packets were lost — but the
-  // laggards must still be handed the frames in arrival order.
+  // A second frame arrives while b and c are still behind. The core must take it
+  // off the radio immediately. A wait for b and c loses packets. But b and c
+  // must still get the frames in the order of arrival.
   f.deliver({0xBB});
   ASSERT_EQ(1, take(f.b, buf));
   EXPECT_EQ(0xAA, buf[0]) << "port b must still see the first frame";
@@ -107,9 +108,9 @@ TEST(SharedRadio, ASlowPortStillReceivesEveryFrameInOrder) {
   EXPECT_EQ(0u, f.core.rxDropped());
 }
 
-// The whole point of the queue: the radio's own buffer holds ONE packet, so
-// anything not read out before the next one lands is gone. Draining must never
-// be gated on the identities keeping up.
+// This is the reason for the queue. The buffer of the radio holds ONE packet.
+// The core loses any packet that it does not read before the next one arrives.
+// The core must never wait for the identities before it empties the buffer.
 TEST(SharedRadio, TheRadioIsDrainedEvenWhenNoPortIsReading) {
   Fixture f;
   for (uint8_t i = 0; i < 4; i++) f.deliver({(uint8_t)(0xA0 + i)});
@@ -132,14 +133,14 @@ TEST(SharedRadio, AFullQueueDiscardsTheOldestFrameAndCountsIt) {
   EXPECT_EQ((uint32_t)over, f.core.rxDropped())
       << "overflow must be visible, not silent";
 
-  // what survives is the NEWEST run of frames — those are still propagating
+  // The NEWEST frames stay, because they still move through the mesh.
   uint8_t buf[MAX_TRANS_UNIT];
   ASSERT_EQ(1, take(f.a, buf));
   EXPECT_EQ(over, buf[0]);
 }
 
-// Frames retire as soon as every listening port has taken them, so a steady
-// stream never accumulates.
+// A frame goes away as soon as every port that listens has taken it. Thus a
+// steady stream never fills the queue.
 TEST(SharedRadio, FullyConsumedFramesFreeTheirSlots) {
   Fixture f;
   uint8_t buf[MAX_TRANS_UNIT];
@@ -166,7 +167,7 @@ TEST(SharedRadio, PortMetadataMatchesTheReceivedFrame) {
 TEST(SharedRadio, OnlyOnePortMayTransmitAtATime) {
   Fixture f;
   uint8_t msg[] = {1, 2, 3};
-  f.radio.send_complete = false;                 // transmit still in flight
+  f.radio.send_complete = false;                 // the transmit is still in progress
 
   EXPECT_TRUE(f.a.startSendRaw(msg, 3));
   EXPECT_FALSE(f.b.startSendRaw(msg, 3)) << "sibling must be refused while the transmitter is held";
@@ -183,7 +184,7 @@ TEST(SharedRadio, PumpLeavesTheRadioAloneWhileTransmitting) {
   ASSERT_TRUE(f.a.startSendRaw(msg, 1));
 
   f.radio.pending_rx = {0x77};
-  f.core.pump();                                  // must NOT re-arm RX mid-transmit
+  f.core.pump();                                  // the core must NOT start RX again here
   EXPECT_FALSE(f.radio.pending_rx.empty()) << "pump() must not touch the radio during a send";
 }
 
@@ -200,7 +201,7 @@ TEST(SharedRadioLoopback, SiblingsHearALocalTransmitButTheSenderDoesNot) {
   uint8_t msg[] = {0x42, 0x43};
   ASSERT_TRUE(f.a.startSendRaw(msg, 2));
   f.a.onSendFinished();
-  f.core.pump();                                   // drains the loopback queue
+  f.core.pump();                                   // this empties the loopback queue
 
   uint8_t buf[MAX_TRANS_UNIT];
   EXPECT_EQ(0, take(f.a, buf)) << "a node must not hear its own transmission";
@@ -242,7 +243,7 @@ TEST(SharedRadioPorts, InactivePortNeitherReceivesNorStallsDelivery) {
   ASSERT_EQ(1, take(f.b, buf));
   EXPECT_EQ(0, take(f.c, buf)) << "a silenced identity must not receive";
 
-  // with a and b done, the frame is fully consumed even though c never took it
+  // a and b are finished, so the frame is complete. c never took it.
   f.radio.pending_rx = {0x66};
   f.core.pump();
   ASSERT_EQ(1, take(f.a, buf));
@@ -256,7 +257,7 @@ TEST(SharedRadioPorts, ActivatingMidFlightDoesNotStallTheCurrentFrame) {
   uint8_t buf[MAX_TRANS_UNIT];
   take(f.a, buf); take(f.b, buf);
 
-  f.core.setPortActive(f.ic, true);   // identity started while a frame is in flight
+  f.core.setPortActive(f.ic, true);   // the identity starts while a frame is in progress
   f.radio.pending_rx = {0x02};
   f.core.pump();
   ASSERT_EQ(1, take(f.a, buf));
@@ -269,7 +270,7 @@ TEST(SharedRadioPorts, DeactivatingTheTransmitterOwnerReleasesTheRadio) {
   f.radio.send_complete = false;
   ASSERT_TRUE(f.a.startSendRaw(msg, 1));
 
-  f.core.setPortActive(f.ia, false);   // identity stopped mid-transmit
+  f.core.setPortActive(f.ia, false);   // the identity stops during a transmit
   EXPECT_TRUE(f.b.startSendRaw(msg, 1)) << "stopping the owner must not strand the transmitter";
 }
 
@@ -281,17 +282,18 @@ TEST(SharedRadioPorts, ActivationStateIsReported) {
 }
 
 // ------------------------------------------------- shared collision avoidance
-// Each identity's dispatcher pushes its own CAD / interference-threshold prefs
-// at the radio every couple of seconds. There is only one radio, so the core
-// has to reconcile them rather than let the last writer win.
+// The dispatcher of each identity sends its own CAD setting and its own
+// interference threshold to the radio every two seconds. The board has only one
+// radio. Thus the core must combine the settings. It must not let the last
+// writer win.
 
 TEST(SharedRadioPolicy, CADStaysOnIfAnyIdentityWantsIt) {
   Fixture f;
   f.a.setCADEnabled(true);
   EXPECT_TRUE(f.radio.cad);
-  f.b.setCADEnabled(false);            // b's prefs must not disable it for a
+  f.b.setCADEnabled(false);            // the setting of b must not disable CAD for a
   EXPECT_TRUE(f.radio.cad);
-  f.a.setCADEnabled(false);            // now nobody wants it
+  f.a.setCADEnabled(false);            // now no identity wants it
   EXPECT_FALSE(f.radio.cad);
 }
 
@@ -299,7 +301,7 @@ TEST(SharedRadioPolicy, TheMostCautiousThresholdWins) {
   Fixture f;
   f.a.triggerNoiseFloorCalibrate(12);
   EXPECT_EQ(12, f.radio.threshold);
-  f.b.triggerNoiseFloorCalibrate(6);   // defers to weaker signals -> more cautious
+  f.b.triggerNoiseFloorCalibrate(6);   // this yields to weaker signals, so it is more careful
   EXPECT_EQ(6, f.radio.threshold);
   f.c.triggerNoiseFloorCalibrate(0);   // "off" must not switch the check off
   EXPECT_EQ(6, f.radio.threshold);
@@ -325,7 +327,7 @@ TEST(SharedRadioPolicy, CalibrationKeepsTheStockCadenceNotThreeTimesIt) {
   f.a.triggerNoiseFloorCalibrate(6);
   int after_first = f.radio.calib_calls;
 
-  // all three dispatchers ask within the same window: one calibration, not three
+  // All three dispatchers ask inside the same window. The core calibrates once.
   f.b.triggerNoiseFloorCalibrate(6);
   f.c.triggerNoiseFloorCalibrate(6);
   EXPECT_EQ(after_first, f.radio.calib_calls);
@@ -340,7 +342,7 @@ TEST(SharedRadioPolicy, AChangedThresholdAppliesImmediately) {
   g_fake_millis = 200000;
   f.a.triggerNoiseFloorCalibrate(12);
   int n = f.radio.calib_calls;
-  f.b.triggerNoiseFloorCalibrate(4);   // inside the rate limit, but it matters
+  f.b.triggerNoiseFloorCalibrate(4);   // inside the rate limit, but the new value is important
   EXPECT_EQ(n + 1, f.radio.calib_calls);
   EXPECT_EQ(4, f.radio.threshold);
 }
@@ -367,10 +369,10 @@ TEST(SharedRadioTrace, RecordsReceivesAndTransmitsWithDirection) {
 TEST(SharedRadioTrace, FailedTransmitIsLoggedAndExcludedFromTotals) {
   Fixture f;
   uint8_t msg[] = {1};
-  f.radio.send_complete = false;          // TX-done never arrives
+  f.radio.send_complete = false;          // the TX-done signal never arrives
   ASSERT_TRUE(f.a.startSendRaw(msg, 1));
   f.a.isSendComplete();
-  f.a.onSendFinished();                    // dispatcher gives up
+  f.a.onSendFinished();                    // the dispatcher gives up
 
   PktLogEntry entries[SharedRadioCore::PKT_LOG_SIZE];
   int n = f.core.pktLogCopy(entries, SharedRadioCore::PKT_LOG_SIZE, 0);
@@ -379,15 +381,15 @@ TEST(SharedRadioTrace, FailedTransmitIsLoggedAndExcludedFromTotals) {
   EXPECT_EQ(1u, f.core.txTotal()) << "the failure must not inflate the transmit count";
 }
 
-// Coding rate is not one number: what we transmit at is ours to know, but what
-// we receive at belongs to the sender, who puts it in the LoRa header. Mixing
-// the two up would quietly hide the interesting case — a neighbour on a
-// different preset — behind our own setting.
+// The coding rate is not one number. We know the rate that we transmit at. The
+// sender owns the rate that we receive at, and puts it in the LoRa header. If
+// the code joins the two, our own setting hides the important case. That case
+// is a neighbour with a different preset.
 
-// A port's Dispatcher reads the coding rate off the packet it was just handed,
-// but the modem's register has long since moved on to whatever arrived after —
-// behind a fan-out queue, "the last frame decoded" and "the frame this identity
-// is holding" are rarely the same one.
+// The Dispatcher of a port reads the coding rate from the packet that it just
+// received. But the register of the modem now holds the rate of a later frame.
+// Behind a fan-out queue, "the last frame decoded" and "the frame that this
+// identity holds" are seldom the same frame.
 TEST(SharedRadioCodingRate, EachPortReportsTheCodingRateOfTheFrameItTook) {
   Fixture f;
   uint8_t buf[MAX_TRANS_UNIT];
@@ -413,23 +415,23 @@ TEST(SharedRadioCodingRate, AnUnreadableCodingRateReachesThePortAsUnknown) {
   EXPECT_EQ(0, f.a.getLastRxCodingRate());
 }
 
-// A looped-back frame never went on the air, so the only coding rate it can
-// honestly carry is the one this node transmits at.
+// A looped-back frame never went on the air. Thus the only true coding rate for
+// it is the rate that this node transmits at.
 TEST(SharedRadioCodingRate, ALoopedBackFrameCarriesOurOwn) {
   Fixture f(true);
   f.core.setCodingRate(7);
   uint8_t msg[] = {0x30};
   ASSERT_TRUE(f.a.startSendRaw(msg, 1));
   f.a.onSendFinished();
-  f.core.pump();                 // drains the loopback queue
+  f.core.pump();                 // this empties the loopback queue
 
   uint8_t buf[MAX_TRANS_UNIT];
   ASSERT_EQ(1, take(f.b, buf));
   EXPECT_EQ(7, f.b.getLastRxCodingRate());
 }
 
-// The port is a mesh::Radio in its own right, so a slot's Dispatcher must be
-// able to price a receive through it exactly as a single-identity node would.
+// The port is itself a mesh::Radio. Thus the Dispatcher of a slot must price a
+// receive through the port exactly as a single-identity node does.
 TEST(SharedRadioCodingRate, APortPricesAirtimeAtTheRateItIsGiven) {
   Fixture f;
   EXPECT_EQ(32u, f.a.getEstAirtimeForCR(4, 8));
@@ -439,7 +441,7 @@ TEST(SharedRadioCodingRate, APortPricesAirtimeAtTheRateItIsGiven) {
 TEST(SharedRadioTrace, ReceivesCarryTheSendersCodingRateAndTransmitsOurs) {
   Fixture f;
   f.core.setCodingRate(5);
-  f.radio.rx_cr = 8;                        // the sender is running 4/8, we are not
+  f.radio.rx_cr = 8;                        // the sender uses 4/8 and we do not
   f.deliver({0x10, 0x20});
   uint8_t msg[] = {0x30};
   f.a.startSendRaw(msg, 1);
@@ -451,9 +453,9 @@ TEST(SharedRadioTrace, ReceivesCarryTheSendersCodingRateAndTransmitsOurs) {
   EXPECT_EQ(5, entries[1].cr) << "a transmit is labelled with the CR we send at";
 }
 
-// Airtime is the number the channel-occupancy view is built on, so a receive
-// has to be costed at the CR it was actually sent at. FakeRadio bills 1 ms per
-// byte for our own settings; the CR-aware hook bills the sender's CR instead.
+// The channel-occupancy view is built on the airtime. Thus the code must price
+// a receive at the CR that the sender used. FakeRadio charges 1 ms per byte for
+// our own settings. The CR-aware function charges the CR of the sender instead.
 TEST(SharedRadioTrace, ReceivedAirtimeIsPricedAtTheSendersCodingRate) {
   Fixture f;
   f.core.setCodingRate(5);
@@ -471,10 +473,10 @@ TEST(SharedRadioTrace, ReceivedAirtimeIsPricedAtTheSendersCodingRate) {
 
 TEST(SharedRadioTrace, CodingRateIsUnknownRatherThanGuessedAt) {
   Fixture f;
-  f.core.setCodingRate(9);                 // not a 4/x denominator: refuse it
+  f.core.setCodingRate(9);                 // not a denominator of 4/x, so the core refuses it
   EXPECT_EQ(0, f.core.codingRate());
   f.core.setCodingRate(7);
-  f.radio.rx_cr = 0;                        // radio could not report one
+  f.radio.rx_cr = 0;                        // the radio could not report a coding rate
   f.deliver({0x10});
 
   PktLogEntry entries[SharedRadioCore::PKT_LOG_SIZE];
@@ -487,7 +489,7 @@ TEST(SharedRadioTrace, OnlyReturnsEntriesNewerThanTheCallersCursor) {
   Fixture f;
   uint8_t buf[MAX_TRANS_UNIT];
   f.deliver({1});
-  take(f.a, buf); take(f.b, buf); take(f.c, buf);   // frame must be fully consumed
+  take(f.a, buf); take(f.b, buf); take(f.c, buf);   // every port must take the frame
   PktLogEntry entries[SharedRadioCore::PKT_LOG_SIZE];
   int n1 = f.core.pktLogCopy(entries, SharedRadioCore::PKT_LOG_SIZE, 0);
   ASSERT_EQ(1, n1);
@@ -503,10 +505,10 @@ TEST(SharedRadioTrace, OnlyReturnsEntriesNewerThanTheCallersCursor) {
 
 // --------------------------------------------- corrupt frames are preserved
 
-// The driver reports CRC failures only through a counter and drops the frame,
-// but it has already read the damaged bytes. Those bytes are worth keeping: the
-// same packet often arrives intact moments later in a burst, and comparing the
-// two shows how much was actually hit.
+// The driver reports a CRC failure only with a counter, and it discards the
+// frame. But it has already read the damaged bytes. Those bytes are useful. The
+// same packet often arrives complete a moment later in a burst. A comparison of
+// the two packets shows how many bytes the noise hit.
 namespace {
 const uint8_t* g_bad_payload = nullptr;
 uint8_t g_bad_len = 0;
@@ -524,7 +526,7 @@ TEST(SharedRadioCorrupt, CrcFailureIsLoggedWithItsDamagedBytesAndErrorCode) {
                            []() -> const uint8_t* { return g_bad_payload; },
                            []() -> uint8_t { return g_bad_len; });
 
-  g_err_count = 1;                        // the driver saw a CRC failure
+  g_err_count = 1;                        // the driver found a CRC failure
   f.core.pump();
 
   PktLogEntry entries[SharedRadioCore::PKT_LOG_SIZE];
@@ -541,7 +543,7 @@ TEST(SharedRadioCorrupt, CrcFailureIsLoggedWithItsDamagedBytesAndErrorCode) {
 TEST(SharedRadioCorrupt, ErrorWithNoRecoverableBytesStillLogsTheEvent) {
   Fixture f;
   g_bad_payload = nullptr; g_bad_len = 0;
-  g_err_count = 0; g_err_code = -16;      // header damaged: nothing readable
+  g_err_count = 0; g_err_code = -16;      // the header is damaged, so nothing is readable
   f.core.setRxErrorCounter([]() -> uint32_t { return g_err_count; },
                            []() -> int16_t { return g_err_code; },
                            []() -> const uint8_t* { return g_bad_payload; },
@@ -555,18 +557,18 @@ TEST(SharedRadioCorrupt, ErrorWithNoRecoverableBytesStillLogsTheEvent) {
   EXPECT_EQ(0, entries[0].raw_len);
 }
 
-// The CR lives in the LoRa header, so a CRC failure — good header, mangled
-// payload — still knows it. A header failure does not: the modem is still
-// holding the CR of whatever it decoded LAST, and billing this packet with it
-// would invent a fact. The radio here always answers 4/8; only the error code
-// decides whether that answer means anything.
+// The CR is in the LoRa header. A CRC failure has a good header and a damaged
+// payload, so the CR is still known. A header failure is different. The modem
+// still holds the CR of the LAST frame that it decoded. To charge this packet
+// with that CR would invent a fact. The radio here always answers 4/8. Only the
+// error code decides whether that answer has a meaning.
 TEST(SharedRadioCorrupt, ACrcFailureKeepsItsCodingRateButAHeaderFailureCannot) {
   static const uint8_t damaged[] = {0x11, 0xDE, 0xAD};
   auto trace_one = [](int16_t code) {
     Fixture f;
     g_bad_payload = damaged; g_bad_len = sizeof(damaged);
     g_err_count = 0; g_err_code = code;
-    f.radio.rx_cr = 8;                 // stale-but-present in the modem register
+    f.radio.rx_cr = 8;                 // the modem register holds an old value
     f.core.setRxErrorCounter([]() -> uint32_t { return g_err_count; },
                              []() -> int16_t { return g_err_code; },
                              []() -> const uint8_t* { return g_bad_payload; },
@@ -583,27 +585,27 @@ TEST(SharedRadioCorrupt, ACrcFailureKeepsItsCodingRateButAHeaderFailureCannot) {
 
 // ------------------------------------------------ stuck-transmitter watchdog
 
-// pump() deliberately refuses to touch the radio while a transmit is in
-// flight, so a send that never completes takes the WHOLE BOARD off air — every
-// identity goes deaf, not just the sender. This happened in the field: a
-// repeater advert held the transmitter for 3.4 hours and nothing was received
-// in that time. The arbiter must take the radio back.
+// pump() does not touch the radio during a transmit. This is deliberate. Thus a
+// send that never completes takes the WHOLE BOARD off the air. Every identity
+// goes deaf, not only the sender. This occurred in the field. A repeater advert
+// held the transmitter for 3.4 hours, and the board received nothing in that
+// time. The arbiter must take the radio back.
 
 TEST(SharedRadioWatchdog, ATransmitThatNeverCompletesIsForceReleased) {
   Fixture f;
   g_fake_millis = 1000;
   uint8_t msg[] = {1, 2, 3};
-  f.radio.send_complete = false;                 // TX-done will never arrive
+  f.radio.send_complete = false;                 // the TX-done signal will never arrive
   ASSERT_TRUE(f.a.startSendRaw(msg, 3));
 
-  // radio stays untouched for a normal in-flight transmit
+  // the core does not touch the radio during a normal transmit
   g_fake_millis += 2000;
   f.radio.pending_rx = {0xAA};
   f.core.pump();
   EXPECT_FALSE(f.radio.pending_rx.empty()) << "must not disturb a live transmit";
   EXPECT_EQ(0u, f.core.txStuck());
 
-  // ...but not forever
+  // The core does not wait for ever.
   g_fake_millis += 20000;
   f.core.pump();
   EXPECT_EQ(1u, f.core.txStuck()) << "the watchdog must reclaim the transmitter";
@@ -619,14 +621,14 @@ TEST(SharedRadioWatchdog, RecoveryRestoresReceiveAndLetsOthersTransmit) {
   ASSERT_FALSE(f.b.startSendRaw(msg, 1)) << "blocked while the owner holds it";
 
   g_fake_millis += 20000;
-  f.core.pump();                                  // watchdog fires
+  f.core.pump();                                  // the watchdog acts
 
   EXPECT_TRUE(f.b.startSendRaw(msg, 1)) << "another identity can transmit again";
   f.radio.send_complete = true;
   f.b.isSendComplete();
-  f.b.onSendFinished();                           // let b's send finish normally
+  f.b.onSendFinished();                           // let the send of b finish normally
 
-  f.deliver({0x42});                              // and reception works
+  f.deliver({0x42});                              // and the receive path works
   uint8_t buf[MAX_TRANS_UNIT];
   EXPECT_EQ(1, take(f.b, buf));
 }
@@ -637,7 +639,7 @@ TEST(SharedRadioWatchdog, ForcedReleaseIsLoggedWithHowLongItWasHeld) {
   uint8_t msg[] = {1};
   f.radio.send_complete = false;
   ASSERT_TRUE(f.a.startSendRaw(msg, 1));
-  g_fake_millis += 30000;                         // held 30s
+  g_fake_millis += 30000;                         // held for 30 s
   f.core.pump();
 
   PktLogEntry entries[SharedRadioCore::PKT_LOG_SIZE];
@@ -655,7 +657,7 @@ TEST(SharedRadioWatchdog, NormalTransmitsAreNeverReclaimed) {
   uint8_t msg[] = {1};
   for (int i = 0; i < 5; i++) {
     ASSERT_TRUE(f.a.startSendRaw(msg, 1));
-    g_fake_millis += 700;                         // realistic airtime
+    g_fake_millis += 700;                         // a realistic airtime
     ASSERT_TRUE(f.a.isSendComplete());
     f.a.onSendFinished();
     f.core.pump();
@@ -665,14 +667,15 @@ TEST(SharedRadioWatchdog, NormalTransmitsAreNeverReclaimed) {
 
 // ---------------------------------------------------- radio health watchdog
 
-// The real field failure: the transceiver wedged, every RadioLib call started
-// failing, and the board sat deaf for 3.4 hours with no error recorded
-// anywhere — sends were refused silently and the noise floor simply froze.
+// This is the real failure from the field. The transceiver stopped. Every
+// RadioLib call then failed. The board was deaf for 3.4 hours and recorded no
+// error anywhere. The radio refused the sends without a message, and the noise
+// floor did not change.
 namespace { int g_reinits = 0; }
 
 TEST(SharedRadioHealth, ARefusedSendIsCountedAndTraced) {
   Fixture f;
-  f.radio.send_ok = false;                      // radio rejects everything
+  f.radio.send_ok = false;                      // the radio refuses every send
   uint8_t msg[] = {1, 2, 3};
 
   EXPECT_FALSE(f.a.startSendRaw(msg, 3));
@@ -692,11 +695,11 @@ TEST(SharedRadioHealth, ASilentRadioIsReinitialised) {
   g_fake_millis = 1000;
   f.core.setRadioReinit([]() { g_reinits++; });
 
-  f.deliver({0x01});                            // a packet arrives: radio is alive
+  f.deliver({0x01});                            // a packet arrives, so the radio is alive
   uint8_t buf[MAX_TRANS_UNIT];
   take(f.a, buf); take(f.b, buf); take(f.c, buf);
 
-  g_fake_millis += 300000;                      // 5 min quiet — normal
+  g_fake_millis += 300000;                      // 5 minutes of silence, which is normal
   f.core.pump();
   EXPECT_EQ(0, g_reinits) << "a quiet band must not trigger recovery";
 
@@ -725,20 +728,20 @@ TEST(SharedRadioHealth, NoRecoveryBeforeTheRadioHasEverReceived) {
   g_reinits = 0;
   g_fake_millis = 1000;
   f.core.setRadioReinit([]() { g_reinits++; });
-  g_fake_millis += 1000000;                     // long boot with no traffic yet
+  g_fake_millis += 1000000;                     // a long start-up with no traffic yet
   f.core.pump();
   EXPECT_EQ(0, g_reinits) << "cannot judge a radio that has never heard anything";
 }
 
 // ------------------------------------------------------- relay confirmation
 
-// Proof that a neighbour actually heard us: when someone relays a flood we
-// sent, they append their own hash and rebroadcast — so the packet coming back
-// past us still carries OUR hash in its path.
+// This is the proof that a neighbour heard us. When a node relays a flood that
+// we sent, it adds its own hash and transmits the flood again. Thus the packet
+// that comes back past us still carries OUR hash in its path.
 namespace {
 // header byte: route=FLOOD(1), type=TXT_MSG(2) -> (2<<2)|1
 const uint8_t FLOOD_HDR = (2 << 2) | 1;
-// build a flood frame whose path is the given hop hashes (hash width = sz)
+// Build a flood frame. Its path holds the given hop hashes. The hash width is sz.
 std::vector<uint8_t> floodWithPath(std::vector<std::vector<uint8_t>> hops, uint8_t sz) {
   std::vector<uint8_t> f{FLOOD_HDR};
   f.push_back((uint8_t)(((sz - 1) << 6) | hops.size()));
@@ -746,12 +749,12 @@ std::vector<uint8_t> floodWithPath(std::vector<std::vector<uint8_t>> hops, uint8
   f.push_back(0xAA);   // payload
   return f;
 }
-const uint8_t SELF_KEY[32] = {0x30, 0x70, 0x30, 0x70};   // our pubkey prefix
+const uint8_t SELF_KEY[32] = {0x30, 0x70, 0x30, 0x70};   // the first bytes of our public key
 }
 
-// A 1-byte hash collides once every 256 packets, so seeing "our" hash in a path
-// at that width is not evidence anyone relayed us. It is tallied, but it must
-// not confirm the transmit.
+// A 1-byte hash collides once in every 256 packets. Thus "our" hash in a path
+// at that width is not evidence that a node relayed us. The core counts it, but
+// it must not confirm the transmit.
 TEST(RelayConfirm, AOneByteMatchIsCountedButDoesNotConfirm) {
   Fixture f;
   g_fake_millis = 1000;
@@ -763,7 +766,7 @@ TEST(RelayConfirm, AOneByteMatchIsCountedButDoesNotConfirm) {
   EXPECT_EQ(1u, f.core.floodsSent(f.ia));
 
   g_fake_millis += 3000;
-  f.deliver(floodWithPath({{0x30}}, 1));          // 1-byte "match" of our hash
+  f.deliver(floodWithPath({{0x30}}, 1));          // a 1-byte "match" of our hash
   EXPECT_EQ(0u, f.core.floodsConfirmed(f.ia)) << "1 byte is a coincidence, not proof";
   EXPECT_EQ(1u, f.core.confirmsByWidth(1)) << "still tallied for diagnostics";
   EXPECT_EQ(0u, f.core.confirmsByWidth(2));
@@ -792,7 +795,7 @@ TEST(RelayConfirm, AForeignPathDoesNotCount) {
   f.a.onSendFinished();
 
   g_fake_millis += 2000;
-  f.deliver(floodWithPath({{0x99}, {0xAB}}, 1));   // somebody else's traffic
+  f.deliver(floodWithPath({{0x99}, {0xAB}}, 1));   // traffic from another node
   EXPECT_EQ(0u, f.core.floodsConfirmed(f.ia));
 }
 
@@ -807,7 +810,7 @@ TEST(RelayConfirm, EachTransmitIsCreditedOnlyOnce) {
   uint8_t buf[MAX_TRANS_UNIT];
   for (int i = 0; i < 4; i++) {                    // four neighbours relay it
     g_fake_millis += 1000;
-    f.deliver(floodWithPath({{0x30, 0x70}}, 2));   // 2-byte: a real confirmation
+    f.deliver(floodWithPath({{0x30, 0x70}}, 2));   // 2 bytes, so this is a real confirmation
     take(f.a, buf); take(f.b, buf); take(f.c, buf);
   }
   EXPECT_EQ(1u, f.core.floodsConfirmed(f.ia))
@@ -843,9 +846,9 @@ int main(int argc, char** argv) {
 }
 
 // ------------------------------------------------------------------ peer table
-// Every forwarder appends its hash to the END of the path, so position carries
-// meaning: the last entry transmitted the frame we received, and the entry
-// following one of ours received our transmission.
+// Every forwarder adds its hash to the END of the path. Thus the position has a
+// meaning. The last entry transmitted the frame that we received. The entry
+// after one of our own entries received our transmission.
 
 TEST(Peers, TheFinalHopIsANodeWeCanHear) {
   Fixture f;
@@ -873,14 +876,14 @@ TEST(Peers, OnlyATwoByteMatchProvesTheyHeardUs) {
   Fixture f;
   f.core.setPortIdentity(f.ia, SELF_KEY);          // 0x30 0x70 ...
 
-  // 2-byte path: ours, then theirs -> they forwarded our transmission
+  // a 2-byte path: our hash, then their hash. They forwarded our transmission.
   f.deliver(floodWithPath({{0x30, 0x70}, {0xBB, 0x02}}, 2));
   const auto* p = f.core.peer(f.core.numPeers() - 1);
   EXPECT_EQ(1u, p->heard_us);
   EXPECT_EQ(0u, p->heard_us_1b);
   EXPECT_EQ(1, f.core.confirmedPeerCount());
 
-  // same shape at 1 byte must NOT count as a confirmation
+  // the same path at 1 byte must NOT count as a confirmation
   Fixture g;
   g.core.setPortIdentity(g.ia, SELF_KEY);
   g.deliver(floodWithPath({{0x30}, {0xCC}}, 1));
@@ -899,16 +902,16 @@ TEST(Peers, WeAreNotOurOwnPeer) {
   }
 }
 
-// The originator picks the hash width, so the same node arrives at 1 and 2
-// bytes. A narrower sighting must fold into the entry it uniquely matches
-// rather than creating a phantom second node.
+// The originator selects the hash width. Thus the same node arrives at 1 byte
+// and at 2 bytes. A narrower sighting must join the one entry that it matches.
+// It must not create a second entry for a node that does not exist.
 TEST(Peers, ANarrowerSightingMergesIntoTheKnownNode) {
   Fixture f;
   f.deliver(floodWithPath({{0xAB, 0xCD}}, 2));
   ASSERT_EQ(1, f.core.numPeers());
   EXPECT_EQ(2, f.core.peer(0)->width);
 
-  f.deliver(floodWithPath({{0xAB}}, 1));           // same node, 1-byte path
+  f.deliver(floodWithPath({{0xAB}}, 1));           // the same node, but a 1-byte path
   EXPECT_EQ(1, f.core.numPeers()) << "must not become a second peer";
   EXPECT_EQ(2u, f.core.peer(0)->direct_rx);
   EXPECT_EQ(2, f.core.peer(0)->width) << "the wider prefix is kept";
@@ -926,8 +929,8 @@ TEST(Peers, AWiderSightingRefinesAKnownPrefix) {
   EXPECT_EQ(0xCD, f.core.peer(0)->hash[1]);
 }
 
-// If a 1-byte prefix matches two known nodes there is no way to tell which one
-// sent it, so it must be attributed to neither.
+// A 1-byte prefix can match two known nodes. Then nobody can tell which node
+// sent it. The core must give it to neither node.
 TEST(Peers, AnAmbiguousPrefixIsAttributedToNobody) {
   Fixture f;
   f.deliver(floodWithPath({{0xAB, 0x11}}, 2));
@@ -935,7 +938,7 @@ TEST(Peers, AnAmbiguousPrefixIsAttributedToNobody) {
   ASSERT_EQ(2, f.core.numPeers());
   uint32_t before0 = f.core.peer(0)->direct_rx, before1 = f.core.peer(1)->direct_rx;
 
-  f.deliver(floodWithPath({{0xAB}}, 1));           // matches both
+  f.deliver(floodWithPath({{0xAB}}, 1));           // this matches both nodes
   EXPECT_EQ(2, f.core.numPeers()) << "must not invent a third node";
   EXPECT_EQ(before0, f.core.peer(0)->direct_rx);
   EXPECT_EQ(before1, f.core.peer(1)->direct_rx);
@@ -954,7 +957,7 @@ std::vector<uint8_t> advert(std::vector<uint8_t> pub, const char* name,
   std::vector<uint8_t> p(100, 0);
   for (size_t i = 0; i < pub.size() && i < 32; i++) p[i] = pub[i];
   f.insert(f.end(), p.begin(), p.end());
-  f.push_back(0x10 | 0x80);                                   // has latlon + name
+  f.push_back(0x10 | 0x80);                                   // it has a position and a name
   for (int i = 0; i < 4; i++) f.push_back((lat_e6 >> (8*i)) & 0xFF);
   for (int i = 0; i < 4; i++) f.push_back((lon_e6 >> (8*i)) & 0xFF);
   for (const char* c = name; *c; c++) f.push_back((uint8_t)*c);
@@ -964,7 +967,7 @@ std::vector<uint8_t> advert(std::vector<uint8_t> pub, const char* name,
 
 TEST(PeerIdentity, ADirectAdvertRegistersANodeThatNeverForwards) {
   Fixture f;
-  // empty path => we received the originator's own transmission
+  // the path is empty, so we received the transmission of the originator
   f.deliver(advert({0xDE, 0xAD, 0xBE}, "Leaf Node", -37762516, 144990310));
 
   ASSERT_EQ(1, f.core.numPeers());
@@ -979,7 +982,7 @@ TEST(PeerIdentity, ADirectAdvertRegistersANodeThatNeverForwards) {
 
 TEST(PeerIdentity, AnAdvertNamesANodeAlreadyKnownOnlyAsAHash) {
   Fixture f;
-  f.deliver(floodWithPath({{0xDE, 0xAD}}, 2));       // seen forwarding, anonymous
+  f.deliver(floodWithPath({{0xDE, 0xAD}}, 2));       // we saw it forward a frame, but it has no name
   ASSERT_EQ(1, f.core.numPeers());
   EXPECT_STREQ("", f.core.peer(0)->name);
 
@@ -1002,7 +1005,8 @@ TEST(PeerIdentity, ARelayedAdvertPlacesTheOriginatorBeyondItsForwarders) {
 
 TEST(PeerIdentity, DistantNodesDoNotConsumeSlots) {
   Fixture f;
-  // three forwarders => originator is 4 hops out, past the near cutoff
+  // three forwarders, so the originator is 4 hops away. That is past the near
+  // limit.
   f.deliver(advert({0x99, 0x88, 0x77}, "Distant", 0, 0,
                    {{0xA1,1},{0xB2,2},{0xC3,3}}, 2));
   for (int i = 0; i < f.core.numPeers(); i++)
@@ -1017,13 +1021,13 @@ TEST(PeerIdentity, OurOwnAdvertIsIgnored) {
 }
 
 // ------------------------------------------------------- observer histograms
-// Hop depth and payload type are the cheapest useful observability there is:
-// they say whether we sit among close neighbours or on the edge of a deep mesh,
-// and what kind of traffic actually passes.
+// The hop depth and the payload type are the cheapest useful data that the node
+// can collect. They tell you whether the node sits among close neighbours or at
+// the edge of a deep mesh. They also tell you which kind of traffic passes.
 
 TEST(Observer, HopDepthOfReceivedTrafficIsBucketed) {
   Fixture f;
-  f.deliver(floodWithPath({}, 2));                       // 0 hops: straight off a radio
+  f.deliver(floodWithPath({}, 2));                       // 0 hops: directly from a radio
   f.deliver(floodWithPath({{0xAA, 1}}, 2));              // 1 hop
   f.deliver(floodWithPath({{0xAA, 1}, {0xBB, 2}}, 2));   // 2 hops
   f.deliver(floodWithPath({{0xAA, 1}, {0xBB, 2}}, 2));   // 2 hops again
@@ -1048,8 +1052,8 @@ TEST(Observer, PayloadTypesAreCounted) {
   EXPECT_EQ(3u, o.framesObserved());
 }
 
-// The observer must work with no arbiter at all — that is the whole point of
-// lifting it out, so a single-identity repeater can use the same code.
+// The observer must work with no arbiter. That is the reason to move it out of
+// the arbiter. A repeater with one identity can then use the same code.
 TEST(Observer, WorksStandaloneWithoutAnyRadioOrPorts) {
   MeshObserver o;
   o.addSelfKey(SELF_KEY);
@@ -1065,8 +1069,9 @@ TEST(Observer, WorksStandaloneWithoutAnyRadioOrPorts) {
   EXPECT_EQ(1, o.confirmedPeerCount());
 }
 
-// Relay confirmation must work with no arbiter, since that is the whole reason
-// it moved: a single-identity repeater needs it as much as the multi board.
+// The relay confirmation must also work with no arbiter. That is the reason for
+// the move. A repeater with one identity needs it as much as the multi-identity
+// board does.
 TEST(Observer, RelayConfirmationStandalone) {
   MeshObserver o;
   o.addSelfKey(SELF_KEY);
@@ -1083,15 +1088,15 @@ TEST(Observer, RelayConfirmationStandalone) {
   EXPECT_EQ(1u, o.floodsConfirmed()) << "our hash came back in a path";
   EXPECT_EQ(1u, o.confirmsByWidth(2));
 
-  // a direct (non-flood) send can never be relayed, so it isn't tracked
+  // no node can relay a direct send, so the core does not track it
   std::vector<uint8_t> direct{(uint8_t)((2 << 2) | 2), 0x00, 0xBB};
   o.observeTx(direct.data(), (int)direct.size());
   EXPECT_EQ(1u, o.floodsSent()) << "only floods are candidates";
 }
 
-// A returning echo is only meaningful if we transmitted recently. Our hash sits
-// in the path of every packet we ever forwarded, so a wide window credits
-// whichever transmit is newest rather than the one that actually came back.
+// An echo has a meaning only if we transmitted a short time ago. Our hash is in
+// the path of every packet that we forwarded. Thus a wide window gives the
+// credit to the newest transmit, not to the transmit that came back.
 TEST(Observer, ConfirmationWindowIsTight) {
   MeshObserver o;
   o.addSelfKey(SELF_KEY);
@@ -1112,14 +1117,14 @@ TEST(Observer, ConfirmationWindowIsTight) {
   o.observeRx(back.data(), (int)back.size(), 20);
   EXPECT_EQ(1u, o.floodsConfirmed())
       << "20s later cannot be attributed to that transmit";
-  // still tallied as a width observation, just not credited
+  // the core still counts it as a width observation, but gives it no credit
   EXPECT_EQ(2u, o.confirmsByWidth(2));
 }
 
 TEST(Observer, ConfirmationWindowIsTunable) {
   MeshObserver o;
   o.addSelfKey(SELF_KEY);
-  o.setConfirmWindow(1000);                               // the tight end of 1-5s
+  o.setConfirmWindow(1000);                               // the short end of the 1 s to 5 s range
   g_fake_millis = 10000;
   std::vector<uint8_t> ours{FLOOD_HDR, 0x00, 0xAA};
   o.observeTx(ours.data(), (int)ours.size());
@@ -1131,16 +1136,18 @@ TEST(Observer, ConfirmationWindowIsTunable) {
 }
 
 // ---- peer table eviction ---------------------------------------------------
-// The table used to freeze solid once full: every slot taken meant no new node
-// could ever be recorded again, however long an incumbent had been silent. What
-// replaces that has to forget the RIGHT entry — a neighbour we have proven can
-// hear us must outrank one glimpsed once in somebody else's path.
+// A full table used to stop completely. When every slot was full, the code
+// could never record a new node again. The length of the silence of an old
+// entry made no difference. The new code must forget the RIGHT entry. A
+// neighbour that we have proved can hear us must rank above a node that we saw
+// once in the path of another node.
 
-// Fill with relay-only sightings (tier 0), each a distinct 2-byte hash.
+// Fill the table with relay-only sightings at tier 0. Each one has a different
+// 2-byte hash.
 static void fillWithRelayOnlyPeers(MeshObserver& o, int n) {
   for (int i = 0; i < n; i++) {
-    // two hops: the first is the peer, the second keeps it off the final-hop
-    // position so it never earns a direct sighting
+    // Two hops. The first hop is the peer. The second hop holds the peer away
+    // from the final position, so it never gets a direct sighting.
     std::vector<uint8_t> f = floodWithPath(
         {{(uint8_t)(0x40 + i / 256), (uint8_t)(i % 256)}, {0xFE, 0xFE}}, 2);
     o.observeRx(f.data(), (int)f.size(), 20);
@@ -1163,13 +1170,14 @@ TEST(ObserverEviction, APeerThatHasRelayedUsOutranksOneMerelySeen) {
   o.addSelfKey(SELF_KEY);
   g_fake_millis = 1000;
 
-  // 0xCC follows our hash, so it demonstrably received one of our transmissions
+  // 0xCC comes after our hash, so it received one of our transmissions
   std::vector<uint8_t> proven = floodWithPath({{0x30, 0x70}, {0xCC, 0x01}}, 2);
   o.observeRx(proven.data(), (int)proven.size(), 20);
   ASSERT_EQ(1, o.numPeers());
   ASSERT_EQ(1u, o.peer(0)->heard_us);
 
-  // now flood the table with unproven sightings, all NEWER than the proven one
+  // Now fill the table with sightings that have no proof. All of them are NEWER
+  // than the proven one.
   g_fake_millis += 60000;
   fillWithRelayOnlyPeers(o, MeshObserver::MAX_PEERS * 2);
 
@@ -1180,9 +1188,10 @@ TEST(ObserverEviction, APeerThatHasRelayedUsOutranksOneMerelySeen) {
   EXPECT_TRUE(still_there) << "a proven two-way neighbour must not be evicted for a relay sighting";
 }
 
-// Staleness makes a good peer ELIGIBLE, it does not make it the first choice:
-// tier still decides, so a stale proven neighbour outlives fresh relay-only
-// sightings and is surrendered only when the table holds nothing cheaper.
+// An old entry becomes AVAILABLE for eviction, but it is not the first choice.
+// The tier still decides. Thus an old proven neighbour lives longer than new
+// relay-only sightings. The core gives it up only when the table holds nothing
+// of less value.
 TEST(ObserverEviction, AStaleProvenPeerYieldsOnlyWhenEverySlotIsLiveAndDirect) {
   MeshObserver o;
   o.addSelfKey(SELF_KEY);
@@ -1192,8 +1201,8 @@ TEST(ObserverEviction, AStaleProvenPeerYieldsOnlyWhenEverySlotIsLiveAndDirect) {
   o.observeRx(proven.data(), (int)proven.size(), 20);
   ASSERT_EQ(3, o.peerTier(*o.peer(0))) << "heard_us puts it in the top tier";
 
-  // An hour on, fill every remaining slot with peers heard directly and just
-  // now, leaving the proven entry as the only stale one in the table.
+  // One hour later, fill every free slot with peers that we heard directly and
+  // very recently. The proven entry is then the only old entry in the table.
   g_fake_millis += MeshObserver::STALE_MS + 1000;
   for (int i = 0; i + 1 < (int)MeshObserver::MAX_PEERS; i++) {
     std::vector<uint8_t> f = floodWithPath({{0x40, (uint8_t)i}}, 2);
@@ -1217,8 +1226,8 @@ TEST(ObserverEviction, AWedgedTableRefusesAndSaysSoRatherThanLookingQuiet) {
   o.addSelfKey(SELF_KEY);
   g_fake_millis = 1000;
 
-  // fill every slot with peers heard DIRECTLY and recently (tier >= 1), so
-  // nothing is eligible for eviction
+  // Fill every slot with peers that we heard DIRECTLY and recently, at tier 1 or
+  // above. Then the core can evict nothing.
   for (int i = 0; i < MeshObserver::MAX_PEERS; i++) {
     std::vector<uint8_t> f = floodWithPath({{0x40, (uint8_t)i}}, 2);
     o.observeRx(f.data(), (int)f.size(), 20);
@@ -1236,8 +1245,8 @@ TEST(ObserverEviction, CollisionProneOneByteEntriesAreGivenUpFirst) {
   MeshObserver o;
   g_fake_millis = 1000;
 
-  // 0x11 is a relay-only sighting, 0xFE is the final hop so it is heard direct;
-  // both arrive as 1-byte hashes, which is the width we cannot trust
+  // 0x11 is a relay-only sighting. 0xFE is the final hop, so we heard it
+  // directly. Both arrive as 1-byte hashes. We cannot trust that width.
   std::vector<uint8_t> narrow = floodWithPath({{0x11}, {0xFE}}, 1);
   o.observeRx(narrow.data(), (int)narrow.size(), 20);
   EXPECT_EQ(2, o.widthCount(1)) << "both path entries were only a byte wide";
@@ -1255,12 +1264,12 @@ TEST(ObserverEviction, CollisionProneOneByteEntriesAreGivenUpFirst) {
 // -------------------------------------------------- pooled duty-cycle budget
 //
 // Dispatcher gives every Mesh instance its own tx_budget_ms. Behind one antenna
-// that is N budgets for one transmitter, so a three-slot node believing it held
-// 50% duty would happily transmit at 150%. The pool below is the only thing
-// that knows what the NODE spent.
+// that is N budgets for one transmitter. A node with three slots that believes
+// it holds a 50% duty cycle transmits at 150%. Only the pool below knows what
+// the NODE spent.
 
-// A frame's estimated airtime in the fake radio is its length in ms, so budgets
-// and frame sizes can be read as the same units throughout.
+// In the fake radio the estimated airtime of a frame is its length in ms. Thus
+// the budgets and the frame sizes use the same units everywhere.
 static void sendAndRelease(FakeRadio& radio, RadioPort& p, const uint8_t* buf, int len) {
   if (!p.startSendRaw(buf, len)) return;
   radio.send_complete = true;
@@ -1294,15 +1303,15 @@ TEST(PooledBudget, TheNodeNeverTransmitsMoreThanTheDutyCycleAllows) {
   RadioPort* ports[3] = { &f.a, &f.b, &f.c };
   uint8_t frame[64] = {0};
 
-  // Three identities all transmitting as hard as they are allowed to, for
-  // twenty simulated seconds. The pool is the only brake.
+  // Three identities transmit as much as the rules allow, for twenty simulated
+  // seconds. The pool is the only limit.
   for (int step = 0; step < 2000; step++) {
     for (int i = 0; i < 3; i++) sendAndRelease(f.radio, *ports[i], frame, 64);
     g_fake_millis += 10;
 
-    // THE INVARIANT: never more airtime than one window's head start plus what
-    // the duty cycle has earned since. Per-identity budgets would blow this out
-    // by a factor of three within the first second.
+    // THE RULE: the airtime is never more than the start value of one window
+    // plus what the duty cycle has earned since then. A budget for each identity
+    // would go past this by a factor of three in the first second.
     uint32_t allowed = start_budget + (uint32_t)(g_fake_millis / 10);
     ASSERT_LE(f.core.txChargedMs(), allowed)
         << "over-drawn at t=" << g_fake_millis << "ms";
@@ -1333,9 +1342,9 @@ TEST(PooledBudget, AFrameLargerThanWhatIsLeftIsRefusedOutright) {
   for (int i = 0; i < 4; i++) sendAndRelease(f.radio, f.a, frame, 200);
   ASSERT_EQ(200u, f.core.txBudgetMs());
 
-  // startSendRaw() is the ONE gate a dispatcher cannot argue with: its CAD-busy
-  // timeout force-sends past isReceiving() after 4 s, but a refusal here drops
-  // the packet instead of putting the node over its duty cycle.
+  // startSendRaw() is the ONE check that a dispatcher cannot pass. Its CAD-busy
+  // timeout sends past isReceiving() by force after 4 s. But a refusal here
+  // discards the packet. It does not let the node go past its duty cycle.
   EXPECT_FALSE(f.a.startSendRaw(frame, 201));
   EXPECT_EQ(4u, f.radio.sent.size());
   EXPECT_TRUE(f.a.startSendRaw(frame, 200)) << "exactly what is left must still fit";
@@ -1374,8 +1383,8 @@ TEST(TxWaitReasons, AQuietBandLeavesEveryCounterAtZero) {
     ASSERT_FALSE(f.a.isReceiving());
     sendAndRelease(f.radio, f.a, msg, 3);
   }
-  // The whole point: a node with nothing in its way must not look like one that
-  // cannot get a word in edgeways.
+  // This is the point of the test. A node with no obstacle must not look like a
+  // node that can never transmit.
   for (int r = 0; r < TXWAIT_NUM; r++) EXPECT_EQ(0u, f.core.txWaits(r)) << "reason " << r;
 }
 
@@ -1403,8 +1412,9 @@ TEST(TxWaitReasons, ChannelBusyIsSplitIntoItsThreeUnderlyingConditions) {
   g_probe_reason = TXWAIT_RSSI;      EXPECT_TRUE(f.a.isReceiving());
   g_probe_reason = TXWAIT_CAD;       EXPECT_TRUE(f.a.isReceiving());
 
-  // "channel busy" covers a neighbour mid-packet, a threshold set too tight and
-  // hardware CAD; those call for three completely different responses.
+  // "channel busy" covers three conditions: a neighbour in the middle of a
+  // packet, a threshold that is too strict, and hardware CAD. Each condition
+  // needs a different answer.
   EXPECT_EQ(1u, f.core.txWaits(TXWAIT_RX_PACKET));
   EXPECT_EQ(2u, f.core.txWaits(TXWAIT_RSSI));
   EXPECT_EQ(1u, f.core.txWaits(TXWAIT_CAD));
@@ -1435,7 +1445,7 @@ TEST(TxWaitReasons, AnExhaustedBudgetIsDistinguishableFromABusyChannel) {
   uint8_t frame[200] = {0};
   for (int i = 0; i < 5; i++) sendAndRelease(f.radio, f.a, frame, 200);
 
-  f.radio.receiving = true;                  // band busy AS WELL
+  f.radio.receiving = true;                  // the band is busy AS WELL
   EXPECT_TRUE(f.b.isReceiving());
   EXPECT_EQ(1u, f.core.txWaits(TXWAIT_BUDGET))
       << "our own duty cycle is the obstacle, and blaming the band would hide that";
@@ -1444,15 +1454,15 @@ TEST(TxWaitReasons, AnExhaustedBudgetIsDistinguishableFromABusyChannel) {
 
 // ------------------------------------------------------ cross-slot priority
 //
-// Upstream ranks packets WITHIN a Dispatcher (routed traffic queues at
-// ACTION_RETRANSMIT_DELAYED(0, d)). Across identities there was nothing: the
-// transmitter was first-come-first-served, so a chatty chat slot could sit in
-// front of the repeater's routed traffic for as long as it had something to say.
+// The upstream code ranks packets INSIDE one Dispatcher. Routed traffic queues
+// at ACTION_RETRANSMIT_DELAYED(0, d). Between identities there was no rank. The
+// transmitter served the first request. Thus a busy chat slot could stay in
+// front of the routed traffic of the repeater for as long as it had data.
 
 TEST(CrossSlotPriority, AHigherRankedPortGetsTheChannelAheadOfALowerOne) {
   g_fake_millis = 1000;
   Fixture f;
-  f.core.setPortPriority(0, 0);                  // port a = repeater
+  f.core.setPortPriority(0, 0);                  // port a is the repeater
   uint8_t msg[] = {1, 2, 3};
 
   f.radio.send_complete = false;
@@ -1460,7 +1470,7 @@ TEST(CrossSlotPriority, AHigherRankedPortGetsTheChannelAheadOfALowerOne) {
   EXPECT_FALSE(f.a.startSendRaw(msg, 3)) << "the repeater wanted the air and did not get it";
   f.radio.send_complete = true;
   f.c.isSendComplete();
-  f.c.onSendFinished();                          // transmitter free again
+  f.c.onSendFinished();                          // the transmitter is free again
 
   EXPECT_TRUE(f.b.isReceiving())
       << "a chat identity must not step in front of routed traffic that is already waiting";
@@ -1472,12 +1482,12 @@ TEST(CrossSlotPriority, AHigherRankedPortGetsTheChannelAheadOfALowerOne) {
 TEST(CrossSlotPriority, PriorityIsPerPortNotHardCodedToSlotZero) {
   g_fake_millis = 1000;
   Fixture f;
-  f.core.setPortPriority(2, 0);                  // rank the LAST port highest
+  f.core.setPortPriority(2, 0);                  // give the LAST port the highest rank
   uint8_t msg[] = {1, 2, 3};
 
   f.radio.send_complete = false;
   ASSERT_TRUE(f.a.startSendRaw(msg, 3));
-  EXPECT_FALSE(f.c.startSendRaw(msg, 3));        // c claims
+  EXPECT_FALSE(f.c.startSendRaw(msg, 3));        // c makes a claim
   f.radio.send_complete = true;
   f.a.isSendComplete();
   f.a.onSendFinished();
@@ -1489,7 +1499,7 @@ TEST(CrossSlotPriority, PriorityIsPerPortNotHardCodedToSlotZero) {
 
 TEST(CrossSlotPriority, EqualRanksDoNotYieldToEachOther) {
   g_fake_millis = 1000;
-  Fixture f;                                     // every port left at the default rank
+  Fixture f;                                     // every port keeps the default rank
   uint8_t msg[] = {1, 2, 3};
 
   f.radio.send_complete = false;
@@ -1517,7 +1527,7 @@ TEST(CrossSlotPriority, TransmittingClearsTheClaimAndReleasesTheOthersAtOnce) {
   f.c.onSendFinished();
 
   ASSERT_TRUE(f.b.isReceiving());
-  sendAndRelease(f.radio, f.a, msg, 3);          // the claimant gets its turn
+  sendAndRelease(f.radio, f.a, msg, 3);          // the port with the claim gets its turn
   EXPECT_FALSE(f.b.isReceiving()) << "a satisfied claim must not linger";
 }
 
@@ -1572,9 +1582,9 @@ TEST(CrossSlotPriority, PriorityDefersButNeverRefusesSoAForcedSendStillGetsThrou
   f.c.onSendFinished();
   ASSERT_TRUE(f.b.isReceiving());
 
-  // b's dispatcher has burned its own 4 s CAD-busy timeout and force-sent.
-  // Refusing here would drop the packet; letting it through bounds starvation
-  // at the timeout that already exists upstream.
+  // The dispatcher of b has used its own 4 s CAD-busy timeout and now sends by
+  // force. A refusal here discards the packet. If the core lets the send
+  // through, the timeout that already exists upstream limits the starvation.
   EXPECT_TRUE(f.b.startSendRaw(msg, 3));
   EXPECT_EQ(1u, f.core.txWaits(TXWAIT_FORCED));
 }

@@ -14,21 +14,21 @@ static Packet makePacket() {
   return p;
 }
 
-// The three receive metrics are meant to fit in padding the struct already had.
-// If this fails the packet pool got bigger; check the field order before the
-// number is simply updated.
+// The three receive values must fit in the padding that the structure already
+// has. If this test fails, the packet pool is larger than before. Check the
+// order of the fields before you change the number here.
 TEST(PacketLinkMetrics, StructStaysWithinItsExistingTailPadding) {
   EXPECT_EQ(sizeof(Packet), 262u);
 }
 
 TEST(PacketLinkMetrics, AFreshPacketReportsUnknownRatherThanStaleMetrics) {
   Packet p;
-  EXPECT_EQ(p.getCodingRate(), 0);   // 0 = we were not told
+  EXPECT_EQ(p.getCodingRate(), 0);   // 0 means that nobody told us
   EXPECT_EQ(p.getRSSI(), 0);
   EXPECT_FLOAT_EQ(p.getSNR(), 0.0f);
 }
 
-// int8_t would have clipped here: SF12 links are routinely read below -128 dBm.
+// An int8_t cuts the value here. SF12 links often read below -128 dBm.
 TEST(PacketLinkMetrics, RssiHoldsTheWholeSensitivityRange) {
   Packet p;
   p._rssi = -148;
@@ -45,9 +45,10 @@ TEST(PacketLinkMetrics, CodingRateIsCarriedAsTheDenominator) {
   }
 }
 
-// The metrics describe the frame we received, not the packet's contents. They
-// must not reach the wire, or two nodes forwarding the same packet would
-// produce different bytes (and different dedup hashes downstream).
+// The values describe the frame that we received. They do not describe the
+// contents of the packet. They must not go on the air. If they did, two nodes
+// that forward the same packet would send different bytes. The dedup hashes
+// later in the mesh would also differ.
 TEST(PacketWireFormat, ReceiveMetricsAreNotSerialised) {
   uint8_t without[MAX_TRANS_UNIT + 1], with[MAX_TRANS_UNIT + 1];
 
@@ -78,9 +79,9 @@ TEST(PacketWireFormat, EncodedLengthStillMatchesGetRawLength) {
   EXPECT_EQ(t.writeTo(buf), t.getRawLength());
 }
 
-// readFrom() restores a packet from a blob that never contained the metrics, so
-// it must leave whatever the caller already knows about the frame alone rather
-// than inventing values.
+// readFrom() builds a packet from bytes that never held these values. Thus it
+// must keep what the caller already knows about the frame. It must not invent
+// values.
 TEST(PacketWireFormat, ReadFromLeavesReceiveMetricsUntouched) {
   uint8_t buf[MAX_TRANS_UNIT + 1];
   Packet src = makePacket();
@@ -102,8 +103,8 @@ TEST(PacketWireFormat, ReadFromLeavesReceiveMetricsUntouched) {
   EXPECT_EQ(0, memcmp(dest.payload, src.payload, src.payload_len));
 }
 
-// The hash feeds the dedup tables; a node that heard a packet strongly must
-// produce the same hash as one that barely heard it.
+// The dedup tables use this hash. A node that heard a packet with a strong
+// signal must calculate the same hash as a node that heard it weakly.
 TEST(PacketWireFormat, PacketHashIgnoresReceiveMetrics) {
   uint8_t h1[MAX_HASH_SIZE], h2[MAX_HASH_SIZE];
 
