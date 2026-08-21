@@ -247,14 +247,15 @@ reports a peer count and nothing walks the table.
 
 ## Build status
 
-Verified today on this tree at commit `d8449ff7`. Host is aarch64 Linux with the
+Verified on this tree at commit `1d0f0859`. Host is aarch64 Linux with the
 toolchain override described below, so nRF52 sizes differ a few percent from official
 release artifacts.
 
 | env | result | flash | RAM |
 |---|---|---:|---:|
-| `RAK_3401_repeater` | builds | 379,532 B (46.6% of 815,104) | 33,008 B (14.0% of 235,520) |
-| `RAK_3401_hydra` (3 slots) | builds | 383,212 B (47.0%) | 65,232 B (27.7%) |
+| `RAK_3401_repeater` | builds | 379,500 B (46.6% of 815,104) | 33,032 B (14.0% of 235,520) |
+| `RAK_3401_hydra` (3 slots) | builds | 381,340 B (46.8%) | 54,336 B (23.1%) |
+| `RAK_3401_hydra_debug` (packet trace on) | builds | 384,716 B (47.2%) | 65,288 B (27.7%) |
 | `ThinkNode_M5_Repeater` | builds | 1,125,165 B (85.8% of 1,310,720) | 60,832 B (11.6% of 524,288) |
 
 Cost of everything in this fork, measured against upstream `v1.17.1` built from the same
@@ -262,11 +263,16 @@ tree on the same host:
 
 |  | upstream | this fork | delta |
 |---|---:|---:|---:|
-| `RAK_3401_repeater` flash | 376,780 B | 379,532 B | **+2,752 B** |
-| `RAK_3401_repeater` RAM | 32,928 B | 33,008 B | **+80 B** |
+| `RAK_3401_repeater` flash | 376,780 B | 379,500 B | **+2,720 B** |
+| `RAK_3401_repeater` RAM | 32,928 B | 33,032 B | **+104 B** |
 
-The per-branch deltas sum exactly: 192 + 16 + 1,232 + 704 + 608 = 2,752. That they add up
-is a useful check that the branches do not interact.
+The per-branch deltas sum to 2,752 (192 + 16 + 1,232 + 704 + 608); moving the LoRa
+watchdog out of `MyMesh` into its own module then returned 32 bytes of flash and cost 24
+of RAM.
+
+The hydra figure is the one worth noting: the diagnostic packet trace is **10,952 B of
+RAM and 3,376 B of flash**, and it is off unless a build asks for it. Sharing a radio used
+to cost more than the identities sharing it did.
 
 **What the M5 row does and does not mean.** `ThinkNode_M5_Repeater` is an unmodified
 upstream target, and that is the whole claim: it still builds cleanly against our tree.
@@ -313,12 +319,13 @@ and breaks the build. ESP32 envs need no override.
 ## Tests
 
 ```bash
-pio test -e native_multi -e native -e native_kiss_modem
+pio test -e native_multi -e native_multi_notrace -e native -e native_kiss_modem
 ```
 
-148 cases, all passing. 100 of them are new here — 86 in `test_shared_radio` and 14 in
-`test_mux`, on the added `native_multi` env, against mock `mesh::Radio` and `Arduino`
-headers. The other 48 are upstream's.
+174 cases, all passing. 126 of them are new here — `test_shared_radio` 86, `test_mux` 14,
+`test_lora_watchdog` 18, and `test_shared_radio_notrace` 8 on its own env, since a second
+binary is the only way to exercise a compile-time flag's off state. All run against mock
+`mesh::Radio` and `Arduino` headers. The other 48 are upstream's.
 
 This is the fork's only real safety net, and it is worth being plain about what it covers:
 the arbiter's logic, not its behaviour on hardware.
