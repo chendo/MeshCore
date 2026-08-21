@@ -53,6 +53,27 @@ void AutoDiscoverRTCClock::begin(TwoWire& wire) {
   }
 }
 
+const char* AutoDiscoverRTCClock::deviceName() {
+  if (ds3231_success)   return "DS3231";
+  if (rv3028_success)   return "RV3028";
+  if (rtc_8563_success) return "PCF8563";
+  if (rtc_8130_success) return "RX8130CE";
+  return "fallback";
+}
+
+bool AutoDiscoverRTCClock::hasHardwareRTC() {
+  return ds3231_success || rv3028_success || rtc_8563_success || rtc_8130_success;
+}
+
+int AutoDiscoverRTCClock::oscillatorStopped() {
+  if (ds3231_success)   return rtc_3231.lostPower() ? 1 : 0;   // OSF, register 0x0F
+  if (rtc_8563_success) return rtc_8563.lostPower() ? 1 : 0;   // VL, seconds register bit 7
+  // The RV3028 and RX8130CE drivers used here expose no equivalent, so say
+  // "unknown" rather than "fine" — reporting a clean bill of health for a chip
+  // that was never asked is worse than admitting the gap.
+  return -1;
+}
+
 uint32_t AutoDiscoverRTCClock::getCurrentTime() {
   if (ds3231_success) {
     return rtc_3231.now().unixtime();
