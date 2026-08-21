@@ -29,6 +29,34 @@
 
 #define AREF_VOLTAGE            (3.0)
 
+// Power management boot protection threshold (millivolts)
+// Set to 0 to disable boot protection
+//
+// Deliberately BELOW AUTO_SHUTDOWN_MILLIVOLTS (3300). The runtime auto-shutdown
+// is the normal low-battery policy and the user can recover from it with the
+// power button; boot lockout has no such escape — checkBootVoltage() ignores the
+// reset reason, so a reset just re-runs the check and returns to SYSTEMOFF, and
+// only USB gets the device back. It therefore only fires on a cell flatter than
+// the firmware would ever have left one. 3000mV clears the pack protection
+// cutoff and the regulator dropout while sitting far under any cell holding
+// usable charge, so ADC tolerance across the 150K/150K divider cannot strand a
+// good pack.
+#define PWRMGT_VOLTAGE_BOOTLOCK 3000   // Won't boot below this voltage (mV)
+
+// LPCOMP wake configuration (voltage recovery from SYSTEMOFF)
+// AIN2 = P0.04 = PIN_VBAT_READ
+#define PWRMGT_LPCOMP_AIN 2
+// LPCOMP compares the divided battery against a fraction of VDD, so the wake
+// point is Vpin = VDD * (REFSEL fraction) with VBAT = Vpin * VBAT_DIVIDER_COMP.
+// That factor is 2.0 (150K/150K, see ThinkNodeM1Board.h) — NOT the ADC_MULTIPLIER
+// of 4.90 above, which is inherited dead weight from the Seeed variant this file
+// was copied from and is used by nothing on this board.
+// - If VDD ~ 3.0V:  VBAT ~ (3.0 * 9/16) * 2 ~ 3375mV
+// - If VDD ~ 3.3V:  VBAT ~ (3.3 * 9/16) * 2 ~ 3713mV
+// Both ends clear PWRMGT_VOLTAGE_BOOTLOCK and AUTO_SHUTDOWN_MILLIVOLTS, so waking
+// can never drop straight back into either shutdown path.
+#define PWRMGT_LPCOMP_REFSEL 12  // 9/16 VDD (~3.38-3.71V)
+
 ////////////////////////////////////////////////////////////////////////////////
 // Number of pins
 

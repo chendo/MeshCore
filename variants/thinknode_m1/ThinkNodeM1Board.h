@@ -14,6 +14,11 @@
 #define REAL_VBAT_MV_PER_LSB (VBAT_DIVIDER_COMP * VBAT_MV_PER_LSB)
 
 class ThinkNodeM1Board : public NRF52Board {
+protected:
+#ifdef NRF52_POWER_MANAGEMENT
+  void initiateShutdown(uint8_t reason) override;
+#endif
+
 public:
   ThinkNodeM1Board() : NRF52Board("THINKNODE_M1_OTA") {}
   void begin();
