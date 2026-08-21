@@ -87,6 +87,7 @@ public:
 class HomeScreen : public UIScreen {
   enum HomePage {
     MESH,
+    MSGS,
     FIRST,
     RECENT,
     RADIO,
@@ -290,6 +291,41 @@ public:
       }
 
       display.setTextSize(1);   // leave the driver as the other pages expect it
+
+    } else if (_page == HomePage::MSGS) {
+      display.setTextSize(0);
+      display.setColor(UIColor::primary_txt);
+
+      uint8_t head, count;
+      const MsgLogEntry* log = _task->getMsgLog(head, count);
+
+      const int bottom_y = 112, row_h = 6, top_y = 18;
+      int rows = (bottom_y - top_y) / row_h + 1;
+      int n = count < rows ? count : rows;
+
+      if (n == 0) {
+        display.setCursor(0, top_y);
+        display.print("no messages yet");
+      }
+
+      // Anchored to the bottom, so the newest line is always in the same place rather
+      // than wandering up the screen as the log fills.
+      int y = bottom_y - (n - 1) * row_h;
+      for (int i = 0; i < n; i++, y += row_h) {
+        // walk oldest-to-newest of the last n
+        const MsgLogEntry* m = &log[(head + UI_MSG_LOG - (n - 1) + i) % UI_MSG_LOG];
+        if (m->at == 0) continue;
+
+        uint32_t secs = m->at % 86400;   // UTC, same basis as the rest of the UI
+        char from[sizeof(m->from)];
+        display.translateUTF8ToBlocks(from, m->from, sizeof(from));
+        sprintf(tmp, "%02u:%02u:%02u %s: %s",
+                (unsigned)(secs / 3600), (unsigned)((secs / 60) % 60), (unsigned)(secs % 60),
+                from, m->text);
+        display.drawTextEllipsized(0, y, display.width(), tmp);
+      }
+
+      display.setTextSize(1);
 
     } else if (_page == HomePage::FIRST) {
       display.setColor(UIColor::primary_txt);
@@ -735,6 +771,12 @@ void UITask::msgRead(int msgcount) {
 
 void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) {
   _msgcount = msgcount;
+
+  _log_head = (_log_head + 1) % UI_MSG_LOG;
+  _log[_log_head].at = rtc_clock.getCurrentTime();
+  StrHelper::strncpy(_log[_log_head].from, from_name, sizeof(_log[_log_head].from));
+  StrHelper::strncpy(_log[_log_head].text, text, sizeof(_log[_log_head].text));
+  if (_log_count < UI_MSG_LOG) _log_count++;
 
   ((MsgPreviewScreen *) msg_preview)->addPreview(path_len, from_name, text);
   setCurrScreen(msg_preview);

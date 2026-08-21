@@ -22,6 +22,15 @@
 #include "../AbstractUITask.h"
 #include "../NodePrefs.h"
 
+// A scrollback of what arrived, kept separately from MsgPreviewScreen's unread queue --
+// that one is consumed as you read it, and this has to survive being read.
+#define UI_MSG_LOG   14
+struct MsgLogEntry {
+  uint32_t at;        // epoch secs, 0 for an empty slot
+  char from[14];      // contact name, or the channel name for a channel message
+  char text[44];
+};
+
 class UITask : public AbstractUITask {
   DisplayDriver* _display;
   SensorManager* _sensors;
@@ -53,6 +62,10 @@ class UITask : public AbstractUITask {
   UIScreen* msg_preview;
   UIScreen* curr;
 
+  MsgLogEntry _log[UI_MSG_LOG];
+  uint8_t _log_head;    // newest entry
+  uint8_t _log_count;
+
   void userLedHandler();
 
   // Button action handlers
@@ -69,12 +82,19 @@ public:
     next_batt_chck = _next_refresh = 0;
     ui_started_at = 0;
     curr = NULL;
+    memset(_log, 0, sizeof(_log));
+    _log_head = UI_MSG_LOG - 1;   // so the first append lands at 0
+    _log_count = 0;
   }
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
 
   void gotoHomeScreen() { setCurrScreen(home); }
   void showAlert(const char* text, int duration_millis);
   int  getMsgCount() const { return _msgcount; }
+  // Oldest-to-newest walk of the last n: (head + UI_MSG_LOG - n + 1 + i) % UI_MSG_LOG
+  const MsgLogEntry* getMsgLog(uint8_t& head, uint8_t& count) const {
+    head = _log_head; count = _log_count; return _log;
+  }
   bool hasDisplay() const { return _display != NULL; }
   bool isButtonPressed() const;
 
