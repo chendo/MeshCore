@@ -14,7 +14,7 @@
 #include <helpers/BaseChatMesh.h>
 #include <target.h>   // board, radio_driver, rtc_clock: node-scoped, one each
 
-// Non-repeater slots are sized down hard: sizeof(mesh::Packet) is 260 B, so the
+// Non-repeater slots are sized down hard: sizeof(mesh::Packet) is 262 B, so the
 // repeater's 32-entry pool is ~8.3 KB on its own. A chat identity only ever has
 // its own traffic in flight — it forwards nothing — so 8 is generous.
 #ifndef HYDRA_CHAT_POOL

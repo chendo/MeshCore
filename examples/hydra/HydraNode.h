@@ -21,7 +21,7 @@
 //   static (.bss)  +5,568 B per chat slot — the ChatSlot object; reserved
 //                  whether or not the slot is enabled
 //   heap           +2,296 B per ENABLED chat slot — 8 x sizeof(mesh::Packet)
-//                  (260 B) plus the three pool queues; zero while disabled
+//                  (262 B) plus the three pool queues; zero while disabled
 //   flash          +192 B per slot
 // ~7.9 KB all-in against slot 0's ~20 KB (mesh 9,392 + tables 1,296 + 32-entry
 // pool ~9,250). Most of the 5,568 is BaseChatMesh's contact table, so
