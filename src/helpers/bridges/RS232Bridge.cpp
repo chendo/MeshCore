@@ -2,32 +2,28 @@
 
 #include <HardwareSerial.h>
 
-#ifdef WITH_RS232_BRIDGE
-
-RS232Bridge::RS232Bridge(NodePrefs *prefs, Stream &serial, mesh::PacketManager *mgr, mesh::RTCClock *rtc)
-    : BridgeBase(prefs, mgr, rtc), _serial(&serial) {}
+#if !defined(RS232_BRIDGE_SERIAL) || !defined(RS232_BRIDGE_RX) || !defined(RS232_BRIDGE_TX)
+#error "RS232_BRIDGE_SERIAL, RS232_BRIDGE_RX and RS232_BRIDGE_TX must be defined"
+#endif
 
 void RS232Bridge::begin() {
   BRIDGE_DEBUG_PRINTLN("Initializing at %d baud...\n", _prefs->bridge_baud);
-#if !defined(WITH_RS232_BRIDGE_RX) || !defined(WITH_RS232_BRIDGE_TX)
-#error "WITH_RS232_BRIDGE_RX and WITH_RS232_BRIDGE_TX must be defined"
-#endif
 
 #if defined(ESP32)
-  ((HardwareSerial *)_serial)->setPins(WITH_RS232_BRIDGE_RX, WITH_RS232_BRIDGE_TX);
+  RS232_BRIDGE_SERIAL.setPins(RS232_BRIDGE_RX, RS232_BRIDGE_TX);
 #elif defined(NRF52_PLATFORM)
   // Tested with RAK_4631 and T114
-  ((Uart *)_serial)->setPins(WITH_RS232_BRIDGE_RX, WITH_RS232_BRIDGE_TX);
+  RS232_BRIDGE_SERIAL.setPins(RS232_BRIDGE_RX, RS232_BRIDGE_TX);
 #elif defined(RP2040_PLATFORM)
-  ((SerialUART *)_serial)->setRX(WITH_RS232_BRIDGE_RX);
-  ((SerialUART *)_serial)->setTX(WITH_RS232_BRIDGE_TX);
+  RS232_BRIDGE_SERIAL.setRX(RS232_BRIDGE_RX);
+  RS232_BRIDGE_SERIAL.setTX(RS232_BRIDGE_TX);
 #elif defined(STM32_PLATFORM)
-  ((HardwareSerial *)_serial)->setRx(WITH_RS232_BRIDGE_RX);
-  ((HardwareSerial *)_serial)->setTx(WITH_RS232_BRIDGE_TX);
+  RS232_BRIDGE_SERIAL.setRx(RS232_BRIDGE_RX);
+  RS232_BRIDGE_SERIAL.setTx(RS232_BRIDGE_TX);
 #else
 #error RS232Bridge was not tested on the current platform
 #endif
-  ((HardwareSerial *)_serial)->begin(_prefs->bridge_baud);
+  RS232_BRIDGE_SERIAL.begin(_prefs->bridge_baud);
 
   // Update bridge state
   _initialized = true;
@@ -35,7 +31,7 @@ void RS232Bridge::begin() {
 
 void RS232Bridge::end() {
   BRIDGE_DEBUG_PRINTLN("Stopping...\n");
-  ((HardwareSerial *)_serial)->end();
+  RS232_BRIDGE_SERIAL.end();
 
   // Update bridge state
   _initialized = false;
@@ -47,8 +43,8 @@ void RS232Bridge::loop() {
     return;
   }
 
-  while (_serial->available()) {
-    uint8_t b = _serial->read();
+  while (RS232_BRIDGE_SERIAL.available()) {
+    uint8_t b = RS232_BRIDGE_SERIAL.read();
 
     if (_rx_buffer_pos < 2) {
       // Waiting for magic word
@@ -139,7 +135,7 @@ void RS232Bridge::sendPacket(mesh::Packet *packet) {
     buffer[5 + len] = checksum & 0xFF;        // Checksum low byte
 
     // Send complete packet
-    _serial->write(buffer, len + SERIAL_OVERHEAD);
+    RS232_BRIDGE_SERIAL.write(buffer, len + SERIAL_OVERHEAD);
 
     BRIDGE_DEBUG_PRINTLN("TX, len=%d crc=0x%04x\n", len, checksum);
   }
@@ -148,5 +144,3 @@ void RS232Bridge::sendPacket(mesh::Packet *packet) {
 void RS232Bridge::onPacketReceived(mesh::Packet *packet) {
   handleReceivedPacket(packet);
 }
-
-#endif

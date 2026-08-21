@@ -5,8 +5,21 @@
 #include "TxtDataHelpers.h"
 #include <RTClib.h>
 
+#include "AbstractBridge.h"
+#ifdef BRIDGE_CLASS
+#include BRIDGE_HEADER  // for the BRIDGE_HAS_* settings the chosen bridge declares
+#endif
+
 #ifndef BRIDGE_MAX_BAUD
 #define BRIDGE_MAX_BAUD 115200
+#endif
+
+#ifdef WITH_BRIDGE
+static void restartBridge(AbstractBridge* bridge) {
+  if (bridge == NULL || !bridge->isRunning()) return;
+  bridge->end();
+  bridge->begin();
+}
 #endif
 
 // Believe it or not, this std C function is busted on some platforms!
@@ -353,7 +366,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       if (strlen(command) == 10) {
         switch (_prefs->advert_loc_policy) {
           case ADVERT_LOC_NONE:
-            strcpy(reply, "> none");
+            sprintf(reply, "> %s", "none");
             break;
           case ADVERT_LOC_PREFS:
             strcpy(reply, "> prefs");
@@ -717,7 +730,10 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
 #ifdef WITH_BRIDGE
   } else if (memcmp(config, "bridge.enabled ", 15) == 0) {
     _prefs->bridge_enabled = memcmp(&config[15], "on", 2) == 0;
-    _callbacks->setBridgeState(_prefs->bridge_enabled);
+    AbstractBridge* bridge = _callbacks->getBridge();
+    if (bridge != NULL && bridge->isRunning() != (bool)_prefs->bridge_enabled) {
+      _prefs->bridge_enabled ? bridge->begin() : bridge->end();
+    }
     savePrefs();
     strcpy(reply, "OK");
   } else if (memcmp(config, "bridge.delay ", 13) == 0) {
@@ -734,32 +750,34 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     savePrefs();
     strcpy(reply, "OK");
 #endif
-#ifdef WITH_RS232_BRIDGE
+#ifdef BRIDGE_HAS_BAUD
   } else if (memcmp(config, "bridge.baud ", 12) == 0) {
     uint32_t baud = atoi(&config[12]);
     if (baud >= 9600 && baud <= BRIDGE_MAX_BAUD) {
       _prefs->bridge_baud = (uint32_t)baud;
-      _callbacks->restartBridge();
+      restartBridge(_callbacks->getBridge());
       savePrefs();
       strcpy(reply, "OK");
     } else {
       sprintf(reply, "Error: baud rate must be between 9600-%d",BRIDGE_MAX_BAUD);
     }
 #endif
-#ifdef WITH_ESPNOW_BRIDGE
+#ifdef BRIDGE_HAS_CHANNEL
   } else if (memcmp(config, "bridge.channel ", 15) == 0) {
     int ch = atoi(&config[15]);
     if (ch > 0 && ch < 15) {
       _prefs->bridge_channel = (uint8_t)ch;
-      _callbacks->restartBridge();
+      restartBridge(_callbacks->getBridge());
       savePrefs();
       strcpy(reply, "OK");
     } else {
       strcpy(reply, "Error: channel must be between 1-14");
     }
+#endif
+#ifdef BRIDGE_HAS_SECRET
   } else if (memcmp(config, "bridge.secret ", 14) == 0) {
     StrHelper::strncpy(_prefs->bridge_secret, &config[14], sizeof(_prefs->bridge_secret));
-    _callbacks->restartBridge();
+    restartBridge(_callbacks->getBridge());
     savePrefs();
     strcpy(reply, "OK");
 #endif
@@ -905,15 +923,12 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "role", 4) == 0) {
     sprintf(reply, "> %s", _callbacks->getRole());
   } else if (memcmp(config, "bridge.type", 11) == 0) {
-    sprintf(reply, "> %s",
-#ifdef WITH_RS232_BRIDGE
-            "rs232"
-#elif WITH_ESPNOW_BRIDGE
-            "espnow"
+#ifdef WITH_BRIDGE
+    AbstractBridge* bridge = _callbacks->getBridge();
+    sprintf(reply, "> %s", bridge ? bridge->getTypeName() : "none");
 #else
-            "none"
+    sprintf(reply, "> %s", "none");
 #endif
-    );
 #ifdef WITH_BRIDGE
   } else if (memcmp(config, "bridge.enabled", 14) == 0) {
     sprintf(reply, "> %s", _prefs->bridge_enabled ? "on" : "off");
@@ -922,13 +937,15 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "bridge.source", 13) == 0) {
     sprintf(reply, "> %s", _prefs->bridge_pkt_src ? "logRx" : "logTx");
 #endif
-#ifdef WITH_RS232_BRIDGE
+#ifdef BRIDGE_HAS_BAUD
   } else if (memcmp(config, "bridge.baud", 11) == 0) {
     sprintf(reply, "> %d", (uint32_t)_prefs->bridge_baud);
 #endif
-#ifdef WITH_ESPNOW_BRIDGE
+#ifdef BRIDGE_HAS_CHANNEL
   } else if (memcmp(config, "bridge.channel", 14) == 0) {
     sprintf(reply, "> %d", (uint32_t)_prefs->bridge_channel);
+#endif
+#ifdef BRIDGE_HAS_SECRET
   } else if (memcmp(config, "bridge.secret", 13) == 0) {
     sprintf(reply, "> %s", _prefs->bridge_secret);
 #endif

@@ -218,10 +218,8 @@ uint8_t MyMesh::handleAnonClockReq(const mesh::Identity& sender, uint32_t sender
     uint32_t now = getRTCClock()->getCurrentTime();
     memcpy(&reply_data[4], &now, 4);     // include our clock (for easy clock sync, and packet hash uniqueness)
     reply_data[8] = 0;  // features
-#ifdef WITH_RS232_BRIDGE
-    reply_data[8] |= 0x01;  // is bridge, type UART
-#elif WITH_ESPNOW_BRIDGE
-    reply_data[8] |= 0x03;  // is bridge, type ESP-NOW
+#ifdef WITH_BRIDGE
+    reply_data[8] |= bridge.getTypeCode();
 #endif
     if (_prefs.disable_fwd) {   // is this repeater currently disabled
       reply_data[8] |= 0x80;  // is disabled
@@ -896,10 +894,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
       telemetry(MAX_PACKET_PAYLOAD - 4),
       discover_limiter(4, 120),  // max 4 every 2 minutes
       anon_limiter(4, 180)   // max 4 every 3 minutes
-#if defined(WITH_RS232_BRIDGE)
-      , bridge(&_prefs, WITH_RS232_BRIDGE, _mgr, &rtc)
-#endif
-#if defined(WITH_ESPNOW_BRIDGE)
+#ifdef WITH_BRIDGE
       , bridge(&_prefs, _mgr, &rtc)
 #endif
 {
