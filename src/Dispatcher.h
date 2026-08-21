@@ -78,6 +78,16 @@ public:
 
   virtual float getLastRSSI() const { return 0; }
   virtual float getLastSNR() const { return 0; }
+
+  /**
+   * \returns  the coding rate of the last frame decoded, as the 4/x denominator
+   *           (5..8), or 0 where the radio cannot report it.
+   *
+   * In explicit-header mode the coding rate travels with every frame, so this is
+   * the SENDER's choice and need not match our own. It is latched by the modem
+   * and overwritten by the next frame decoded.
+   */
+  virtual uint8_t getLastRxCodingRate() const { return 0; }
 };
 
 /**
