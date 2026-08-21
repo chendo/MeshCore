@@ -172,17 +172,39 @@ int SharedRadioCore::takeFrame(RadioPort* p, uint8_t* dst, int sz) {
 }
 
 bool SharedRadioCore::tryStartSend(RadioPort* p, const uint8_t* bytes, int len) {
+  int p_idx = portIndex(p);
   if (_tx_owner != nullptr) {
     // A sibling identity holds the transmitter. The dispatcher just backs off
     // and retries, so this used to be completely invisible — count it (overall
     // and per identity) and log a trace event so contention between the roles
     // on this board can actually be seen.
     _tx_contention = _tx_contention + 1;
-    int idx = portIndex(p);
-    if (idx >= 0 && idx < MAX_PORTS) _tx_contention_port[idx] = _tx_contention_port[idx] + 1;
-    pktLogAdd((int8_t)idx, nullptr, 0, 0, 0, PKT_FLAG_TX_BUSY, (int16_t)portIndex(_tx_owner));
+    if (p_idx >= 0 && p_idx < MAX_PORTS) {
+      _tx_contention_port[p_idx] = _tx_contention_port[p_idx] + 1;
+      _claim_ms[p_idx] = millis();     // it wanted the air and did not get it
+    }
+    noteWait(TXWAIT_SIBLING);
+    pktLogAdd((int8_t)p_idx, nullptr, 0, 0, 0, PKT_FLAG_TX_BUSY, (int16_t)portIndex(_tx_owner));
     return false;   // transmitter busy -> caller (Dispatcher) will drop & retry
   }
+
+  // HARD DUTY-CYCLE CAP. Everything else in the send path can be overridden by
+  // a dispatcher that has run out of patience — its CAD-busy timeout force-sends
+  // after 4 s regardless of what isReceiving() says. This cannot be: the pool is
+  // what keeps the node legal, so a frame that does not fit is refused outright,
+  // and the caller drops it rather than transmitting over the limit.
+  refillBudget();
+  uint32_t est = _real->getEstAirtimeFor(len);
+  if (est > _budget_ms) {
+    noteWait(TXWAIT_BUDGET);
+    pktLogAdd((int8_t)p_idx, bytes, len, 0, 0, PKT_FLAG_TX_FAIL, -2);
+    return false;
+  }
+  // A port that transmits over a live higher-priority claim got there by
+  // force-sending through its own CAD-busy timeout; count it, since it is the
+  // one way the priority ordering below can be defeated.
+  if (higherPriorityClaimed(p_idx)) noteWait(TXWAIT_FORCED);
+
   // apply this persona's TX power before keying up
   if (_pwr_ctl != nullptr) {
     int8_t want = p->portTxPower();
@@ -197,10 +219,14 @@ bool SharedRadioCore::tryStartSend(RadioPort* p, const uint8_t* bytes, int len) 
     // silent — no trace entry, no counter — which is why hours of failed
     // transmits left no evidence at all. It is a transmit failure: count it.
     _tx_refused = _tx_refused + 1;
+    noteWait(TXWAIT_RADIO);
     pktLogAdd((int8_t)portIndex(p), bytes, len, 0, 0, PKT_FLAG_TX_FAIL, -1);
     return false;
   }
   {
+    _budget_ms -= est;
+    _tx_charged_ms += est;
+    if (p_idx >= 0 && p_idx < MAX_PORTS) _claim_ms[p_idx] = 0;   // it got the air
     _tx_owner = p;
     _tx_started_ms = millis();
     _tx_completed = false;
@@ -223,6 +249,92 @@ bool SharedRadioCore::tryStartSend(RadioPort* p, const uint8_t* bytes, int len) 
     }
   }
   return ok;
+}
+
+// ------------------------------------------------- pooled duty-cycle budget
+
+void SharedRadioCore::setDutyCycle(float airtime_budget_factor, uint32_t window_ms) {
+  if (airtime_budget_factor < 0) airtime_budget_factor = 0;
+  if (window_ms == 0) window_ms = 3600000;
+  _duty = 1.0f / (1.0f + airtime_budget_factor);
+  _duty_window_ms = window_ms;
+  _duty_max_ms = (uint32_t)(window_ms * _duty);
+  _budget_ms = _duty_max_ms;               // start of a window, same as Dispatcher::begin()
+  _budget_last_ms = millis();
+}
+
+void SharedRadioCore::refillBudget() {
+  uint32_t now = millis();
+  uint32_t elapsed = now - _budget_last_ms;
+  uint32_t refill = (uint32_t)(elapsed * _duty);
+  if (refill == 0) return;                 // keep the remainder for the next call
+  _budget_ms += refill;
+  if (_budget_ms > _duty_max_ms) _budget_ms = _duty_max_ms;
+  _budget_last_ms = now;
+}
+
+uint32_t SharedRadioCore::txBudgetMs() {
+  refillBudget();
+  return _budget_ms;
+}
+
+// --------------------------------------------------- cross-identity priority
+
+void SharedRadioCore::setPortPriority(int idx, uint8_t pri) {
+  if (idx >= 0 && idx < MAX_PORTS) _port_pri[idx] = pri;
+}
+
+uint8_t SharedRadioCore::portPriority(int idx) const {
+  return (idx >= 0 && idx < MAX_PORTS) ? _port_pri[idx] : 1;
+}
+
+bool SharedRadioCore::higherPriorityClaimed(int idx) const {
+  if (idx < 0 || idx >= MAX_PORTS) return false;
+  uint32_t now = millis();
+  for (int i = 0; i < _num_ports; i++) {
+    if (i == idx) continue;
+    if ((_active_mask & (1u << i)) == 0) continue;     // a silenced identity has no claim
+    if (_port_pri[i] >= _port_pri[idx]) continue;      // equal ranks do not yield to each other
+    if (_claim_ms[i] != 0 && (uint32_t)(now - _claim_ms[i]) < CLAIM_TTL_MS) return true;
+  }
+  return false;
+}
+
+// ------------------------------------------------------------- send gating
+
+bool SharedRadioCore::portMustWait(RadioPort* p) {
+  int idx = portIndex(p);
+
+  // Reaching here means this port's dispatcher has a packet queued and is
+  // asking whether it may key up — so whatever turns it away below, it wanted
+  // the air. Record the claim so a higher-ranked port that keeps losing the
+  // channel still gets in front of the others when it clears.
+  bool wait = false;
+  int reason = -1;
+
+  // Ordered by how far up the stack the obstacle sits. The budget is tested
+  // before priority deliberately: when the pool is dry nobody can transmit, and
+  // reporting the lower-ranked ports as "yielded to the repeater" would point
+  // at the wrong problem entirely.
+  refillBudget();
+  if (txBusyForOthers(p)) {
+    wait = true; reason = TXWAIT_SIBLING;
+  } else if (_budget_ms < BUDGET_RESERVE_MS) {
+    wait = true; reason = TXWAIT_BUDGET;
+  } else if (higherPriorityClaimed(idx)) {
+    wait = true; reason = TXWAIT_PRIORITY;
+  } else if (_real->isReceiving()) {
+    wait = true;
+    // one bool, three conditions — ask the composition which one fired
+    reason = _busy_probe ? _busy_probe() : TXWAIT_RX_PACKET;
+    if (reason < TXWAIT_RX_PACKET || reason > TXWAIT_CAD) reason = TXWAIT_RX_PACKET;
+  }
+
+  if (wait) {
+    noteWait(reason);
+    if (idx >= 0 && idx < MAX_PORTS) _claim_ms[idx] = millis();
+  }
+  return wait;
 }
 
 void SharedRadioCore::pktLogAdd(int8_t dir, const uint8_t* bytes, int len, int8_t snr4, int16_t rssi, uint8_t flag, int16_t aux) {
@@ -392,10 +504,10 @@ void RadioPort::onSendFinished() {
 }
 
 bool RadioPort::isReceiving() {
-  if (!_core) return false;
-  // Busy if a sibling owns the transmitter, or the real channel is active.
-  if (_core->txBusyForOthers(this)) return true;
-  return _core->real()->isReceiving();
+  // Not just "is the channel busy": every reason this identity may not key up
+  // right now, since the dispatcher's back-off is the only lever we have from
+  // below mesh::Radio. See SharedRadioCore::portMustWait().
+  return _core ? _core->portMustWait(this) : false;
 }
 
 uint32_t RadioPort::getEstAirtimeFor(int len_bytes) {

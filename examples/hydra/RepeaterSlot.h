@@ -29,6 +29,7 @@ public:
   RadioPort& port() override { return _port; }
   SlotType type() const override { return SLOT_REPEATER; }
   const mesh::LocalIdentity& identity() const override { return _mesh.self_id; }
+  bool hasPendingWork() const override { return _begun && _mesh.hasPendingWork(); }
   MyMesh& mesh() { return _mesh; }
 
   bool begin(FILESYSTEM* fs, IdentityStore& store, const char* id_name) override {

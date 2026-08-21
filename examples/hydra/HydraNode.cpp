@@ -40,6 +40,22 @@ static void hydra_radio_reinit() {
 
 static uint32_t rx_err_count() { return radio_driver.getPacketsRecvErrors(); }
 
+// Which of the three conditions behind RadioLibWrapper::isReceiving() actually
+// deferred us. isReceivingPacket() is protected, so the RSSI test is recomputed
+// from public state (it is the driver's own test, verbatim) and the remaining
+// paths are separated by whether CAD is even enabled — when it is not, the
+// preamble/header IRQ is the only one left and the answer is exact.
+static int hydra_channel_busy_probe() {
+  int thresh = hydra.radio().interferenceThreshold();
+  if (thresh != 0 && radio_driver.getCurrentRSSI() > radio_driver.getNoiseFloor() + thresh) {
+    return TXWAIT_RSSI;
+  }
+  if (!hydra.radio().cadEnabled()) return TXWAIT_RX_PACKET;
+  // Only reached with CAD on, so the extra scan this costs is one the node was
+  // already paying for on every send attempt.
+  return radio_driver.isChannelActive() ? TXWAIT_CAD : TXWAIT_RX_PACKET;
+}
+
 HydraNode::HydraNode() : _core(radio_driver), _fs(NULL) {
   _slots[0] = &_slot0;
   _cfg[0] = SLOT_REPEATER;
@@ -79,6 +95,12 @@ void HydraNode::begin(FILESYSTEM* fs) {
   _core.setTxPowerControl(&s_tx_power);
   _core.setRadioReinit(hydra_radio_reinit);
   _core.setRxErrorCounter(rx_err_count);
+  _core.setChannelBusyProbe(hydra_channel_busy_probe);
+  // Routing is what the rest of the mesh depends on; chat traffic is not. Rank
+  // rather than special-case slot 0, so a room server can be given the same
+  // standing without the arbiter learning what a slot is.
+  _core.setPortPriority(0, 0);
+  for (int i = 1; i < HYDRA_NUM_SLOTS; i++) _core.setPortPriority(i, 1);
   // Identities on one antenna are deaf to each other (half duplex), so slot 0
   // could never repeat for slot 1. Loopback makes each transmit look like a
   // receive to the sibling ports, which is what a second physical node in the
@@ -93,6 +115,10 @@ void HydraNode::begin(FILESYSTEM* fs) {
 
   startSlot(0);   // repeater: always on, whatever the config says
   NodePrefs* p = _slot0.prefs();
+  // Duty cycle belongs to the antenna, so the whole node draws on one pool.
+  // Slot 0's airtime_factor sets it; the chat slots' own Dispatcher budgets
+  // still exist but are no longer what limits the node.
+  _core.setDutyCycle(p->airtime_factor);
   _core.setCodingRate(p->cr);
   _slot0.port().setPortTxPower(p->tx_power_dbm);
   _core.setPortIdentity(0, _slot0.identity().pub_key);
@@ -126,6 +152,16 @@ void HydraNode::stopSlot(int idx) {
   // hearing and stops transmitting immediately and can be brought back without
   // touching the heap. Its keypair and contacts are untouched on the filesystem.
   _core.setPortActive(idx, false);
+}
+
+bool HydraNode::hasPendingWork() const {
+  // EVERY active slot, not just slot 0. The powersave gate sleeps the board;
+  // a slot whose queue is only consulted when slot 0 happens to be busy would
+  // stall silently for as long as slot 0 stays quiet.
+  for (int i = 0; i < HYDRA_NUM_SLOTS; i++) {
+    if (_core.portActive(i) && _slots[i]->hasPendingWork()) return true;
+  }
+  return _core.txInFlight();
 }
 
 void HydraNode::loop() {
@@ -207,11 +243,23 @@ void HydraNode::handleCommand(char* command, char* reply, size_t reply_sz) {
   }
   if (strcmp(command, "stats-shared") == 0) {   // the arbiter's view, node-wide
     snprintf(reply, reply_sz,
-             "rx=%u tx=%u contend=%u stuck=%u refused=%u dropped=%u peers=%d idle=%us",
+             "rx=%u tx=%u contend=%u stuck=%u refused=%u dropped=%u peers=%d idle=%us "
+             "duty=%u/%us used=%us",
              (unsigned)_core.rxTotal(), (unsigned)_core.txTotal(),
              (unsigned)_core.txContention(), (unsigned)_core.txStuck(),
              (unsigned)_core.txRefused(), (unsigned)_core.rxDropped(),
-             _core.numPeers(), (unsigned)(_core.msSinceLastRx() / 1000));
+             _core.numPeers(), (unsigned)(_core.msSinceLastRx() / 1000),
+             (unsigned)(_core.txBudgetMs() / 1000), (unsigned)(_core.txBudgetMaxMs() / 1000),
+             (unsigned)(_core.txChargedMs() / 1000));
+    return;
+  }
+  if (strcmp(command, "stats-txwait") == 0) {   // why we could not transmit
+    snprintf(reply, reply_sz,
+             "budget=%u sibling=%u prio=%u rxpkt=%u rssi=%u cad=%u radio=%u forced=%u",
+             (unsigned)_core.txWaits(TXWAIT_BUDGET), (unsigned)_core.txWaits(TXWAIT_SIBLING),
+             (unsigned)_core.txWaits(TXWAIT_PRIORITY), (unsigned)_core.txWaits(TXWAIT_RX_PACKET),
+             (unsigned)_core.txWaits(TXWAIT_RSSI), (unsigned)_core.txWaits(TXWAIT_CAD),
+             (unsigned)_core.txWaits(TXWAIT_RADIO), (unsigned)_core.txWaits(TXWAIT_FORCED));
     return;
   }
 
