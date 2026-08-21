@@ -44,6 +44,16 @@
 
 #define HYDRA_SLOT_CFG_FILE  "/hydra_slots"
 
+// Everything about a slot that survives a reboot. The identity itself does not
+// live here — it is filed by IdentityStore under a name derived from the slot
+// INDEX alone, so nothing in this record can move a keypair (decision 7).
+struct SlotConfig {
+  SlotType type;
+  uint8_t  advert_mins;   // 0 = never re-advert
+  bool     flood;         // flood the periodic advert rather than zero-hop it
+  char     name[SLOT_NAME_MAX];
+};
+
 class HydraNode {
 public:
   HydraNode();
@@ -51,22 +61,34 @@ public:
   void begin(FILESYSTEM* fs);
   void loop();
 
-  // Node CLI: `slots`, `stats-shared`, `stats-txwait`, `trace`, `slot N on|off`,
-  // `slot N <cmd>`. Anything else falls through to slot 0, so the familiar
-  // repeater CLI still works unqualified on a hydra node.
-  void handleCommand(char* command, char* reply, size_t reply_sz);
+  // Node CLI: `slots`, `peers`, `stats-shared`, `stats-txwait`, `trace`,
+  // `slot N ...`. Anything else falls through to slot 0, so the familiar
+  // repeater CLI still works unqualified on a hydra node — and that fallthrough
+  // is the node namespace: slot 0's prefs own the one radio (decision 8).
+  //
+  // sender_timestamp follows upstream's convention: 0 means the serial console,
+  // non-zero means it arrived over the air. Commands that report on third
+  // parties are serial-only (decision E).
+  void handleCommand(uint32_t sender_timestamp, char* command, char* reply, size_t reply_sz);
 
   bool hasPendingWork() const;
+  void flushPendingWrites();
 
   RepeaterSlot& repeater() { return _slot0; }
   SharedRadioCore& radio() { return _core; }
 
 private:
-  bool startSlot(int idx);
+  SlotEnableResult startSlot(int idx);
   void stopSlot(int idx);
   void loadSlotConfig();
   void saveSlotConfig();
   void formatSlotTable(char* reply, size_t reply_sz);
+  void handleSlotCommand(int idx, uint32_t sender_timestamp, char* arg,
+                         char* reply, size_t reply_sz);
+  void handleSlotSet(int idx, uint32_t sender_timestamp, char* arg, char* reply, size_t reply_sz);
+  void handleSlotGet(int idx, uint32_t sender_timestamp, char* arg, char* reply, size_t reply_sz);
+  bool setSlotPrivateKey(int idx, const char* hex, char* reply, size_t reply_sz);
+  void reportPeers(char* reply, size_t reply_sz);
   static const char* typeName(SlotType t);
   static void slotIdName(int idx, char* dest, size_t sz);
 
@@ -79,7 +101,7 @@ private:
   LoraWatchdog    _lora_wd;   // node-scoped: one per board, not one per slot
 #endif
   HydraSlot*      _slots[HYDRA_NUM_SLOTS];
-  SlotType        _cfg[HYDRA_NUM_SLOTS];   // configured type; _slots[i]->type() is the live one
+  SlotConfig      _cfg[HYDRA_NUM_SLOTS];   // configured; _slots[i]->type() is the live one
   FILESYSTEM*     _fs;
 };
 

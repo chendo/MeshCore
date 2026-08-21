@@ -110,7 +110,7 @@ void loop() {
     command[len - 1] = 0;
     char reply[160];   // MyMesh's CLI writes up to this; do not shrink
     reply[0] = 0;
-    hydra.handleCommand(command, reply, sizeof(reply));
+    hydra.handleCommand(0, command, reply, sizeof(reply));   // 0 = serial console
     if (reply[0]) { Serial.print("  -> "); Serial.println(reply); }
     command[0] = 0;
   }
