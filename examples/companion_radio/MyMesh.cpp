@@ -932,6 +932,8 @@ void MyMesh::begin(bool has_display) {
   }
 #endif
 
+  loop_passes = loop_slept_passes = 0;
+  loop_stats_since = 0;
   // load persisted prefs
   _store->loadPrefs(_prefs);
   sensors.node_lat = _prefs.node_lat;
@@ -2258,10 +2260,28 @@ bool MyMesh::advert() {
     return true;
   } else {
     return false;
+    } else if (strcmp(cli_command, "sleep") == 0) {
+      // Window resets on each read, so two runs a minute apart measure that minute
+      // rather than everything since boot — the point is to compare quiet vs busy.
+      unsigned long now = _ms->getMillis();
+      uint32_t secs = (now - loop_stats_since) / 1000;
+      if (secs == 0) secs = 1;  // polled back-to-back; don't divide by zero
+      Serial.printf("  > %u loops/sec, %u%% slept (%u of %u over %us)\n",
+                    loop_passes / secs,
+                    loop_passes ? (uint32_t)((uint64_t)loop_slept_passes * 100 / loop_passes) : 0,
+                    loop_slept_passes, loop_passes, secs);
+      loop_passes = loop_slept_passes = 0;
+      loop_stats_since = now;
   }
 }
 
 // To check if there is pending work
 bool MyMesh::hasPendingWork() const {
-  return _mgr->getOutboundTotal() > 0 || dirty_contacts_expiry != 0;
+  // A scheduled lazy contacts write is a deadline, not work. It used to count as
+  // pending, which meant every advert from a known contact re-armed 5s of full-clock
+  // spinning, and on a mesh with a few dozen contacts the deadline was pushed forward
+  // faster than it could ever expire. loop() writes the contacts the moment the
+  // deadline passes, and the 1024Hz FreeRTOS tick on RTC1 breaks sd_app_evt_wait()
+  // every ~1ms, so deferring costs the write under a millisecond of lateness.
+  return _mgr->getOutboundTotal() > 0;
 }

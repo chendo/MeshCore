@@ -272,11 +272,14 @@ void loop() {
   external_watchdog.loop();
 #endif
 
+  bool slept = false;
   if (!the_mesh.hasPendingWork()) {
 #if defined(NRF52_PLATFORM)
     board.sleep(0); // nrf ignores seconds param, sleeps whenever possible
+    slept = true;
 #endif
   }
+  the_mesh.countLoopPass(slept);
 
 #if defined(ESP32) && defined(WIFI_SSID)
   // Safely attempt to reconnect every 10 seconds if flagged

@@ -212,6 +212,10 @@ private:
   NodePrefs _prefs;
   uint32_t pending_login;
   uint32_t pending_status;
+  // loop() has exactly one place it can idle, so it reports every pass here — two
+  // increments, no millis(), so the hot path stays free. Reported by 'sleep'.
+  void countLoopPass(bool slept) { loop_passes++; if (slept) loop_slept_passes++; }
+
   uint32_t pending_telemetry, pending_discovery;   // pending _TELEMETRY_REQ
   uint32_t pending_req;   // pending _BINARY_REQ
   BaseSerialInterface *_serial;
@@ -256,6 +260,8 @@ private:
 
   #define ADVERT_PATH_TABLE_SIZE   16
   AdvertPath advert_paths[ADVERT_PATH_TABLE_SIZE]; // circular table
+  uint32_t loop_passes, loop_slept_passes;
+  unsigned long loop_stats_since;
 };
 
 extern MyMesh the_mesh;
