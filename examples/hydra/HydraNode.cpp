@@ -60,6 +60,14 @@ static void lora_wd_reboot(void*) {
 
 static uint32_t rx_err_count() { return radio_driver.getPacketsRecvErrors(); }
 
+// The sender's coding rate, and what a frame of that length actually cost the
+// channel at it. The core sees only a mesh::Radio, so the driver is reached
+// through these rather than by knowing what it is.
+static uint8_t rx_coding_rate() { return radio_driver.getLastRxCodingRate(); }
+static uint32_t rx_airtime_at_cr(int len_bytes, uint8_t cr) {
+  return radio_driver.getEstAirtimeForCR(len_bytes, cr);
+}
+
 // Which of the three conditions behind RadioLibWrapper::isReceiving() actually
 // deferred us. isReceivingPacket() is protected, so the RSSI test is recomputed
 // from public state (it is the driver's own test, verbatim) and the remaining
@@ -115,6 +123,8 @@ void HydraNode::begin(FILESYSTEM* fs) {
   _core.setTxPowerControl(&s_tx_power);
   _core.setRadioReinit(hydra_radio_reinit);
   _core.setRxErrorCounter(rx_err_count);
+  _core.setRxCodingRateFn(rx_coding_rate);
+  _core.setRxAirtimeFn(rx_airtime_at_cr);
   _core.setChannelBusyProbe(hydra_channel_busy_probe);
   // Routing is what the rest of the mesh depends on; chat traffic is not. Rank
   // rather than special-case slot 0, so a room server can be given the same
