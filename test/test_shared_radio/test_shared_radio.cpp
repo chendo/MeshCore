@@ -371,6 +371,63 @@ TEST(SharedRadioTrace, FailedTransmitIsLoggedAndExcludedFromTotals) {
   EXPECT_EQ(1u, f.core.txTotal()) << "the failure must not inflate the transmit count";
 }
 
+// Coding rate is not one number: what we transmit at is ours to know, but what
+// we receive at belongs to the sender, who puts it in the LoRa header. Mixing
+// the two up would quietly hide the interesting case — a neighbour on a
+// different preset — behind our own setting.
+uint8_t g_fake_rx_cr = 0;
+
+TEST(SharedRadioTrace, ReceivesCarryTheSendersCodingRateAndTransmitsOurs) {
+  Fixture f;
+  f.core.setCodingRate(5);
+  f.core.setRxCodingRateFn([]() -> uint8_t { return g_fake_rx_cr; });
+  g_fake_rx_cr = 8;                        // the sender is running 4/8, we are not
+  f.deliver({0x10, 0x20});
+  uint8_t msg[] = {0x30};
+  f.a.startSendRaw(msg, 1);
+
+  PktLogEntry entries[SharedRadioCore::PKT_LOG_SIZE];
+  int n = f.core.pktLogCopy(entries, SharedRadioCore::PKT_LOG_SIZE, 0);
+  ASSERT_EQ(2, n);
+  EXPECT_EQ(8, entries[0].cr) << "a receive is labelled with the CR its header carried";
+  EXPECT_EQ(5, entries[1].cr) << "a transmit is labelled with the CR we send at";
+}
+
+// Airtime is the number the channel-occupancy view is built on, so a receive
+// has to be costed at the CR it was actually sent at. FakeRadio bills 1 ms per
+// byte for our own settings; the CR-aware hook bills the sender's CR instead.
+TEST(SharedRadioTrace, ReceivedAirtimeIsPricedAtTheSendersCodingRate) {
+  Fixture f;
+  f.core.setCodingRate(5);
+  f.core.setRxCodingRateFn([]() -> uint8_t { return g_fake_rx_cr; });
+  f.core.setRxAirtimeFn([](int len, uint8_t cr) -> uint32_t { return (uint32_t)len * cr; });
+  g_fake_rx_cr = 8;
+  f.deliver({1, 2, 3, 4});
+  uint8_t msg[] = {1, 2, 3, 4};
+  f.a.startSendRaw(msg, 4);
+
+  PktLogEntry entries[SharedRadioCore::PKT_LOG_SIZE];
+  int n = f.core.pktLogCopy(entries, SharedRadioCore::PKT_LOG_SIZE, 0);
+  ASSERT_EQ(2, n);
+  EXPECT_EQ(32, entries[0].air_ms) << "4 bytes at the sender's 4/8, not at our 4/5";
+  EXPECT_EQ(4, entries[1].air_ms) << "our own transmit still comes from the driver";
+}
+
+TEST(SharedRadioTrace, CodingRateIsUnknownRatherThanGuessedAt) {
+  Fixture f;
+  f.core.setCodingRate(9);                 // not a 4/x denominator: refuse it
+  EXPECT_EQ(0, f.core.codingRate());
+  f.core.setCodingRate(7);
+  f.core.setRxCodingRateFn([]() -> uint8_t { return g_fake_rx_cr; });
+  g_fake_rx_cr = 0;                        // radio could not report one
+  f.deliver({0x10});
+
+  PktLogEntry entries[SharedRadioCore::PKT_LOG_SIZE];
+  int n = f.core.pktLogCopy(entries, SharedRadioCore::PKT_LOG_SIZE, 0);
+  ASSERT_EQ(1, n);
+  EXPECT_EQ(0, entries[0].cr) << "an unreadable receive CR must not fall back to our own";
+}
+
 TEST(SharedRadioTrace, OnlyReturnsEntriesNewerThanTheCallersCursor) {
   Fixture f;
   uint8_t buf[MAX_TRANS_UNIT];
@@ -441,6 +498,32 @@ TEST(SharedRadioCorrupt, ErrorWithNoRecoverableBytesStillLogsTheEvent) {
   ASSERT_EQ(1, f.core.pktLogCopy(entries, SharedRadioCore::PKT_LOG_SIZE, 0));
   EXPECT_EQ(PKT_FLAG_RX_ERR, entries[0].flag);
   EXPECT_EQ(0, entries[0].raw_len);
+}
+
+// The CR lives in the LoRa header, so a CRC failure — good header, mangled
+// payload — still knows it. A header failure does not: the modem is still
+// holding the CR of whatever it decoded LAST, and billing this packet with it
+// would invent a fact. The radio here always answers 4/8; only the error code
+// decides whether that answer means anything.
+TEST(SharedRadioCorrupt, ACrcFailureKeepsItsCodingRateButAHeaderFailureCannot) {
+  static const uint8_t damaged[] = {0x11, 0xDE, 0xAD};
+  auto trace_one = [](int16_t code) {
+    Fixture f;
+    g_bad_payload = damaged; g_bad_len = sizeof(damaged);
+    g_err_count = 0; g_err_code = code;
+    f.core.setRxCodingRateFn([]() -> uint8_t { return 8; });   // stale-but-present
+    f.core.setRxErrorCounter([]() -> uint32_t { return g_err_count; },
+                             []() -> int16_t { return g_err_code; },
+                             []() -> const uint8_t* { return g_bad_payload; },
+                             []() -> uint8_t { return g_bad_len; });
+    g_err_count = 1;
+    f.core.pump();
+    PktLogEntry entries[SharedRadioCore::PKT_LOG_SIZE];
+    EXPECT_EQ(1, f.core.pktLogCopy(entries, SharedRadioCore::PKT_LOG_SIZE, 0));
+    return entries[0].cr;
+  };
+  EXPECT_EQ(8, trace_one(PKT_RX_ERR_CRC)) << "the header decoded, so its CR is real";
+  EXPECT_EQ(0, trace_one(-16)) << "header damaged: the modem's CR belongs to another packet";
 }
 
 // ------------------------------------------------ stuck-transmitter watchdog
@@ -990,4 +1073,126 @@ TEST(Observer, ConfirmationWindowIsTunable) {
   std::vector<uint8_t> back = floodWithPath({{0x30, 0x70}}, 2);
   o.observeRx(back.data(), (int)back.size(), 20);
   EXPECT_EQ(0u, o.floodsConfirmed()) << "2.5s is outside a 1s window";
+}
+
+// ---- peer table eviction ---------------------------------------------------
+// The table used to freeze solid once full: every slot taken meant no new node
+// could ever be recorded again, however long an incumbent had been silent. What
+// replaces that has to forget the RIGHT entry — a neighbour we have proven can
+// hear us must outrank one glimpsed once in somebody else's path.
+
+// Fill with relay-only sightings (tier 0), each a distinct 2-byte hash.
+static void fillWithRelayOnlyPeers(MeshObserver& o, int n) {
+  for (int i = 0; i < n; i++) {
+    // two hops: the first is the peer, the second keeps it off the final-hop
+    // position so it never earns a direct sighting
+    std::vector<uint8_t> f = floodWithPath(
+        {{(uint8_t)(0x40 + i / 256), (uint8_t)(i % 256)}, {0xFE, 0xFE}}, 2);
+    o.observeRx(f.data(), (int)f.size(), 20);
+  }
+}
+
+TEST(ObserverEviction, AFullTableNoLongerFreezesOutNewNodes) {
+  MeshObserver o;
+  o.addSelfKey(SELF_KEY);
+  g_fake_millis = 1000;
+
+  fillWithRelayOnlyPeers(o, MeshObserver::MAX_PEERS + 4);
+  EXPECT_EQ((int)MeshObserver::MAX_PEERS, o.numPeers()) << "table stays at its cap";
+  EXPECT_GT(o.evictions(), 0u) << "late arrivals must displace someone, not be dropped";
+  EXPECT_EQ(0u, o.refusedInserts()) << "tier-0 entries are always evictable";
+}
+
+TEST(ObserverEviction, APeerThatHasRelayedUsOutranksOneMerelySeen) {
+  MeshObserver o;
+  o.addSelfKey(SELF_KEY);
+  g_fake_millis = 1000;
+
+  // 0xCC follows our hash, so it demonstrably received one of our transmissions
+  std::vector<uint8_t> proven = floodWithPath({{0x30, 0x70}, {0xCC, 0x01}}, 2);
+  o.observeRx(proven.data(), (int)proven.size(), 20);
+  ASSERT_EQ(1, o.numPeers());
+  ASSERT_EQ(1u, o.peer(0)->heard_us);
+
+  // now flood the table with unproven sightings, all NEWER than the proven one
+  g_fake_millis += 60000;
+  fillWithRelayOnlyPeers(o, MeshObserver::MAX_PEERS * 2);
+
+  bool still_there = false;
+  for (int i = 0; i < o.numPeers(); i++) {
+    if (o.peer(i)->hash[0] == 0xCC && o.peer(i)->heard_us > 0) still_there = true;
+  }
+  EXPECT_TRUE(still_there) << "a proven two-way neighbour must not be evicted for a relay sighting";
+}
+
+// Staleness makes a good peer ELIGIBLE, it does not make it the first choice:
+// tier still decides, so a stale proven neighbour outlives fresh relay-only
+// sightings and is surrendered only when the table holds nothing cheaper.
+TEST(ObserverEviction, AStaleProvenPeerYieldsOnlyWhenEverySlotIsLiveAndDirect) {
+  MeshObserver o;
+  o.addSelfKey(SELF_KEY);
+  g_fake_millis = 1000;
+
+  std::vector<uint8_t> proven = floodWithPath({{0x30, 0x70}, {0xCC, 0x01}}, 2);
+  o.observeRx(proven.data(), (int)proven.size(), 20);
+  ASSERT_EQ(3, o.peerTier(*o.peer(0))) << "heard_us puts it in the top tier";
+
+  // An hour on, fill every remaining slot with peers heard directly and just
+  // now, leaving the proven entry as the only stale one in the table.
+  g_fake_millis += MeshObserver::STALE_MS + 1000;
+  for (int i = 0; i + 1 < (int)MeshObserver::MAX_PEERS; i++) {
+    std::vector<uint8_t> f = floodWithPath({{0x40, (uint8_t)i}}, 2);
+    o.observeRx(f.data(), (int)f.size(), 20);
+  }
+  ASSERT_EQ((int)MeshObserver::MAX_PEERS, o.numPeers());
+
+  std::vector<uint8_t> newcomer = floodWithPath({{0x99, 0x99}, {0xFE, 0xFE}}, 2);
+  o.observeRx(newcomer.data(), (int)newcomer.size(), 20);
+
+  bool still_there = false;
+  for (int i = 0; i < o.numPeers(); i++) {
+    if (o.peer(i)->hash[0] == 0xCC) still_there = true;
+  }
+  EXPECT_FALSE(still_there)
+      << "protection is about being CURRENT; an hour of silence must not hold a slot forever";
+}
+
+TEST(ObserverEviction, AWedgedTableRefusesAndSaysSoRatherThanLookingQuiet) {
+  MeshObserver o;
+  o.addSelfKey(SELF_KEY);
+  g_fake_millis = 1000;
+
+  // fill every slot with peers heard DIRECTLY and recently (tier >= 1), so
+  // nothing is eligible for eviction
+  for (int i = 0; i < MeshObserver::MAX_PEERS; i++) {
+    std::vector<uint8_t> f = floodWithPath({{0x40, (uint8_t)i}}, 2);
+    o.observeRx(f.data(), (int)f.size(), 20);
+  }
+  ASSERT_EQ((int)MeshObserver::MAX_PEERS, o.numPeers());
+
+  uint32_t before = o.refusedInserts();
+  std::vector<uint8_t> newcomer = floodWithPath({{0x99, 0x99}, {0xFE, 0xFE}}, 2);
+  o.observeRx(newcomer.data(), (int)newcomer.size(), 20);
+  EXPECT_GT(o.refusedInserts(), before)
+      << "a wedged table must be visible as refusals, not silently lose sightings";
+}
+
+TEST(ObserverEviction, CollisionProneOneByteEntriesAreGivenUpFirst) {
+  MeshObserver o;
+  g_fake_millis = 1000;
+
+  // 0x11 is a relay-only sighting, 0xFE is the final hop so it is heard direct;
+  // both arrive as 1-byte hashes, which is the width we cannot trust
+  std::vector<uint8_t> narrow = floodWithPath({{0x11}, {0xFE}}, 1);
+  o.observeRx(narrow.data(), (int)narrow.size(), 20);
+  EXPECT_EQ(2, o.widthCount(1)) << "both path entries were only a byte wide";
+
+  fillWithRelayOnlyPeers(o, MeshObserver::MAX_PEERS * 2);
+
+  bool narrow_survived = false;
+  for (int i = 0; i < o.numPeers(); i++) {
+    if (o.peer(i)->width == 1 && o.peer(i)->hash[0] == 0x11) narrow_survived = true;
+  }
+  EXPECT_FALSE(narrow_survived)
+      << "a 1-in-256 guess should be surrendered before a hash we can trust";
 }
