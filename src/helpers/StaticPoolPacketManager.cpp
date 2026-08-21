@@ -62,11 +62,12 @@ mesh::Packet* PacketQueue::removeByIdx(int i) {
 
 bool PacketQueue::add(mesh::Packet* packet, uint8_t priority, uint32_t scheduled_for) {
   PacketQueueLock lock;
-  /* >=, not ==. An equality test is a latch: if _num ever gets past _size --
-     which an unsynchronised increment from two priorities could do -- the
-     condition never matches again and this function writes past the end of
+  /* Use >=, not ==. An equality test is a latch. If _num ever goes past _size,
+     the condition never matches again. An unsynchronised increment from two
+     priorities can cause that. This function would then write past the end of
      three heap arrays on every call for the rest of the boot. The lock above
-     should make that unreachable; this makes it non-catastrophic if it is not. */
+     must make that condition impossible. This test limits the damage if the
+     lock fails. */
   if (_num >= _size) {
     return false;
   }

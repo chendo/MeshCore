@@ -16,17 +16,18 @@ protected:
   PhysicalLayer* _radio;
   mesh::MainBoard* _board;
   uint32_t n_recv, n_sent, n_recv_errors;
-  // Receive failures split by cause. The mix is what carries the information:
-  // CRC-dominated points at collisions, header damage at a signal too weak or
-  // too interfered-with for even the PHY header to survive, and timeouts at a
-  // preamble that never turned into a frame.
+  // Receive failures, divided by cause. The mixture carries the information.
+  // Mostly CRC errors point to collisions. Header damage points to a signal
+  // that is too weak, or has too much interference, for even the PHY header to
+  // survive. Timeouts point to a preamble that never became a frame.
   uint32_t n_err_crc, n_err_header, n_err_timeout, n_err_other;
-  int16_t last_recv_error;   // RadioLib code of the most recent failure
+  int16_t last_recv_error;   // the RadioLib code of the most recent failure
 #if RX_ERR_PAYLOAD_BYTES > 0
-  // RadioLib fills the receive buffer BEFORE it reports a CRC mismatch, and says
-  // so ("to give user the option to keep them", SX126x::readData). So a damaged
-  // frame is recoverable, and a corrupt copy of a packet that arrives cleanly
-  // moments later in a burst is real evidence about what collided with what.
+  // RadioLib fills the receive buffer BEFORE it reports a CRC mismatch, and it
+  // says so ("to give user the option to keep them", SX126x::readData).
+  // Therefore you can recover a damaged frame. In a burst, a corrupt copy of a
+  // packet that arrives correctly a moment later is true evidence about which
+  // packets collided.
   uint8_t last_err_payload[RX_ERR_PAYLOAD_BYTES];
   uint8_t last_err_len;
 #endif
@@ -44,14 +45,14 @@ protected:
   virtual void doResetAGC();
 
   /**
-   * \brief  air-time for a LoRa frame of 'len_bytes' at coding rate 'cr',
-   *        every other modem parameter as given, in milliseconds.
-   * \param  cr  the 4/x denominator; anything outside 5..8 means unknown and
-   *            falls back to getEstAirtimeFor()
+   * \brief  The airtime in milliseconds for a LoRa frame of 'len_bytes' at
+   *        coding rate 'cr'. Every other modem parameter is as given.
+   * \param  cr  the 4/x denominator. A value outside 5..8 means unknown, and
+   *            the function then uses getEstAirtimeFor().
    *
-   * Defers to RadioLib's own time-on-air sum rather than carrying a second copy
-   * of the Semtech formula, which would be free to drift from the one the
-   * driver actually bills transmits with.
+   * This function uses the time-on-air sum of RadioLib. It does not keep a
+   * second copy of the Semtech formula. A second copy could become different
+   * from the one that the driver uses to price transmits.
   */
   uint32_t estAirtimeAtCR(int len_bytes, uint8_t cr, uint8_t sf, float bw_khz,
                           uint16_t preamble_syms, bool implicit_header, bool crc, bool ldro);
@@ -125,11 +126,12 @@ public:
   virtual bool getRxBoostedGainMode() const { return false; }
 
   /**
-   * \brief  Decode the 3-bit coding-rate field of a LoRa explicit header.
+   * \brief  Decode the 3-bit coding-rate field of an explicit LoRa header.
    * \param  raw  the field as the modem reports it
-   * \returns  the 4/x denominator, 5..8, or 0 for anything not defined there
-   *           (reserved values, long-interleaved codes, or a read taken before
-   *           any frame has been decoded)
+   * \returns  the 4/x denominator, 5..8. Returns 0 for any value that the
+   *           header does not define. Those are the reserved values, the
+   *           long-interleaved codes, and a read taken before the modem has
+   *           decoded a frame.
    */
   static uint8_t decodeHeaderCodingRate(uint8_t raw) {
     return (raw >= 1 && raw <= 4) ? (uint8_t)(4 + raw) : 0;

@@ -1,33 +1,36 @@
 #pragma once
 
-// Passive observability for a MeshCore node: everything that can be learned by
-// watching traffic go past, with no protocol participation of its own.
+// Passive observability for a MeshCore node. It reports everything that the
+// node can learn while it watches traffic pass. It takes no part in the
+// protocol itself.
 //
-// This deliberately knows nothing about identities, radios or arbitration. It
-// is fed raw frames and reports what it saw, so it works equally on a
-// multi-identity board (where the shared-radio arbiter feeds it) and on a plain
-// single-identity repeater (where a receive hook does). The peer table and the
-// histograms below started life inside SharedRadioCore purely because that
-// happened to be where every frame passed on one particular board — none of it
-// is arbiter logic.
+// This class knows nothing about identities, radios or arbitration. The caller
+// gives it raw frames, and it reports what it saw. Therefore it works on a
+// multi-identity board, where the shared-radio arbiter supplies the frames, and
+// it works equally well on a plain single-identity repeater, where a receive
+// hook supplies them. The peer table and the histograms below started inside
+// SharedRadioCore, only because that was where every frame passed on one
+// particular board. None of it is arbiter logic.
 //
-// PATHS ARE THE SOURCE OF TRUTH. Every forwarder appends its own hash to the
-// END of a packet's path (Mesh::routeRecvPacket), which makes two independent
-// facts recoverable — and because RF links are asymmetric, they genuinely
-// differ:
+// PATHS ARE THE SOURCE OF TRUTH. Every forwarder adds its own hash to the END
+// of the path of a packet (Mesh::routeRecvPacket). Therefore we can recover two
+// independent facts. RF links are asymmetric, so these two facts are truly
+// different:
 //
-//   LAST entry in a path   that node transmitted the frame WE received, so we
-//                          can hear IT, and the frame's SNR/RSSI describe that
-//                          link. A mid-path entry says nothing about its own
-//                          link to us and must never be read that way.
-//   entry right AFTER
-//   one of ours            that node received OUR transmission and relayed it,
-//                          so it can hear US.
+//   the LAST entry in a    That node transmitted the frame that WE received.
+//   path                   Therefore we can hear IT, and the SNR and RSSI of
+//                          the frame describe that link. An entry in the middle
+//                          of a path says nothing about its own link to us. You
+//                          must never read it that way.
+//   the entry directly
+//   AFTER one of ours      That node received OUR transmission and relayed it.
+//                          Therefore it can hear US.
 //
-// Hash width is chosen by the packet's originator rather than by us, so the
-// same node turns up at one and two bytes. A 1-byte match is a 1-in-256
-// coincidence and is never treated as proof: it is counted separately, and
-// attributed to a known wider peer only when exactly one candidate exists.
+// The originator of the packet selects the hash width, not us. Therefore the
+// same node appears at one byte and at two bytes. A 1-byte match is a 1-in-256
+// coincidence, and we never use it as proof. The code counts it separately. It
+// attributes such a match to a known wider peer only when exactly one candidate
+// exists.
 
 #include <Arduino.h>
 #include <MeshCore.h>
@@ -37,199 +40,220 @@ public:
   static const int MAX_PEERS = 48;
 
   struct PeerEntry {
-    uint8_t  hash[3];          // widest prefix seen
+    uint8_t  hash[3];          // the widest prefix seen
     uint8_t  width;            // 1..3 bytes known
-    uint32_t direct_rx;        // seen as LAST hop: we received its transmission
-    uint32_t relays;           // seen anywhere in a path: mesh activity only
-    uint32_t heard_us;         // >=2-byte hash right after ours: CONFIRMED
-    uint32_t heard_us_1b;      // same at 1 byte: provisional, never confirmation
+    uint32_t direct_rx;        // seen as the LAST hop: we received its transmission
+    uint32_t relays;           // seen at any place in a path: mesh activity only
+    uint32_t heard_us;         // a hash of 2 bytes or more directly after ours: CONFIRMED
+    uint32_t heard_us_1b;      // the same at 1 byte: provisional, never a confirmation
     uint32_t last_ms;          // any sighting
-    uint32_t last_direct_ms;   // last time it was the final hop
-    int32_t  snr4_sum;         // running mean of SNR*4, direct sightings only
+    uint32_t last_direct_ms;   // the last time it was the final hop
+    int32_t  snr4_sum;         // the running mean of SNR*4, from direct sightings only
     uint32_t snr_n;
-    uint8_t  min_hops;         // closest distance seen (1 = direct); 0 unknown
-    // Identity, harvested from ADVERTs. A path only ever carries truncated
-    // hashes, so a node stays anonymous until it adverts (or one of its adverts
-    // reaches us) — at which point pubkey prefix, name and location can be
-    // pinned to it and remembered.
-    uint8_t  pub[6];           // pubkey prefix; all-zero while unknown
-    int32_t  lat_e6, lon_e6;   // 0 when not advertised
+    uint8_t  min_hops;         // the shortest distance seen (1 = direct); 0 = unknown
+    // The identity, collected from ADVERTs. A path carries only truncated
+    // hashes. Therefore a node stays anonymous until it adverts, or until one
+    // of its adverts reaches us. At that point the code can attach a pubkey
+    // prefix, a name and a location to it, and hold them.
+    uint8_t  pub[6];           // the pubkey prefix; all zero while unknown
+    int32_t  lat_e6, lon_e6;   // 0 when the node did not advertise them
     char     name[20];
-    // Clock skew. An ADVERT is signed over a timestamp its originator chose,
-    // so an advert heard at ZERO HOPS is a direct reading of that node's clock
-    // against ours — the only time reference the mesh hands us for free.
+    // The clock skew. The originator of an ADVERT signs it over a timestamp
+    // that the originator chose. Therefore an advert heard at ZERO HOPS is a
+    // direct reading of the clock of that node against ours. It is the only
+    // free time reference that the mesh gives us.
     //
-    // Zero hops is not a nicety. A relayed advert still carries the moment it
-    // was created, and a flood takes seconds to minutes to work across the
-    // mesh (and is re-flooded long after), so the same subtraction on a
-    // multi-hop advert measures propagation delay, not skew, and always makes
-    // the far node look slow. Those are discarded rather than averaged in.
-    int32_t  clock_delta_s;    // their clock minus ours; positive => they are ahead
+    // Zero hops is a requirement, not a preference. A relayed advert still
+    // carries the moment when the node created it. A flood needs seconds to
+    // minutes to cross the mesh, and nodes flood it again long after that.
+    // Therefore the same subtraction on a multi-hop advert measures the
+    // propagation delay, not the skew, and it always makes the distant node
+    // look slow. The code discards those readings. It does not average them in.
+    int32_t  clock_delta_s;    // their clock minus ours; a positive value means they are ahead
     uint32_t clock_ms;         // millis() at that reading; 0 = never measured
-    uint32_t clock_n;          // readings taken
+    uint32_t clock_n;          // the number of readings taken
 
   };
 
-  // Below this a clock is simply unset rather than wrong: a node that has
-  // never been disciplined reports something near zero or its build epoch, and
-  // recording a 56-year "skew" for it would say nothing about anyone's drift.
+  // A clock below this value is not wrong. It is simply not set. A node that
+  // nobody has disciplined reports a value near zero, or its build epoch. A
+  // recorded "skew" of 56 years for that node says nothing about the drift of
+  // any node.
   static const uint32_t MIN_SANE_EPOCH = 1700000000UL;   // 2023-11-14
 
-  /* A clock reading below this is not a wrong time, it is NO time: these boards
-     have no hardware RTC, so every reboot drops them back to VolatileRTCClock's
-     built-in 15 May 2024 and they stay there until something tells them
-     otherwise. 1 Jan 2025 sits safely above that default and below any real
-     deployment, so it separates "never set" from "set and drifting" without
-     needing to know when the firmware was built.
-     This cuts both ways: a node whose own clock is below it must not vote, and
-     one such neighbour is already out there on this mesh reading +71038395s. */
+  /* A clock reading below this value is not a wrong time. It is NO time. These
+     boards have no hardware RTC. Therefore every reboot returns them to the
+     built-in 15 May 2024 of VolatileRTCClock, and they hold that date until
+     something else sets them. 1 Jan 2025 is safely above that default and
+     below any true deployment. Therefore it separates "never set" from "set
+     and drifting", and the code does not need to know the build date of the
+     firmware.
+     This works in both directions. A node whose own clock is below this value
+     must not vote. One such neighbour is already on this mesh, and it reads
+     +71038395s. */
   static const uint32_t CLOCK_SET_EPOCH = 1735689600UL;  // 2025-01-01
   static const uint16_t HOP_DELAY_DEFAULT_MS = 1500;
-  /* Below this many measured pairs the mean is too noisy to beat the computed
-     default, since each pair carries the full spread of one random relay wait. */
+  /* Below this number of measured pairs, the mean has too much noise to beat
+     the computed default. Each pair carries the full spread of one random
+     relay wait. */
   static const uint32_t HOP_DELAY_MIN_PAIRS = 8;
 
-  /* Clock consensus -- see clockConsensus(). Thresholds come from a 407-node
-     survey of a real regional mesh:
-       - median offset -12s, MAD 7s, but the mean was -46s and the range
-         -3533..+1239, so any mean-based estimate is unusable;
-       - 21% of nodes were outliers by 3*MAD, and discarding them left the
-         estimate unchanged;
-       - the extremes were not lone bad clocks but whole GROUPS sharing an
-         offset (-227s x6, -211s x5, +335s x4), i.e. sub-networks that agreed
-         with each other and were wrong together;
-       - 10 nodes reported physically impossible rates (up to 58485 s/day). */
+  /* The clock consensus. See clockConsensus(). The thresholds come from a
+     survey of 407 nodes on a true regional mesh:
+       - the median offset was -12s and the MAD was 7s. But the mean was -46s
+         and the range was -3533..+1239. Therefore you cannot use any estimate
+         that is based on the mean.
+       - 21% of the nodes were outliers by 3*MAD. The estimate did not change
+         when the code discarded them.
+       - the extreme values did not come from single bad clocks. They came from
+         whole GROUPS that shared one offset (-227s x6, -211s x5, +335s x4).
+         These are sub-networks that agreed with each other and were wrong
+         together.
+       - 10 nodes reported rates that are physically impossible. The largest
+         was 58485 s/day. */
   static const int32_t  MAX_SANE_DRIFT_S_PER_DAY = 50;
   static const uint32_t CLOCK_VOTE_MAX_AGE_MS = 60UL * 60UL * 1000UL;   // 1 hour
   static const uint8_t  CLOCK_MIN_SOURCES = 3;
 
-  /* Clock samples live in their own ring rather than in the peer table. A peer
-     slot is only granted to a node within two hops (see noteAdvert), which is
-     the right rule for a NEIGHBOUR table and the wrong one here: a repeater
-     indoors may hear one zero-hop advert in fifty frames, and refusing the
-     other forty-nine leaves the estimator starved. The ring is also a better
-     shape for the job -- what matters is a recent spread of readings, not
-     per-node history. */
+  /* The clock samples use their own ring, not the peer table. The code gives a
+     peer slot only to a node within two hops (see noteAdvert). That is the
+     correct rule for a NEIGHBOUR table, and the wrong rule here. A repeater
+     indoors can hear one zero-hop advert in fifty frames. If the code refuses
+     the other forty-nine, the estimator has too little data. The ring also has
+     a better shape for this work. What matters is a recent spread of readings,
+     not the history of each node. */
   static const uint8_t  CLOCK_SAMPLES = 24;
-  /* Beyond this the accumulated propagation correction, and the uncertainty in
-     the constant used to make it, dominate whatever the reading is worth. */
+  /* Above this hop count, two error terms are larger than the value of the
+     reading. They are the accumulated propagation correction, and the
+     uncertainty in the constant that the code uses to make that correction. */
   static const uint8_t  MAX_CLOCK_HOPS = 8;
 
-  /* Stores what the OTHER node said, never the difference from our own clock.
-     A difference is only meaningful against the clock it was measured with, so
-     the moment ours is stepped -- by a person, or by convergence itself -- every
-     stored difference silently becomes a lie. Keeping the absolute timestamp
-     and subtracting at the point of use makes the estimate immune to that: it
-     is recomputed against whatever our clock reads now. millis() is unaffected
-     by clock sets, so the elapsed-time correction stays valid across them too. */
+  /* This structure stores what the OTHER node said. It never stores the
+     difference from our own clock. A difference has a meaning only against the
+     clock that measured it. Therefore, at the moment a person steps our clock,
+     or convergence steps it, every stored difference becomes wrong, and
+     nothing reports this. The code instead keeps the absolute timestamp and
+     subtracts at the point of use. The estimate is then immune to a step,
+     because the code computes it again against the present reading of our
+     clock. A clock set does not change millis(). Therefore the elapsed-time
+     correction also stays valid across a clock set. */
   struct ClockSample {
     uint8_t  pub4[4];
-    uint32_t their_ts;       // their clock's reading when the advert was stamped
+    uint32_t their_ts;       // the reading of their clock when the advert was stamped
     uint32_t ms;             // millis() when we heard it
-    uint32_t prev_their_ts;  // the reading this one replaced, for a drift estimate
+    uint32_t prev_their_ts;  // the reading that this one replaced, for a drift estimate
     uint32_t prev_ms;
-    uint8_t  hops;           // 0 = straight off their radio
+    uint8_t  hops;           // 0 = directly off their radio
   };
-  /* Both clocks are read to the second, so a drift verdict taken over a short
-     span is mostly quantisation: to call 50 s/day apart from noise the readings
-     must be hours apart, not minutes. Below this span we abstain rather than
-     reject -- a racing clock will be an outlier soon enough anyway. */
+  /* Both clocks read to the second. Therefore a drift verdict over a short
+     span is mostly quantisation. To separate 50 s/day from the noise, the two
+     readings must be hours apart, not minutes. Below this span the code
+     abstains. It does not reject the sample, because a clock that runs fast
+     becomes an outlier soon enough. */
   static const uint32_t DRIFT_MIN_SPAN_MS = 2UL * 60UL * 60UL * 1000UL;
-  /* Floor under the outlier threshold, so a mesh that already agrees to within
-     a second does not reject almost everything for being 1s out. */
+  /* A minimum value for the outlier threshold. A mesh that already agrees to
+     within a second must not reject almost every sample for a 1s error. */
   static const int32_t  CLOCK_CLIP_FLOOR_S = 2;
 
   struct ClockConsensus {
     bool     valid;
-    int32_t  offset_s;    // seconds to ADD to our clock to join the consensus
-    uint8_t  n_seen;      // peers that offered a usable reading
-    uint8_t  n_used;      // survivors after outlier rejection
-    uint8_t  agree_pct;   // n_used * 100 / n_seen -- what fraction survived
-    uint8_t  n_zero_hop;  // how many survivors were heard directly (reporting only)
-    uint16_t hop_delay_ms;// the per-hop correction actually applied
-    /* Spread of the survivors. agree_pct alone is NOT a confidence measure: a
-       population split evenly between two beliefs 300s apart loses nobody to
-       clipping, so it reports 100% agreement on a median that not one node
-       actually holds. Anything about to act on offset_s must check this too. */
+    int32_t  offset_s;    // the seconds to ADD to our clock to join the consensus
+    uint8_t  n_seen;      // the peers that gave a usable reading
+    uint8_t  n_used;      // the readings that remain after outlier rejection
+    uint8_t  agree_pct;   // n_used * 100 / n_seen: the fraction that remains
+    uint8_t  n_zero_hop;  // how many of those the node heard directly (for reports only)
+    uint16_t hop_delay_ms;// the per-hop correction that the code applied
+    /* The spread of the readings that remain. WARNING: agree_pct on its own is
+       NOT a measure of confidence. Take a population that splits equally
+       between two values 300s apart. The clipping removes no node at all, so
+       the code reports 100% agreement on a median that no node holds. Any code
+       that acts on offset_s must also check spread_s. */
     int32_t  spread_s;
   };
 
   /**
-   * @brief  What the neighbourhood thinks our clock error is.
+   * @brief  The clock error that the neighbourhood attributes to us.
    *
-   * Median of per-peer offsets after discarding outliers by median-absolute-
-   * deviation. Readings are zero-hop by construction (a relayed advert measures
-   * propagation delay, not skew), and are additionally filtered by age, by
-   * whether the peer's apparent rate is physically possible, and by collapsing
-   * peers reporting an identical offset -- in the survey a single group of 41
-   * nodes shared one offset, and left uncollapsed it would have voted 41 times.
+   * The result is the median of the per-peer offsets, after the code discards
+   * the outliers by median absolute deviation. The design makes the readings
+   * zero-hop, because a relayed advert measures the propagation delay and not
+   * the skew. The code also filters the readings by age, and by whether the
+   * apparent rate of the peer is physically possible. It then collapses the
+   * peers that report an identical offset. In the survey, one group of 41
+   * nodes shared a single offset. Without the collapse, that group would have
+   * voted 41 times.
    *
-   * Reports only. Deciding whether to act on it is the caller's business.
+   * This function only reports. The caller decides whether to act on the
+   * result.
    */
   ClockConsensus clockConsensus(uint8_t min_sources = CLOCK_MIN_SOURCES) const;
 
   /**
-   * @brief  Measured one-way propagation delay per relay hop, in milliseconds.
+   * @brief  The measured one-way propagation delay per relay hop, in
+   *         milliseconds.
    *
-   * Not a clock comparison: because this class is fed raw frames BEFORE the
-   * mesh dedups them, it sees the originator's own transmission and then the
-   * relayed copies of that same advert. The gap between those arrivals, over
-   * the hop difference, is the delay itself, measured against our own millis().
+   * This is not a clock comparison. The caller gives this class raw frames
+   * BEFORE the mesh removes the duplicates. Therefore the class sees the
+   * transmission of the originator, and then the relayed copies of that same
+   * advert. The time between those arrivals, divided by the hop difference, is
+   * the delay itself. The code measures it against our own millis().
    *
-   * Falls back to HOP_DELAY_DEFAULT_MS until enough pairs have been seen.
-   * For the record, the arithmetic that default comes from: a repeater waits
-   * rng(0, 5*airtime*tx_delay_factor) before relaying and then spends airtime
-   * transmitting, so at the repeater default factor of 0.5 the mean is
-   * 2.25*airtime -- about 1.5s for a 130-byte advert at SF7/BW62.5.
+   * The function returns HOP_DELAY_DEFAULT_MS until it has seen enough pairs.
+   * This is the arithmetic behind that default. A repeater waits
+   * rng(0, 5*airtime*tx_delay_factor) before it relays, and then it spends the
+   * airtime on the transmission. At the repeater default factor of 0.5, the
+   * mean is 2.25*airtime. That is approximately 1.5s for a 130-byte advert at
+   * SF7/BW62.5.
    */
   uint16_t hopDelayMs() const;
   uint32_t hopDelayPairs() const { return _hop_delay_pairs; }
   int numClockSamples() const { return _num_clock_samples; }
 
-  // Register one of OUR public keys, so "did somebody relay us?" can be
-  // answered and we never record ourselves as our own peer. Call once per
-  // identity; a single-identity node calls it once.
+  // Register one of OUR public keys. The observer can then answer the question
+  // "did a node relay us?", and it never records us as our own peer. Call this
+  // one time for each identity. A single-identity node calls it one time.
   void addSelfKey(const uint8_t* pub_key);
 
-  // Our own time source, so peers' advert timestamps can be differenced
-  // against something. Optional: leave it unset and clock skew is simply never
-  // recorded — nothing else in the observer depends on it.
+  // Our own time source. The code can then subtract the advert timestamps of
+  // the peers from it. This is optional. If you leave it unset, the code
+  // records no clock skew. Nothing else in the observer needs it.
   void setClock(mesh::RTCClock* clk) { _clock = clk; }
 
-  // Feed every received frame, with the SNR it arrived at (in quarter-dB, as
-  // the packet log stores it).
+  // Give the observer every received frame, together with the SNR that the
+  // frame arrived at. The SNR is in quarter-dB, as the packet log stores it.
   void observeRx(const uint8_t* frame, int len, int8_t snr4);
 
-  // Feed an advert that arrived over a BRIDGE rather than the radio.
+  // Give the observer an advert that arrived over a BRIDGE, not over the radio.
   //
-  // Clock samples only. Deliberately does NOT touch the peer table, the hop or
-  // type histograms, the frame counter or any RSSI/SNR statistic: every one of
-  // those answers "what can this node hear", and a bridged packet was heard by
-  // a node on a different band. Counting it would put nodes in our neighbour
-  // table that our radio has never received a single symbol from.
+  // This function takes clock samples only. It does NOT change the peer table,
+  // the hop histogram, the type histogram, the frame counter or any RSSI or
+  // SNR statistic. Each of those answers the question "what can this node
+  // hear", and a node on a different band heard the bridged packet. If the
+  // code counted it, our neighbour table would hold nodes from which our radio
+  // has never received one symbol.
   //
-  // The timestamp inside it is unaffected by any of that. A bridge peer is
-  // authenticated (HMAC over the whole frame), so an advert relayed by one is
-  // if anything better evidence than a promiscuously overheard one -- and on a
-  // node alone on its band it is the ONLY evidence available. Without this a
-  // bridge node can never set its clock at all.
+  // None of that changes the timestamp inside the advert. A bridge peer is
+  // authenticated with an HMAC over the whole frame. Therefore an advert that
+  // a bridge peer relays is at least as good as evidence as an advert that we
+  // overhear. On a node that is alone on its band, it is the ONLY evidence
+  // available. Without this function, a bridge node can never set its clock.
   void observeBridgedAdvert(const uint8_t* frame, int len);
 
-  // Feed every frame WE transmit. Only floods can come back to us relayed, so
-  // only those are tracked. `stream` distinguishes identities on a shared radio;
-  // a single-identity node leaves it at 0.
+  // Give the observer every frame that WE transmit. Only floods can return to
+  // us as relayed copies, so the code tracks only those. `stream` separates
+  // the identities on a shared radio. A single-identity node leaves it at 0.
   void observeTx(const uint8_t* frame, int len, int stream = 0);
 
   // ---- relay confirmation ---------------------------------------------------
-  // Proof that a transmission of ours was actually received by somebody: our
-  // hash turns up in the path of a packet we later overhear, meaning a
-  // neighbour took it and passed it on. This is the only direct evidence a node
-  // gets that it is being heard at all — transmit counters only prove we keyed
-  // the radio.
+  // This is proof that another node received one of our transmissions. Our
+  // hash appears in the path of a packet that we overhear later. That means a
+  // neighbour took our transmission and passed it on. It is the only direct
+  // evidence a node gets that other nodes hear it. The transmit counters only
+  // prove that we keyed the radio.
   //
-  // Only 2-byte-or-wider hashes count. A 1-byte match collides once every 256
-  // packets, which on a busy band is constant, so those are tallied separately
-  // and never credited.
+  // Only hashes of 2 bytes or more count. A 1-byte match collides one time in
+  // every 256 packets, which on a busy band is continuous. The code counts
+  // those matches separately and never credits them.
   static const int MAX_STREAMS = 8;
   uint32_t floodsSent(int stream = 0) const {
     return (stream >= 0 && stream < MAX_STREAMS) ? _flood_sent[stream] : 0;
@@ -237,68 +261,75 @@ public:
   uint32_t floodsConfirmed(int stream = 0) const {
     return (stream >= 0 && stream < MAX_STREAMS) ? _flood_confirmed[stream] : 0;
   }
-  // how many confirmations arrived at each hash width (1..4 bytes)
+  // the number of confirmations that arrived at each hash width (1..4 bytes)
   uint32_t confirmsByWidth(int bytes) const {
     return (bytes >= 1 && bytes <= 4) ? _confirm_width[bytes - 1] : 0;
   }
 
-  // How recently we must have transmitted for a returning echo to be credited
-  // to it. Our hash sits in the path of EVERY packet we ever forwarded, so a
-  // wide window credits whichever transmit happens to be newest rather than the
-  // one that actually came back — with a busy repeater forwarding continuously,
-  // that is close to guesswork.
+  // How recent a transmission must be before the code credits a returning echo
+  // to it. Our hash is in the path of EVERY packet that we have forwarded.
+  // Therefore a large window credits the newest transmission, and not the
+  // transmission that truly returned. On a busy repeater that forwards
+  // continuously, such a credit is almost a guess.
   //
-  // The protocol sets the floor: a relay waits nextInt(0, 5*airtime*factor)
-  // before retransmitting (Mesh::getRetransmitDelay and the repeater's
-  // override), which at SF7/62.5kHz on a ~130-byte frame is up to about 2s for
-  // a single hop. 5s covers that with margin and is tight enough that the
-  // correlation means something.
+  // The protocol sets the minimum value. A relay waits
+  // nextInt(0, 5*airtime*factor) before it transmits again. See
+  // Mesh::getRetransmitDelay and the override in the repeater. At SF7/62.5kHz
+  // on a frame of approximately 130 bytes, that wait is up to about 2s for one
+  // hop. A window of 5s covers that wait with margin. It is also small enough
+  // that the correlation has a meaning.
   static const uint32_t CONFIRM_WINDOW_DEFAULT_MS = 5000;
   void setConfirmWindow(uint32_t ms) { _confirm_window_ms = ms; }
   uint32_t confirmWindow() const { return _confirm_window_ms; }
 
   // ---- table pressure -------------------------------------------------------
-  // The table is small and the mesh is not, so once every slot is taken it has
-  // to choose what to forget. Plain LRU is wrong here: it would discard a
-  // neighbour we have PROVEN can hear us in favour of a node we glimpsed once in
-  // somebody else's path. Value decides first; recency only breaks ties.
+  // The table is small and the mesh is not. Therefore, after every slot is
+  // full, the code must select what to discard. Plain LRU is wrong here. It
+  // would discard a neighbour that we have PROVEN can hear us, and keep a node
+  // that we saw one time in the path of another node. The value decides first.
+  // Recency only separates entries of equal value.
   //
-  //   3  heard_us > 0            it relayed something of OURS — two-way, proven
-  //   2  direct + strong SNR     we hear it well, straight off its radio
+  //   3  heard_us > 0            it relayed a packet of OURS: two-way, proven
+  //   2  direct + strong SNR     we hear it well, directly off its radio
   //   1  direct, marginal SNR    we hear it, but the link is weak
-  //   0  relay sightings only    never heard directly; may not even be nearby
+  //   0  relay sightings only    we never heard it directly. It can be distant.
   //
-  // New entries start at tier 0, which makes the bottom of the table probation:
-  // an arrival has to earn a direct sighting before it becomes hard to displace.
+  // A new entry starts at tier 0. The bottom of the table is therefore a
+  // probation area. An arrival must earn a direct sighting before it becomes
+  // difficult to displace.
   //
-  // Anything at tier 1 or above is evicted ONLY once it has gone quiet for
-  // STALE_MS. Without that, a table full of good neighbours would be steadily
-  // cannibalised by unproven relay sightings, which is the opposite of useful.
-  // When nothing is eligible the new sighting is refused and counted, so a
-  // wedged table is visible as refusals rather than looking like a quiet mesh.
+  // The code evicts an entry at tier 1 or above ONLY after that entry has been
+  // silent for STALE_MS. Without that rule, unproven relay sightings would
+  // slowly remove a table of good neighbours, which is the opposite of what we
+  // want. When no entry qualifies, the code refuses the new sighting and
+  // counts the refusal. A full table is then visible as refusals. It does not
+  // look like a quiet mesh.
   static const int8_t   STRONG_SNR_4 = 0;             // mean SNR*4 >= 0 dB
-  static const uint32_t STALE_MS = 3600000UL;         // an hour with no sighting
+  static const uint32_t STALE_MS = 3600000UL;         // one hour with no sighting
   int peerTier(const PeerEntry& e) const;
   uint32_t evictions() const { return _evictions; }
   uint32_t refusedInserts() const { return _refused; }
-  // entries currently held at each hash width; 1-byte ones are collision-prone
-  // and should not be presented as confidently as the rest
+  // The entries that the table holds at each hash width. The 1-byte entries
+  // collide easily. Do not present them with the same confidence as the rest.
   int widthCount(int bytes) const;
 
   // ---- what was learned ----
   int numPeers() const { return _num_peers; }
   const PeerEntry* peer(int i) const { return (i >= 0 && i < _num_peers) ? &_peers[i] : nullptr; }
-  // peers that have demonstrably received one of our transmissions (2-byte+)
+  // the peers that gave proof that they received one of our transmissions
+  // (at 2 bytes or more)
   int confirmedPeerCount() const;
 
-  // How far away the traffic we hear originates. Bucket 0 = arrived with an
-  // empty path, i.e. straight off the sender's radio. Distinguishes "we are on
-  // the edge of a deep mesh" from "we have close neighbours".
+  // The distance to the origin of the traffic that we hear. Bucket 0 means the
+  // frame arrived with an empty path, that is, directly off the radio of the
+  // sender. This separates "we are on the edge of a deep mesh" from "we have
+  // close neighbours".
   static const int HOP_BUCKETS = 16;
   uint32_t hopCount(int hops) const {
     return (hops >= 0 && hops < HOP_BUCKETS) ? _hops[hops] : 0;
   }
-  // What KIND of traffic passes: index is the MeshCore payload type (0..15).
+  // Which KIND of traffic passes. The index is the MeshCore payload type
+  // (0..15).
   uint32_t typeCount(int type) const {
     return (type >= 0 && type < 16) ? _types[type] : 0;
   }
@@ -307,24 +338,28 @@ public:
   void reset();
 
 private:
-  // Exactly one entry matching `hash` to min(width, entry width) bytes, or
-  // -1 for none and -2 when the prefix is too short to disambiguate.
+  // Returns the one entry that matches `hash` over min(width, entry width)
+  // bytes. Returns -1 when no entry matches. Returns -2 when the prefix is too
+  // short to select one entry.
   int  findPeer(const uint8_t* hash, uint8_t width) const;
-  // Slot for a newly-seen node: a free one, else an evictable entry, else -1
-  // (refused). Ages are computed against `now` so the millis() wrap is harmless.
+  // Returns a slot for a node that the code has just seen. It returns a free
+  // slot, or an entry that the code may evict, or -1 for a refusal. The code
+  // computes the ages against `now`, so a millis() wrap does no damage.
   int  claimSlot(uint32_t now);
   int  evictionVictim(uint32_t now) const;
   void notePeersInPath(const uint8_t* frame, int len, int8_t snr4);
   void noteAdvert(const uint8_t* frame, int len, int8_t snr4);
-  /* Shared advert parse: true if the frame is a well-formed advert from
-     somebody other than us, yielding the originator's key, its hop count and
-     the timestamp it claimed. The timestamp is NOT range-checked here --
-     callers decide, because the peer table still wants an advert whose clock
-     is nonsense while the clock estimator must reject it. Used by both the
-     radio path and the bridge path so the two cannot drift apart on framing. */
+  /* The shared advert parser. It returns true if the frame is a correctly
+     formed advert from a node other than us. It then supplies the key of the
+     originator, the hop count and the timestamp that the advert claimed. This
+     function does NOT check the range of the timestamp. The callers decide,
+     because the peer table still wants an advert whose clock is wrong, while
+     the clock estimator must reject that same advert. Both the radio path and
+     the bridge path use this function, so the two paths cannot become
+     different on framing. */
   bool parseAdvert(const uint8_t* frame, int len,
                    const uint8_t*& pub, uint8_t& hops, uint32_t& their_ts) const;
-  int  selfIndex(const uint8_t* hash, uint8_t width) const;   // -1 if not ours
+  int  selfIndex(const uint8_t* hash, uint8_t width) const;   // -1 if it is not ours
   bool isSelf(const uint8_t* hash, uint8_t width) const { return selfIndex(hash, width) >= 0; }
 
   PeerEntry _peers[MAX_PEERS];
@@ -333,9 +368,10 @@ private:
   uint8_t     _num_clock_samples = 0;
   void noteClockSample(const uint8_t* pub, uint8_t hops, uint32_t their_ts);
 
-  /* One advert in flight, so later copies of it can be timed against the first.
-     Keyed by originator and advert timestamp, which together identify an advert
-     independently of the path it arrived by. */
+  /* One advert in flight. The code can then time the later copies of that
+     advert against the first copy. The key is the originator plus the advert
+     timestamp. Together those two identify an advert, and they do not depend
+     on the path that the copy arrived by. */
   struct AdvertSighting {
     uint8_t  pub4[4];
     uint32_t advert_ts;
@@ -359,8 +395,8 @@ private:
 
   mesh::RTCClock* _clock = nullptr;
 
-  // Recent flood transmits awaiting confirmation. A relay may take a while to
-  // come back, so this is a time window rather than a single slot.
+  // The recent flood transmits that wait for a confirmation. A relayed copy can
+  // need some time to return. Therefore this is a time window, not one slot.
   static const int TX_RING = 16;
   uint32_t _confirm_window_ms = CONFIRM_WINDOW_DEFAULT_MS;
   struct TxRecord { uint32_t t_ms; int8_t stream; bool confirmed; };
@@ -369,7 +405,8 @@ private:
   uint32_t _flood_sent[MAX_STREAMS] = {0};
   uint32_t _flood_confirmed[MAX_STREAMS] = {0};
   uint32_t _confirm_width[4] = {0};
-  // credit the most recent unconfirmed flood from `stream`, if one is in window
+  // Credit the most recent unconfirmed flood from `stream`, if one is in the
+  // window.
   void creditRelay(int stream, uint8_t hash_width);
 
   uint32_t _hops[HOP_BUCKETS] = {0};
