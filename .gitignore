@@ -29,3 +29,11 @@ data/
 
 # meshllm bridge: holds the node's admin password and the room password.
 tools/meshllm/config.json
+
+# local operator config: holds this node's admin password and room join password
+tools/meshllm/config.json
+# runtime logs from the dev helpers
+tools/meshweb/*.log
+tools/meshweb/run.out
+# generated from web_multi_page.h by tools/gzip_panel.py on every build
+examples/multi_node/web_multi_page_gz.h
