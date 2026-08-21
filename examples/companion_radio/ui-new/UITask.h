@@ -22,8 +22,8 @@
 #include "../AbstractUITask.h"
 #include "../NodePrefs.h"
 
-// A scrollback of what arrived, kept separately from MsgPreviewScreen's unread queue --
-// that one is consumed as you read it, and this has to survive being read.
+// A scrollback of what arrived. Unlike the unread queue this replaced, it survives
+// being read -- the message page is a log, not an inbox.
 #define UI_MSG_LOG   14
 struct MsgLogEntry {
   uint32_t at;        // epoch secs, 0 for an empty slot
@@ -59,7 +59,6 @@ class UITask : public AbstractUITask {
 
   UIScreen* splash;
   UIScreen* home;
-  UIScreen* msg_preview;
   UIScreen* curr;
 
   MsgLogEntry _log[UI_MSG_LOG];
