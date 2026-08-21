@@ -1,0 +1,40 @@
+# The topic manifest: the source of truth for this fork.
+#
+# Every change we carry lives on exactly one topic branch. The branch you
+# flash -- `integration` -- is a BUILD OUTPUT, regenerated from this file by
+# rebuild.sh. Never commit to integration directly; the next rebuild discards
+# it, and a hunk that exists only there belongs to no PR and will be lost.
+# That is not hypothetical: it is how the bridged-advert clock source came to
+# sit in no branch at all for several days.
+#
+# Columns:  <topic branch>  <base>  [flags]
+#
+#   base    what the topic is rebased on. `origin/main` for an independent
+#           topic; another topic when it genuinely builds on one.
+#   flags   comma-separated:
+#             never-upstream  local-only; never send this as a PR
+#             meta            the topic tooling itself, excluded from the
+#                             no-code-lost comparison in verify.sh
+#
+# Order matters: topics are merged top to bottom.
+
+# --- ready to send upstream: independent, each builds on its own -----------
+t/fix-packet-pool        origin/main      env=RAK_4631_repeater
+t/fix-acl-flash-writes   origin/main      env=RAK_4631_repeater
+# Pure tooling: one new Python file, nothing to compile.
+t/tool-meshflash         origin/main
+
+# --- the fork's tooling ----------------------------------------------------
+t/meta-topics            origin/main      never-upstream,meta
+
+# --- the feature stack, not yet carved -------------------------------------
+# One topic for now, holding 64 commits across roughly ten separable areas
+# (BLE bridge core, advert-set ownership, presence beacon, link reliability,
+# MeshObserver, clock convergence, watchdog/boot, power estimation, bridge
+# routing, docs). Carve a topic off the front of this as you prepare each PR;
+# verify.sh proves the carve did not drop anything.
+#
+# Much of its history is intra-topic iteration -- fixes to earlier commits in
+# the same stack -- which should be squashed into what it fixes before any of
+# it is offered upstream. 64 commits is not 64 PRs.
+t/stack                  origin/main      never-upstream,env=RAK_3401_repeater_bridge_ble
