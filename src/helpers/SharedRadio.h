@@ -95,6 +95,12 @@ public:
 #define PKT_FLAG_RX_ERR  1
 #define PKT_FLAG_TX_FAIL 2
 #define PKT_FLAG_TX_BUSY 3   // send deferred: a sibling identity held the radio
+// RadioLib's RADIOLIB_ERR_CRC_MISMATCH, as it lands in aux for an RX_ERR entry.
+// It is the one receive failure whose LoRa header still decoded — the length
+// and coding rate are trustworthy and only the payload was mangled. Every other
+// failure means the header itself was lost, so nothing read out of it is ours
+// to report.
+#define PKT_RX_ERR_CRC   (-7)
 struct PktLogEntry {
   uint32_t seq;
   uint32_t t_ms;
@@ -105,6 +111,32 @@ struct PktLogEntry {
   int8_t   snr4;     // SNR * 4 (RX only)
   int16_t  rssi;     // RX only
   int16_t  aux;      // flag-specific: RX_ERR -> RadioLib error code
+  // MeshCore's own packet hash (Packet::calculatePacketHash), first 4 bytes.
+  // It is taken over the payload and NOT the path, which is the whole point:
+  // every copy of one flood carries the same hash however many hops it has
+  // travelled, so repeats of a packet being forwarded around the mesh can be
+  // told apart from genuinely new traffic at a glance.
+  //
+  // Computed here rather than in the browser because the raw capture is
+  // truncated at PKT_RAW_CAP, so a long packet's payload is not all present by
+  // the time the panel sees it — the hash would silently be wrong.
+  uint8_t  hash[4];
+  bool     hash_ok;  // false when the frame could not be parsed into a payload
+  // Time on air in ms, from the radio driver's own airtime sum rather than a
+  // reimplemented formula — it already accounts for preamble, CRC, explicit
+  // header and the low-data-rate optimisation. A transmission is priced at the
+  // settings we sent it with; a receive is priced at the CR out of ITS header
+  // (see cr below), so a neighbour on a different coding rate is costed at what
+  // it really spent on the channel rather than at what we would have spent.
+  // SF and BW have to match ours or the packet would not have decoded, and the
+  // preamble length is the one term LoRa does not transmit — ours is assumed.
+  uint16_t air_ms;
+  // Coding rate as the 4/x denominator (5..8); 0 when not known. For a received
+  // frame this is the CR the SENDER used, read out of the explicit LoRa header
+  // the radio just decoded — not our own setting — so a neighbour running a
+  // different CR shows up as such instead of being assumed away. For a
+  // transmission it is the CR the shared radio is configured with.
+  uint8_t  cr;
   uint8_t  raw_len;  // bytes captured in raw[] (<= len, capped at PKT_RAW_CAP)
   uint8_t  raw[PKT_RAW_CAP];
 };
@@ -190,6 +222,16 @@ public:
   // how the composition puts a wedged transceiver back together
   void setRadioReinit(void (*fn)()) { _reinit_fn = fn; }
 
+  // ---- raw frame hook -------------------------------------------------------
+  // Every frame the arbiter handles, exactly once, for anything that wants to
+  // watch traffic without being an identity. The arbiter works in raw frames —
+  // it sits below the Packet layer — so this hands over bytes and lets the
+  // caller decide whether to parse them. Kept as a plain function pointer so
+  // this file stays free of whatever the composition plugs in (the MQTT uplink,
+  // in the multi_node build).
+  typedef void (*FrameHook)(const uint8_t* frame, int len, bool is_tx, float snr, float rssi);
+  void setFrameHook(FrameHook fn) { _frame_hook = fn; }
+
   // ---- relay confirmation --------------------------------------------------
   // Did anyone actually hear us? When another node relays a flood we sent, it
   // appends its own hash and re-transmits — so a received packet carrying OUR
@@ -251,6 +293,18 @@ public:
     _rx_err_seen = fn ? fn() : 0;
   }
 
+  // Coding rate bookkeeping for the packet trace. The CR in force is owned by
+  // whoever configures the radio (the shared "set radio" path), so it is handed
+  // in rather than guessed; the RX accessor reads the CR out of the LoRa header
+  // of the frame just decoded, which is the sender's, not ours. Both are 4/x
+  // denominators (5..8), 0 meaning unknown.
+  void setCodingRate(uint8_t cr) { _cfg_cr = (cr >= 5 && cr <= 8) ? cr : 0; }
+  uint8_t codingRate() const { return _cfg_cr; }
+  void setRxCodingRateFn(uint8_t (*fn)()) { _rx_cr_fn = fn; }
+  // airtime for a received frame priced at the CR its header carried, rather
+  // than at ours (the driver's own sum can only speak for our settings)
+  void setRxAirtimeFn(uint32_t (*fn)(int len_bytes, uint8_t cr)) { _rx_air_fn = fn; }
+
   // TX loopback: identities on this board share one antenna and the radio is
   // half-duplex, so nothing any of them transmits is ever heard by the others
   // — the companion cannot see its own room, the repeater cannot relay for
@@ -299,6 +353,9 @@ private:
   const uint8_t* (*_rx_err_payload_fn)() = nullptr;
   uint8_t (*_rx_err_len_fn)() = nullptr;
   uint32_t _rx_err_seen = 0;
+  uint8_t (*_rx_cr_fn)() = nullptr;   // CR of the frame the radio just decoded
+  uint32_t (*_rx_air_fn)(int, uint8_t) = nullptr;   // airtime at that CR
+  uint8_t _cfg_cr = 0;                // CR the shared radio transmits with
 
   // loopback queue (frames sent by one port, pending delivery to the others)
   static const int LB_SLOTS = 4;
@@ -318,6 +375,7 @@ private:
   uint32_t _tx_started_ms = 0;
   uint32_t _last_rx_ms = 0;
   void (*_reinit_fn)() = nullptr;
+  FrameHook _frame_hook = nullptr;
 
   // relay confirmation bookkeeping
   uint8_t  _port_hash[MAX_PORTS][4];

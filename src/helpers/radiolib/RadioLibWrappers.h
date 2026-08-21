@@ -84,6 +84,23 @@ public:
 
   virtual bool setRxBoostedGainMode(bool) { return false; }
   virtual bool getRxBoostedGainMode() const { return false; }
+
+  // Coding rate of the last LoRa frame the modem decoded, as the 4/x
+  // denominator (5..8), or 0 where the chip cannot report it. In explicit
+  // header mode the CR travels with every packet, so this is the SENDER's
+  // choice — it need not match our own. Valid only until the next frame is
+  // received; read it while logging the packet, not later.
+  virtual uint8_t getLastRxCodingRate() const { return 0; }
+
+  // Airtime for a frame sent at a GIVEN coding rate rather than our own, for
+  // pricing a received packet by the CR its header actually carried. Every
+  // other term is known: SF and BW must match ours or we could not have
+  // decoded it, and the header tells us it was explicit. The one assumption
+  // left is the preamble length, which is not transmitted — we use ours, which
+  // is right for any MeshCore sender on this SF.
+  virtual uint32_t getEstAirtimeForCR(int len_bytes, uint8_t cr) {
+    (void)cr; return getEstAirtimeFor(len_bytes);
+  }
 };
 
 /**

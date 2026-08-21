@@ -1,5 +1,40 @@
 #include "SharedRadio.h"
 #include <Arduino.h>
+#include <SHA256.h>
+#include <Packet.h>
+
+// MeshCore's packet hash, recomputed from a raw over-the-air frame.
+//
+// Packet::calculatePacketHash() hashes the payload TYPE followed by the payload
+// bytes (plus path_len for TRACE, which legitimately revisits nodes). It
+// deliberately excludes the path, so the same packet keeps one identity as it is
+// forwarded. This mirrors that exactly — if the two ever diverge the panel would
+// group packets differently from the dedup tables, which would be worse than not
+// showing a hash at all.
+//
+// Returns false when the frame is too short to locate a payload.
+static bool frameHash(const uint8_t* f, int len, uint8_t out[4]) {
+  if (f == nullptr || len < 2) return false;
+  uint8_t route = f[0] & 0x03;
+  uint8_t type = (f[0] >> 2) & 0x0F;
+  int o = 1;
+  if (route == 0 || route == 3) o += 4;        // transport codes
+  if (o >= len) return false;
+  uint8_t path_byte = f[o++];
+  uint8_t hops = path_byte & 63;
+  uint8_t sz = (path_byte >> 6) + 1;
+  o += hops * sz;
+  if (o >= len) return false;                  // no payload bytes present
+
+  SHA256 sha;
+  sha.update(&type, 1);
+  if (type == PAYLOAD_TYPE_TRACE) sha.update(&path_byte, 1);
+  sha.update(&f[o], len - o);
+  uint8_t full[MAX_HASH_SIZE];
+  sha.finalize(full, MAX_HASH_SIZE);
+  memcpy(out, full, 4);
+  return true;
+}
 
 // ------------------------------------------------------------------ core
 
@@ -60,6 +95,7 @@ void SharedRadioCore::pump() {
     enqueueRx(tmp, len, _real->getLastSNR(), _real->getLastRSSI(), 0);
     pktLogAdd(-1, tmp, len, (int8_t)(_real->getLastSNR() * 4), (int16_t)_real->getLastRSSI());
     _obs.observeRx(tmp, len, (int8_t)(_real->getLastSNR() * 4));    // peers, hops, types
+    if (_frame_hook) _frame_hook(tmp, len, false, _real->getLastSNR(), _real->getLastRSSI());
   }
 
   // RADIO HEALTH WATCHDOG.
@@ -169,6 +205,8 @@ bool SharedRadioCore::tryStartSend(RadioPort* p, const uint8_t* bytes, int len) 
     _tx_started_ms = millis();
     _tx_completed = false;
     pktLogAdd((int8_t)portIndex(p), bytes, len, 0, 0);
+    // our own transmission — no SNR/RSSI exist for it
+    if (_frame_hook) _frame_hook(bytes, len, true, 0, 0);
     int pidx = portIndex(p);
     if (pidx >= 0 && pidx < MAX_PORTS) {
       _port_tx[pidx] = _port_tx[pidx] + 1;    // per-identity liveness
@@ -200,6 +238,38 @@ void SharedRadioCore::pktLogAdd(int8_t dir, const uint8_t* bytes, int len, int8_
   e.hdr = (len > 0 && bytes != nullptr) ? bytes[0] : 0;
   e.len = (uint8_t)(len > 255 ? 255 : len);
   e.snr4 = snr4; e.rssi = rssi; e.aux = aux;
+  // Coding rate: for a receive, whatever the sender put in the LoRa header of
+  // the frame still sitting in the modem (read now, before the next one lands);
+  // for a transmit, what we are configured to send at. The synthetic entries
+  // that carry no packet get 0, as they do for airtime.
+  //
+  // A receive that FAILED gets one only if its header survived — a CRC mismatch
+  // is a mangled payload behind a good header, but on a header error the modem
+  // still holds the previous packet's CR, and reporting that would be inventing
+  // a fact about this one.
+  bool hdr_trustworthy = (flag != PKT_FLAG_RX_ERR) || (aux == PKT_RX_ERR_CRC);
+  if (len <= 0) {
+    e.cr = 0;
+  } else if (dir < 0) {
+    uint8_t rx_cr = (hdr_trustworthy && _rx_cr_fn != nullptr) ? _rx_cr_fn() : 0;
+    e.cr = (rx_cr >= 5 && rx_cr <= 8) ? rx_cr : 0;
+  } else {
+    e.cr = _cfg_cr;
+  }
+  // Airtime for this length (0 for the synthetic entries that carry no packet,
+  // e.g. TX-BUSY / TX-FAIL). A receive whose CR we know is priced at THAT CR —
+  // 4/8 spends 60% longer on the channel than 4/5 for the same bytes, so
+  // costing a neighbour's packet at our own setting would be a real error in
+  // the one number the channel-occupancy view is built on.
+  { uint32_t a = 0;
+    if (len > 0) {
+      if (dir < 0 && e.cr != 0 && _rx_air_fn != nullptr) a = _rx_air_fn(len, e.cr);
+      else if (_real != nullptr) a = _real->getEstAirtimeFor(len);
+    }
+    e.air_ms = (uint16_t)(a > 65535 ? 65535 : a); }
+  // hash from the FULL frame, before the raw capture is truncated
+  e.hash_ok = frameHash(bytes, len, e.hash);
+  if (!e.hash_ok) memset(e.hash, 0, sizeof(e.hash));
   e.raw_len = (uint8_t)(len > PKT_RAW_CAP ? PKT_RAW_CAP : len);
   if (e.raw_len > 0 && bytes != nullptr) memcpy(e.raw, bytes, e.raw_len); else e.raw_len = 0;
   e.seq = _pkt_seq + 1;   // written last; readers treat seq==0 / stale seq as invalid
