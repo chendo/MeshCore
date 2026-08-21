@@ -184,8 +184,8 @@ HydraNode
       slot 1..N : chat | off      (room server reserved, not implemented)
 ```
 
-Slot 0 runs the **stock `simple_repeater` `MyMesh` unmodified**. It already takes a
-`mesh::Radio&`, so reuse is handing it a `RadioPort` instead of `radio_driver`; the build
+Slot 0 runs the **same `simple_repeater` `MyMesh` this tree ships**, not a fork of it. It
+already takes a `mesh::Radio&`, so reuse is handing it a `RadioPort` instead of `radio_driver`; the build
 compiles that directory's `MyMesh.cpp` and puts it on the include path. That also means
 upgrading an existing `simple_repeater` node is free: slot 0 keeps the `_main` identity
 key, so `prefs.json`, the ACL and the region map carry over. Flash hydra over a repeater
@@ -347,10 +347,10 @@ the code, not a policy statement.
 - **We rebase onto upstream periodically**, not just at PR time. The whole point of the
   constraints above is that the rebase should be nearly free.
 
-The full diff, so you can judge that for yourself: 31 files, +5,615 / -5 lines against
-`v1.17.1`, of which 1,926 lines are tests and mocks. Beyond the two bug fixes, the one
-place this fork edits upstream code is `examples/simple_repeater/` — 209 lines across
-`MyMesh.{h,cpp}` and `main.cpp` wiring up the watchdogs and the LED. Hydra itself needs
+The full diff, so you can judge that for yourself: 36 files, +6,729 / -96 lines against
+`v1.17.1`, of which 2,425 lines are tests and mocks. Beyond the two bug fixes, the one
+place this fork edits upstream code is `examples/simple_repeater/` — `MyMesh.{h,cpp}` and `main.cpp`, wiring up the watchdogs and the LED and moving the LoRa
+watchdog's state machine out into its own module. Hydra itself needs
 none of that; slot 0 reuses `MyMesh` as it stands.
 
 ## Credit
