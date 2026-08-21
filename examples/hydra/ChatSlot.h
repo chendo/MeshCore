@@ -70,8 +70,11 @@ protected:
 public:
   ChatMesh(mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng,
            mesh::RTCClock& rtc, mesh::PacketManager& mgr, mesh::MeshTables& tables)
+      // Flood by default: a slot nobody can discover is not useful, and an
+      // operator should not have to know to turn discovery on. Airtime is
+      // bounded by _advert_mins, which is the dial that matters.
       : BaseChatMesh(radio, ms, rng, rtc, mgr, tables), _next_advert(0),
-        _advert_mins(HYDRA_CHAT_ADVERT_MINS), _flood(false), _adv_type(ADV_TYPE_CHAT) {
+        _advert_mins(HYDRA_CHAT_ADVERT_MINS), _flood(true), _adv_type(ADV_TYPE_CHAT) {
     _name[0] = 0;
   }
 

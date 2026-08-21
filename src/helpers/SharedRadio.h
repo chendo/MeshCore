@@ -416,10 +416,8 @@ public:
   // denominators (5..8), 0 meaning unknown.
   void setCodingRate(uint8_t cr) { _cfg_cr = (cr >= 5 && cr <= 8) ? cr : 0; }
   uint8_t codingRate() const { return _cfg_cr; }
-  void setRxCodingRateFn(uint8_t (*fn)()) { _rx_cr_fn = fn; }
   // airtime for a received frame priced at the CR its header carried, rather
   // than at ours (the driver's own sum can only speak for our settings)
-  void setRxAirtimeFn(uint32_t (*fn)(int len_bytes, uint8_t cr)) { _rx_air_fn = fn; }
 
   // TX loopback: identities on this board share one antenna and the radio is
   // half-duplex, so nothing any of them transmits is ever heard by the others
@@ -497,8 +495,6 @@ private:
   const uint8_t* (*_rx_err_payload_fn)() = nullptr;
   uint8_t (*_rx_err_len_fn)() = nullptr;
   uint32_t _rx_err_seen = 0;
-  uint8_t (*_rx_cr_fn)() = nullptr;   // CR of the frame the radio just decoded
-  uint32_t (*_rx_air_fn)(int, uint8_t) = nullptr;   // airtime at that CR
   uint8_t _cfg_cr = 0;                // CR the shared radio transmits with
 
   // loopback queue (frames sent by one port, pending delivery to the others)
