@@ -126,11 +126,12 @@ class HomeScreen : public UIScreen {
     if (batteryPercentage < 0) batteryPercentage = 0; // Clamp to 0%
     if (batteryPercentage > 100) batteryPercentage = 100; // Clamp to 100%
 
-    // battery icon
-    int iconWidth = 24;
-    int iconHeight = 10;
-    int iconX = display.width() - iconWidth - 5; // Position the icon near the top-right corner
-    int iconY = 0;
+    // battery icon -- deliberately small; this strip is overhead, every row it gives
+    // back is a neighbour or a message
+    int iconWidth = 14;
+    int iconHeight = 6;
+    int iconX = display.width() - iconWidth - 4; // Position the icon near the top-right corner
+    int iconY = 1;
     display.setColor(UIColor::title_txt);
 
     // battery outline
@@ -191,18 +192,11 @@ public:
   }
 
   int render(DisplayDriver& display) override {
-    display.setColor(UIColor::title_bkg);
-    display.fillRect(0, 0, display.width(), 12);
     char tmp[80];
-    // node name
-    display.setTextSize(1);
-    display.setColor(UIColor::title_txt);
-    char filtered_name[sizeof(_node_prefs->node_name)];
-    display.translateUTF8ToBlocks(filtered_name, _node_prefs->node_name, sizeof(filtered_name));
-    display.setCursor(0, 2);
-    display.print(filtered_name);
 
-    // battery voltage
+    // Compact status strip, ~8px instead of 18. The node name is deliberately gone:
+    // it earns its space on the mesh, where other people read it, not on a 128px
+    // panel where every row it costs is a neighbour or a message.
     renderBatteryIndicator(display, _task->getBattMilliVolts());
 
     // curr page indicator
@@ -211,9 +205,9 @@ public:
     } else {
       display.setColor(UIColor::title_bkg);
     }
-    int y = 14;
-    int x = display.width() / 2 - 5 * (HomePage::Count-1);
-    for (uint8_t i = 0; i < HomePage::Count; i++, x += 10) {
+    int y = 3;
+    int x = display.width() / 2 - 3 * (HomePage::Count-1);
+    for (uint8_t i = 0; i < HomePage::Count; i++, x += 6) {
       if (i == _page) {
         display.fillRect(x-1, y-1, 4, 4);
       } else {
@@ -227,105 +221,109 @@ public:
       the_mesh.getStatWindow(10, w5);
       the_mesh.getStatWindow(MESH_STAT_BUCKETS, w15);
 
-      // Tiny font for the whole page: this is a table, and the built-in 6x8 glyphs fit
-      // three times the columns. It also positions from the TOP-LEFT rather than the
-      // baseline, which is why the y values below start at the top of each row.
-      display.setTextSize(0);
+      display.setTextSize(1);
       display.setColor(UIColor::primary_txt);
 
       uint32_t seen15 = w15.rx + w15.crc_fail;
       int crc_pct = seen15 ? (int)((w15.crc_fail * 100) / seen15) : 0;
-      sprintf(tmp, "RX %u/%u/%u 1.5.15m  CRC %d%%",
-              (unsigned) w1.rx, (unsigned) w5.rx, (unsigned) w15.rx, crc_pct);
-      display.setCursor(0, 18);
+      sprintf(tmp, "%u/%u/%u", (unsigned) w1.rx, (unsigned) w5.rx, (unsigned) w15.rx);
+      display.setCursor(0, 13);
       display.print(tmp);
+      sprintf(tmp, "CRC %d%%", crc_pct);
+      display.drawTextRightAlign(display.width(), 13, tmp);
 
       if (w15.has_snr) {
-        sprintf(tmp, "SNR %+.1f / %+.1f / %+.1f  (15m)", w15.snr_min, w15.snr_avg, w15.snr_max);
+        sprintf(tmp, "%+.1f %+.1f %+.1f", w15.snr_min, w15.snr_avg, w15.snr_max);
       } else {
-        strcpy(tmp, "SNR --   nothing heard in 15m");
+        strcpy(tmp, "no signal 15m");
       }
-      display.setCursor(0, 24);
+      display.setCursor(0, 23);
       display.print(tmp);
 
       display.setColor(UIColor::title_bkg);
-      display.fillRect(0, 31, display.width(), 1);
-      display.setColor(UIColor::primary_txt);
-      display.setCursor(0, 34);
-      display.print("NAME          SNR  HEARD  PKTS");
+      display.fillRect(0, 27, display.width(), 1);
+      display.setColor(UIColor::secondary_txt);
+      display.setCursor(0, 35);
+      display.print("NAME");
+      display.drawTextRightAlign(88, 35, "SNR");
+      display.drawTextRightAlign(108, 35, "AGE");
+      display.drawTextRightAlign(display.width(), 35, "PKT");
 
       // Direct neighbours only -- an advert that arrived with no path. out_path_len is
       // the wrong test: it reads 255 for anything heard passively, so it would count
       // zero forever.
+      display.setColor(UIColor::primary_txt);
       int num_recent = 0;
       const AdvertPath* recent_list = the_mesh.getSortedRecentlyHeard(num_recent);
       uint32_t now = _rtc->getCurrentTime();
-      int y = 41;
+      int ny = 46;
       int shown = 0;
-      for (int i = 0; i < num_recent && y <= 112; i++) {
+      for (int i = 0; i < num_recent && ny <= 116; i++) {
         const AdvertPath* a = &recent_list[i];
         if (a->name[0] == 0 || a->path_len != 0) continue;
 
         char filtered[sizeof(a->name)];
         display.translateUTF8ToBlocks(filtered, a->name, sizeof(filtered));
-        display.drawTextEllipsized(0, y, 50, filtered);
+        display.drawTextEllipsized(0, ny, 56, filtered);
 
         sprintf(tmp, "%+.1f", a->snr / 4.0f);
-        display.drawTextRightAlign(78, y, tmp);
+        display.drawTextRightAlign(88, ny, tmp);
 
         uint32_t secs = now - a->recv_timestamp;
         if (secs < 60)        sprintf(tmp, "%us", (unsigned) secs);
         else if (secs < 3600) sprintf(tmp, "%um", (unsigned)(secs / 60));
         else                  sprintf(tmp, "%uh", (unsigned)(secs / 3600));
-        display.drawTextRightAlign(104, y, tmp);
+        display.drawTextRightAlign(108, ny, tmp);
 
         sprintf(tmp, "%u", (unsigned) a->pkts);
-        display.drawTextRightAlign(display.width(), y, tmp);
+        display.drawTextRightAlign(display.width(), ny, tmp);
 
-        y += 6;
+        ny += 10;
         shown++;
       }
       if (shown == 0) {
-        display.setCursor(0, 41);
-        display.print("no direct neighbours heard yet");
+        display.setCursor(0, 46);
+        display.print("no neighbours yet");
       }
 
-      display.setTextSize(1);   // leave the driver as the other pages expect it
-
     } else if (_page == HomePage::MSGS) {
-      display.setTextSize(0);
+      display.setTextSize(1);
       display.setColor(UIColor::primary_txt);
 
       uint8_t head, count;
       const MsgLogEntry* log = _task->getMsgLog(head, count);
 
-      const int bottom_y = 112, row_h = 6, top_y = 18;
-      int rows = (bottom_y - top_y) / row_h + 1;
+      // Two rows per message: who and when, then the text under it. One row would fit
+      // about six characters of message after the timestamp at this size.
+      const int msg_h = 20, last_row_y = 116;
+      int rows = (last_row_y - 13) / msg_h + 1;
       int n = count < rows ? count : rows;
 
       if (n == 0) {
-        display.setCursor(0, top_y);
+        display.setCursor(0, 13);
         display.print("no messages yet");
       }
 
-      // Anchored to the bottom, so the newest line is always in the same place rather
-      // than wandering up the screen as the log fills.
-      int y = bottom_y - (n - 1) * row_h;
-      for (int i = 0; i < n; i++, y += row_h) {
-        // walk oldest-to-newest of the last n
+      // Anchored to the bottom, so the newest message is always in the same place
+      // rather than wandering up the screen as the log fills.
+      int my = last_row_y - msg_h * (n - 1);
+      for (int i = 0; i < n; i++, my += msg_h) {
         const MsgLogEntry* m = &log[(head + UI_MSG_LOG - (n - 1) + i) % UI_MSG_LOG];
         if (m->at == 0) continue;
 
         uint32_t secs = m->at % 86400;   // UTC, same basis as the rest of the UI
         char from[sizeof(m->from)];
         display.translateUTF8ToBlocks(from, m->from, sizeof(from));
-        sprintf(tmp, "%02u:%02u:%02u %s: %s",
-                (unsigned)(secs / 3600), (unsigned)((secs / 60) % 60), (unsigned)(secs % 60),
-                from, m->text);
-        display.drawTextEllipsized(0, y, display.width(), tmp);
-      }
+        sprintf(tmp, "%02u:%02u:%02u", (unsigned)(secs / 3600),
+                (unsigned)((secs / 60) % 60), (unsigned)(secs % 60));
+        display.setColor(UIColor::secondary_txt);
+        display.setCursor(0, my - 10);
+        display.print(tmp);
+        display.drawTextEllipsized(52, my - 10, display.width() - 52, from);
 
-      display.setTextSize(1);
+        display.setColor(UIColor::primary_txt);
+        display.drawTextEllipsized(4, my, display.width() - 4, m->text);
+      }
 
     } else if (_page == HomePage::FIRST) {
       display.setColor(UIColor::primary_txt);
