@@ -280,6 +280,40 @@ void HydraNode::handleCommand(char* command, char* reply, size_t reply_sz) {
              (unsigned)(_core.txChargedMs() / 1000));
     return;
   }
+  if (strcmp(command, "trace") == 0) {          // the packet trace, newest last
+#if PKT_TRACE_ENTRIES
+    Serial.printf("trace: %d entries x %d raw bytes, air rx=%us tx=%us\n",
+                  SharedRadioCore::PKT_LOG_SIZE, SharedRadioCore::PKT_LOG_RAW_CAP,
+                  (unsigned)(_core.rxAirtimeMs() / 1000), (unsigned)(_core.txAirtimeMs() / 1000));
+    static const char* kFlag[] = { "ok", "rxerr", "txfail", "txbusy" };
+    PktLogEntry e[4];
+    uint32_t seq = _core.pktLogSeq();
+    uint32_t after = seq > (uint32_t)SharedRadioCore::PKT_LOG_SIZE
+                     ? seq - SharedRadioCore::PKT_LOG_SIZE : 0;
+    int total = 0;
+    for (int n; (n = _core.pktLogCopy(e, 4, after)) > 0; ) {
+      for (int i = 0; i < n; i++) {
+        const PktLogEntry& x = e[i];
+        Serial.printf("%8lu %s %-6s hdr=%02X len=%3u air=%ums cr=4/%u snr=%d rssi=%d "
+                      "hash=%02x%02x%02x%02x\n",
+                      (unsigned long)x.t_ms,
+                      x.dir < 0 ? "rx" : _core.portName(x.dir),
+                      x.flag < 4 ? kFlag[x.flag] : "?",
+                      x.hdr, (unsigned)x.len, (unsigned)x.air_ms, (unsigned)x.cr,
+                      x.snr4 / 4, x.rssi,
+                      x.hash[0], x.hash[1], x.hash[2], x.hash[3]);
+        after = x.seq;
+      }
+      total += n;
+    }
+    snprintf(reply, reply_sz, "OK - %d entries", total);
+#else
+    // Sized out, not broken: PKT_TRACE_ENTRIES is 0 in shipped builds because
+    // the ring is 10.9 KB of RAM at the full depth.
+    StrHelper::strncpy(reply, "trace disabled - build with -D PKT_TRACE_ENTRIES=N", reply_sz);
+#endif
+    return;
+  }
   if (strcmp(command, "stats-txwait") == 0) {   // why we could not transmit
     snprintf(reply, reply_sz,
              "budget=%u sibling=%u prio=%u rxpkt=%u rssi=%u cad=%u radio=%u forced=%u",

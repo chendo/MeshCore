@@ -1,5 +1,7 @@
 #include "SharedRadio.h"
 #include <Arduino.h>
+
+#if PKT_TRACE_ENTRIES
 #include <SHA256.h>
 #include <Packet.h>
 
@@ -35,6 +37,7 @@ static bool frameHash(const uint8_t* f, int len, uint8_t out[4]) {
   memcpy(out, full, 4);
   return true;
 }
+#endif  // PKT_TRACE_ENTRIES
 
 // ------------------------------------------------------------------ core
 
@@ -354,7 +357,13 @@ void SharedRadioCore::pktLogAdd(int8_t dir, const uint8_t* bytes, int len, int8_
   // costing a neighbour's packet at our own setting would be a real error in
   // the one number the channel-occupancy view is built on.
   uint32_t air = 0;
+  // With the trace compiled out only the airtime sum below still needs this, so
+  // the synthetic TX-FAIL/TX-BUSY rows stop paying for a CR register read.
+#if PKT_TRACE_ENTRIES
   if (len > 0) {
+#else
+  if (len > 0 && flag == PKT_FLAG_OK) {
+#endif
     bool hdr_trustworthy = (flag != PKT_FLAG_RX_ERR) || (aux == PKT_RX_ERR_CRC);
     if (dir < 0) {
       uint8_t rx_cr = (hdr_trustworthy && _rx_cr_fn != nullptr) ? _rx_cr_fn() : 0;
@@ -374,7 +383,8 @@ void SharedRadioCore::pktLogAdd(int8_t dir, const uint8_t* bytes, int len, int8_
     else         { _tx_total = _tx_total + 1; _tx_air_ms = _tx_air_ms + air; }
   }
 
-  PktLogEntry& e = _pkt_log[_pkt_seq % PKT_LOG_SIZE];
+#if PKT_TRACE_ENTRIES
+  PktLogEntry& e = _pkt_log[_pkt_seq % PKT_TRACE_ENTRIES];
   e.t_ms = millis();
   e.dir = dir;
   e.flag = flag;
@@ -386,25 +396,33 @@ void SharedRadioCore::pktLogAdd(int8_t dir, const uint8_t* bytes, int len, int8_
   // hash from the FULL frame, before the raw capture is truncated
   e.hash_ok = frameHash(bytes, len, e.hash);
   if (!e.hash_ok) memset(e.hash, 0, sizeof(e.hash));
-  e.raw_len = (uint8_t)(len > PKT_RAW_CAP ? PKT_RAW_CAP : len);
+  e.raw_len = (uint8_t)(len > PKT_TRACE_RAW_CAP ? PKT_TRACE_RAW_CAP : len);
   if (e.raw_len > 0 && bytes != nullptr) memcpy(e.raw, bytes, e.raw_len); else e.raw_len = 0;
   e.seq = _pkt_seq + 1;   // written last; readers treat seq==0 / stale seq as invalid
   _pkt_seq = _pkt_seq + 1;
+#else
+  (void)bytes; (void)snr4; (void)rssi; (void)cr;
+#endif
 }
 
 int SharedRadioCore::pktLogCopy(PktLogEntry* out, int max_entries, uint32_t after_seq) {
+#if PKT_TRACE_ENTRIES
   // single-writer ring; a torn read can only affect the entry being overwritten,
   // which the seq check filters out
   uint32_t newest = _pkt_seq;
-  uint32_t oldest = newest > PKT_LOG_SIZE ? newest - PKT_LOG_SIZE : 0;
+  uint32_t oldest = newest > PKT_TRACE_ENTRIES ? newest - PKT_TRACE_ENTRIES : 0;
   if (after_seq < oldest) after_seq = oldest;
   int n = 0;
   for (uint32_t s = after_seq + 1; s <= newest && n < max_entries; s++) {
-    PktLogEntry e = _pkt_log[(s - 1) % PKT_LOG_SIZE];
+    PktLogEntry e = _pkt_log[(s - 1) % PKT_TRACE_ENTRIES];
     if (e.seq != s) continue;   // overwritten mid-copy
     out[n++] = e;
   }
   return n;
+#else
+  (void)out; (void)max_entries; (void)after_seq;
+  return 0;   // compiled out: no history, rather than stale or invented rows
+#endif
 }
 
 bool SharedRadioCore::isSendCompleteFor(RadioPort* p) {
