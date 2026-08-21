@@ -23,5 +23,7 @@ public:
   virtual void loop() {}
   virtual float getLastRSSI() const { return -100; }
   virtual float getLastSNR() const { return 0; }
+  virtual uint8_t getLastRxCodingRate() const { return 0; }
+  virtual uint32_t getEstAirtimeForCR(int len, uint8_t cr) { return getEstAirtimeFor(len); }
 };
 }

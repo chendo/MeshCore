@@ -72,7 +72,7 @@ void SharedRadioCore::pump() {
   // setLoopback()); the sender is pre-marked so it never hears itself.
   while (_lb_count > 0 && _rx_count < RX_SLOTS) {
     LbFrame& f = _lb[_lb_head];
-    enqueueRx(f.buf, f.len, 12.0f, -20.0f, f.from >= 0 ? (1u << f.from) : 0);
+    enqueueRx(f.buf, f.len, 12.0f, -20.0f, _cfg_cr, f.from >= 0 ? (1u << f.from) : 0);
     _lb_head = (_lb_head + 1) % LB_SLOTS;
     _lb_count--;
   }
@@ -95,7 +95,10 @@ void SharedRadioCore::pump() {
 
   if (len > 0) {
     _last_rx_ms = millis();
-    enqueueRx(tmp, len, _real->getLastSNR(), _real->getLastRSSI(), 0);
+    // Read now: the register holds this frame's coding rate only until the next
+    // one is decoded, and the identities take frames off the queue much later.
+    enqueueRx(tmp, len, _real->getLastSNR(), _real->getLastRSSI(),
+              _rx_cr_fn ? _rx_cr_fn() : 0, 0);
     pktLogAdd(-1, tmp, len, (int8_t)(_real->getLastSNR() * 4), (int16_t)_real->getLastRSSI());
     _obs.observeRx(tmp, len, (int8_t)(_real->getLastSNR() * 4));    // peers, hops, types
     if (_frame_hook) _frame_hook(tmp, len, false, _real->getLastSNR(), _real->getLastRSSI());
@@ -120,7 +123,7 @@ void SharedRadioCore::pump() {
 // Queue a frame for the identities to consume. Returns false only if it had to
 // discard something to make room.
 bool SharedRadioCore::enqueueRx(const uint8_t* bytes, int len, float snr, float rssi,
-                                uint32_t consumed_init) {
+                                uint8_t cr, uint32_t consumed_init) {
   if (bytes == nullptr || len <= 0) return true;
   bool ok = true;
   if (_rx_count >= RX_SLOTS) {
@@ -135,6 +138,7 @@ bool SharedRadioCore::enqueueRx(const uint8_t* bytes, int len, float snr, float 
   f.len = (uint8_t)(len > MAX_TRANS_UNIT ? MAX_TRANS_UNIT : len);
   memcpy(f.buf, bytes, f.len);
   f.snr = snr; f.rssi = rssi;
+  f.cr = (cr >= 5 && cr <= 8) ? cr : 0;
   f.consumed = consumed_init | ~allPortsMask();   // inactive ports never consume
   _rx_count++;
   return ok;
@@ -164,7 +168,7 @@ int SharedRadioCore::takeFrame(RadioPort* p, uint8_t* dst, int sz) {
     int len = f.len;
     if (len > sz) len = sz;
     memcpy(dst, f.buf, len);
-    p->setLastMetadata(f.snr, f.rssi);
+    p->setLastMetadata(f.snr, f.rssi, f.cr);
     f.consumed |= bit;
     _port_rx[idx] = _port_rx[idx] + 1;
     _port_last_ms[idx] = millis();
@@ -536,6 +540,10 @@ bool RadioPort::isReceiving() {
 
 uint32_t RadioPort::getEstAirtimeFor(int len_bytes) {
   return _core ? _core->real()->getEstAirtimeFor(len_bytes) : 0;
+}
+
+uint32_t RadioPort::getEstAirtimeForCR(int len_bytes, uint8_t cr) {
+  return _core ? _core->real()->getEstAirtimeForCR(len_bytes, cr) : 0;
 }
 
 float RadioPort::packetScore(float snr, int packet_len) {
