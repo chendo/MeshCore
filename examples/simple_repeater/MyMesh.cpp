@@ -111,6 +111,10 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
     }
 
     client = acl.putClient(sender, 0);  // add to contacts (if not already known)
+    /* Captured BEFORE the fields below are overwritten, so we can tell an
+       actual change from a routine re-login. See the write gate at the end. */
+    const bool was_known = (client->last_timestamp != 0);
+    const uint8_t prev_perms = client->permissions;
     if (sender_timestamp <= client->last_timestamp) {
       MESH_DEBUG_PRINTLN("Possible login replay attack!");
       return 0;  // FATAL: client table is full -OR- replay attack
@@ -123,7 +127,23 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
     client->permissions |= perms;
     memcpy(client->shared_secret, secret, PUB_KEY_SIZE);
 
-    if (perms != PERM_ACL_GUEST) {   // keep number of FS writes to a minimum
+    /* Write only when something worth persisting actually changed: a client we
+       have never seen, or a permission grant that differs from what is stored.
+       A repeat login by a known admin changes only last_timestamp and
+       last_activity, and paying a flash write for those is a bad trade -- the
+       write blocks the main loop for about 1.6s while the SoftDevice arbitrates
+       for the flash, and every login supplying a password reaches here, because
+       `client` is only non-NULL on the blank-password ACL check above. That was
+       the real source of the ~2s worst-case loop gap on both repeaters: not
+       mesh traffic, but me logging in to look at them.
+
+       The cost is that last_timestamp is no longer pushed to flash on every
+       login, so its replay protection can rewind to the last persisted value
+       across a reboot. That guarantee was already soft -- the write is lazy, so
+       a reboot inside LAZY_CONTACTS_WRITE_DELAY lost it anyway, and these
+       boards come up with no clock at all. Permission grants, which are the
+       part that matters, are still persisted the moment they change. */
+    if (perms != PERM_ACL_GUEST && (!was_known || client->permissions != prev_perms)) {
       dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
     }
   }
