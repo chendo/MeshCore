@@ -82,6 +82,23 @@ struct AdvertPath {
   char    name[32];
   uint32_t recv_timestamp;
   uint8_t path[MAX_PATH_SIZE];
+  int8_t  snr;    // quarter-dB, as Packet stores it; 0 in slots heard before boot
+};
+
+// Traffic history for the UI, fed from logRx()/logTx(). Those are the only hooks that
+// see every packet the radio completed: logRx() runs ahead of the dedup and dispatch
+// decisions, which is what makes a rebroadcast of our OWN packet visible at all.
+// 10 x 30s = 5 minutes. Sized to what the panel can actually show: GxEPDDisplay maps
+// this 128px-tall logical canvas onto 200px with a 10px offset, so only ~121 logical
+// rows are visible and the newest tick would otherwise be drawn into the clipped edge.
+#define MESH_STAT_BUCKETS      10
+#define MESH_STAT_BUCKET_MS    30000
+#define MESH_SNR_BUCKETS       8        // -20dB..+12dB in 4dB steps
+#define MESH_TX_HASH_RING      8
+
+struct MeshStatBucket {
+  uint8_t rx;        // packets heard in this interval
+  uint8_t relayed;   // our own packets heard being rebroadcast in this interval
 };
 
 class MyMesh : public BaseChatMesh, public DataStoreHost {
@@ -102,6 +119,14 @@ public:
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
 
+  // Waterfall history. Walk oldest-first as (head_idx + 1 + i) % MESH_STAT_BUCKETS.
+  const MeshStatBucket* getStatBuckets(uint8_t& head_idx) const { head_idx = stat_head; return stat_buckets; }
+  const uint16_t* getSNRHistogram() const { return snr_hist; }
+  // 'by' is the pubkey prefix of whoever last relayed us, all-zero until someone has.
+  void getRelayStats(uint32_t& sent, uint32_t& relayed, const uint8_t*& by) const {
+    sent = n_flood_sent; relayed = n_flood_relayed; by = last_relay_by;
+  }
+
 protected:
   float getAirtimeBudgetFactor() const override;
   int getInterferenceThreshold() const override;
@@ -118,6 +143,8 @@ protected:
   void sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t delay_millis=0) override;
 
   void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override;
+  void logRx(mesh::Packet* packet, int len, float score) override;
+  void logTx(mesh::Packet* packet, int len) override;
   bool isAutoAddEnabled() const override;
   bool shouldAutoAddContactType(uint8_t type) const override;
   bool shouldOverwriteWhenFull() const override;
@@ -185,6 +212,10 @@ public:
   // To check if there is pending work
   bool hasPendingWork() const;
 
+  // loop() has exactly one place it can idle, so it reports every pass here — two
+  // increments, no millis(), so the hot path stays free. Reported by 'sleep'.
+  void countLoopPass(bool slept) { loop_passes++; if (slept) loop_slept_passes++; }
+
 private:
   void writeOKFrame();
   void writeErrFrame(uint8_t err_code);
@@ -212,10 +243,6 @@ private:
   NodePrefs _prefs;
   uint32_t pending_login;
   uint32_t pending_status;
-  // loop() has exactly one place it can idle, so it reports every pass here — two
-  // increments, no millis(), so the hot path stays free. Reported by 'sleep'.
-  void countLoopPass(bool slept) { loop_passes++; if (slept) loop_slept_passes++; }
-
   uint32_t pending_telemetry, pending_discovery;   // pending _TELEMETRY_REQ
   uint32_t pending_req;   // pending _BINARY_REQ
   BaseSerialInterface *_serial;
@@ -233,6 +260,8 @@ private:
   uint8_t *sign_data;
   uint32_t sign_data_len;
   unsigned long dirty_contacts_expiry;
+  uint32_t loop_passes, loop_slept_passes;
+  unsigned long loop_stats_since;
 
   TransportKey send_scope;
 
@@ -260,8 +289,21 @@ private:
 
   #define ADVERT_PATH_TABLE_SIZE   16
   AdvertPath advert_paths[ADVERT_PATH_TABLE_SIZE]; // circular table
-  uint32_t loop_passes, loop_slept_passes;
-  unsigned long loop_stats_since;
+
+  MeshStatBucket stat_buckets[MESH_STAT_BUCKETS];
+  uint8_t stat_head;
+  unsigned long next_stat_roll;
+  uint16_t snr_hist[MESH_SNR_BUCKETS];
+  // First 4 bytes of the hash of each recent flood we sent. calculatePacketHash()
+  // covers payload type and payload but never the path, so a relayed copy of one of
+  // ours hashes identically to what we transmitted -- that identity is the whole trick.
+  uint8_t tx_hashes[MESH_TX_HASH_RING][4];
+  uint8_t tx_hash_head;
+  uint32_t n_flood_sent, n_flood_relayed;
+  uint8_t last_relay_by[7];
+  int8_t last_rx_snr;    // of the packet logRx() just saw, for onDiscoveredContact()
+
+  void rollStatBuckets();
 };
 
 extern MyMesh the_mesh;

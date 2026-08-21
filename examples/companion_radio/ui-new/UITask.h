@@ -22,6 +22,14 @@
 #include "../AbstractUITask.h"
 #include "../NodePrefs.h"
 
+// When a message we could actually decrypt landed, so the traffic waterfall can mark
+// which ticks were ours. newMsg() is the only place the plaintext is ever offered to
+// the UI, so the mark has to be taken there or not at all.
+struct MsgMark {
+  unsigned long at_ms;
+  char from[14];
+};
+
 class UITask : public AbstractUITask {
   DisplayDriver* _display;
   SensorManager* _sensors;
@@ -53,6 +61,10 @@ class UITask : public AbstractUITask {
   UIScreen* msg_preview;
   UIScreen* curr;
 
+  #define UI_MSG_MARKS 8
+  MsgMark _marks[UI_MSG_MARKS];
+  uint8_t _mark_head;
+
   void userLedHandler();
 
   // Button action handlers
@@ -69,12 +81,16 @@ public:
     next_batt_chck = _next_refresh = 0;
     ui_started_at = 0;
     curr = NULL;
+    memset(_marks, 0, sizeof(_marks));
+    _mark_head = 0;
   }
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
 
   void gotoHomeScreen() { setCurrScreen(home); }
   void showAlert(const char* text, int duration_millis);
   int  getMsgCount() const { return _msgcount; }
+  // Newest-first walk: (head + UI_MSG_MARKS - i) % UI_MSG_MARKS
+  const MsgMark* getMsgMarks(uint8_t& head) const { head = _mark_head; return _marks; }
   bool hasDisplay() const { return _display != NULL; }
   bool isButtonPressed() const;
 

@@ -86,6 +86,8 @@ public:
 
 class HomeScreen : public UIScreen {
   enum HomePage {
+    WATERFALL,
+    LINK,
     FIRST,
     RECENT,
     RADIO,
@@ -109,6 +111,19 @@ class HomeScreen : public UIScreen {
   bool _shutdown_init;
   AdvertPath recent[UI_RECENT_LIST_SIZE];
 
+
+  // Great-circle km between two 1e6-scaled fixes, which is the scale both the GPS and
+  // ContactInfo use. Only called for a handful of neighbours once every 30s, so the
+  // trig is not worth approximating away.
+  static float distanceKm(long our_lat, long our_lon, int32_t their_lat, int32_t their_lon) {
+    const float to_rad = 0.0174532925f;
+    float lat1 = (our_lat / 1000000.0f) * to_rad;
+    float lat2 = (their_lat / 1000000.0f) * to_rad;
+    float dlat = lat2 - lat1;
+    float dlon = (((float) their_lon - (float) our_lon) / 1000000.0f) * to_rad;
+    float a = sinf(dlat / 2) * sinf(dlat / 2) + cosf(lat1) * cosf(lat2) * sinf(dlon / 2) * sinf(dlon / 2);
+    return 6371.0f * 2.0f * atan2f(sqrtf(a), sqrtf(1.0f - a));
+  }
 
   void renderBatteryIndicator(DisplayDriver& display, uint16_t batteryMilliVolts) {
     // Convert millivolts to percentage
@@ -219,7 +234,161 @@ public:
       }
     }
 
-    if (_page == HomePage::FIRST) {
+    if (_page == HomePage::WATERFALL) {
+      uint8_t head;
+      const MeshStatBucket* buckets = the_mesh.getStatBuckets(head);
+      uint8_t mark_head;
+      const MsgMark* marks = _task->getMsgMarks(mark_head);
+
+      uint8_t peak = 1;   // bars are scaled to the busiest tick on screen, not an absolute
+      for (int i = 0; i < MESH_STAT_BUCKETS; i++) {
+        if (buckets[i].rx > peak) peak = buckets[i].rx;
+      }
+
+      display.setTextSize(1);
+      const int bar_x = 20, bar_w = 56, mark_x = bar_x + bar_w + 2;
+      int row_y = 20;
+      for (int i = 0; i < MESH_STAT_BUCKETS; i++, row_y += 9) {
+        // oldest first, so the newest tick is the bottom row and history rises up the screen
+        int idx = (head + 1 + i) % MESH_STAT_BUCKETS;
+        uint32_t age_secs = (uint32_t)(MESH_STAT_BUCKETS - 1 - i) * (MESH_STAT_BUCKET_MS / 1000);
+
+        display.setColor(UIColor::primary_txt);
+        display.setCursor(0, row_y);
+        if (age_secs == 0) {
+          display.print("now");
+        } else if (age_secs < 60) {
+          sprintf(tmp, "-%us", (unsigned) age_secs);
+          display.print(tmp);
+        } else {
+          sprintf(tmp, "-%um", (unsigned)(age_secs / 60));
+          display.print(tmp);
+        }
+
+        int w = ((int) buckets[idx].rx * bar_w) / peak;
+        if (buckets[idx].rx > 0 && w == 0) w = 1;   // a single packet still has to show
+        display.fillRect(bar_x, row_y + 1, w, 5);
+
+        // A tick can carry two different kinds of news: '^' means one of OUR packets was
+        // heard being rebroadcast in that interval, '>' means a message arrived.
+        tmp[0] = 0;
+        if (buckets[idx].relayed > 0) strcpy(tmp, "^");
+        for (int m = 0; m < UI_MSG_MARKS; m++) {
+          const MsgMark* mk = &marks[m];
+          if (mk->at_ms == 0) continue;
+          uint32_t mark_age = (millis() - mk->at_ms) / 1000;
+          if (mark_age < age_secs || mark_age >= age_secs + (MESH_STAT_BUCKET_MS / 1000)) continue;
+          sprintf(&tmp[strlen(tmp)], ">%s", mk->from);
+          break;
+        }
+        if (tmp[0]) {
+          display.setColor(UIColor::warning_txt);
+          display.drawTextEllipsized(mark_x, row_y, display.width() - mark_x, tmp);
+        }
+      }
+
+    } else if (_page == HomePage::LINK) {
+      display.setTextSize(1);
+      display.setColor(UIColor::primary_txt);
+
+      const uint16_t* hist = the_mesh.getSNRHistogram();
+      uint16_t peak = 1;
+      for (int i = 0; i < MESH_SNR_BUCKETS; i++) {
+        if (hist[i] > peak) peak = hist[i];
+      }
+      display.setCursor(0, 20);
+      display.print("SNR");
+      int hx = 26;
+      for (int i = 0; i < MESH_SNR_BUCKETS; i++, hx += 12) {
+        int h = ((int) hist[i] * 16) / peak;
+        if (hist[i] > 0 && h == 0) h = 1;
+        display.fillRect(hx, 36 - h, 10, h);
+      }
+      display.setCursor(26, 38);
+      display.print("-20");
+      display.setCursor(display.width() - 18, 38);
+      display.print("+12");
+
+      the_mesh.getRecentlyHeard(recent, UI_RECENT_LIST_SIZE);
+      int direct = 0;
+      for (int i = 0; i < UI_RECENT_LIST_SIZE; i++) {
+        if (recent[i].name[0] != 0 && recent[i].path_len == 0) direct++;
+      }
+      sprintf(tmp, "DIRECT %d", direct);
+      display.setCursor(0, 50);
+      display.print(tmp);
+
+      // Where we are, for the distance column. A live GPS fix wins, but this board can
+      // have the receiver compiled out entirely (ENV_INCLUDE_GPS=0), so fall back to
+      // the position the operator set with 'set lat'/'set lon' -- otherwise the column
+      // is dashes forever on exactly the build most likely to sit in one place.
+      LocationProvider* loc = _sensors ? _sensors->getLocationProvider() : NULL;
+      long our_lat = 0, our_lon = 0;
+      bool have_fix = false;
+      if (loc && loc->isValid()) {
+        our_lat = loc->getLatitude();
+        our_lon = loc->getLongitude();
+        have_fix = true;
+      } else if (_node_prefs->node_lat != 0 || _node_prefs->node_lon != 0) {
+        our_lat = (long)(_node_prefs->node_lat * 1000000.0);
+        our_lon = (long)(_node_prefs->node_lon * 1000000.0);
+        have_fix = true;
+      }
+      int y = 60;
+      for (int i = 0; i < UI_RECENT_LIST_SIZE && y <= 88; i++) {
+        auto a = &recent[i];
+        if (a->name[0] == 0 || a->path_len != 0) continue;   // relayed, so not a neighbour
+
+        char filtered[sizeof(a->name)];
+        display.translateUTF8ToBlocks(filtered, a->name, sizeof(filtered));
+        display.drawTextEllipsized(0, y, 62, filtered);
+
+        sprintf(tmp, "%+.1f", a->snr / 4.0f);
+        display.setCursor(64, y);
+        display.print(tmp);
+
+        // Distance needs both ends to have a position, and plenty of nodes advertise
+        // none at all -- say so rather than drawing a confident zero.
+        float km = -1;
+        if (have_fix) {
+          ContactInfo* c = the_mesh.lookupContactByPubKey(a->pubkey_prefix, sizeof(a->pubkey_prefix));
+          if (c && !(c->gps_lat == 0 && c->gps_lon == 0)) {
+            km = distanceKm(our_lat, our_lon, c->gps_lat, c->gps_lon);
+          }
+        }
+        if (km < 0) {
+          strcpy(tmp, "--");
+        } else if (km < 10) {
+          sprintf(tmp, "%.1fkm", km);
+        } else {
+          sprintf(tmp, "%dkm", (int) km);
+        }
+        display.setCursor(display.width() - display.getTextWidth(tmp), y);
+        display.print(tmp);
+        y += 9;
+      }
+
+      uint32_t sent, relayed;
+      const uint8_t* by;
+      the_mesh.getRelayStats(sent, relayed, by);
+      display.setColor(UIColor::warning_txt);
+      sprintf(tmp, "RELAYED %u/%u sent", (unsigned) relayed, (unsigned) sent);
+      display.setCursor(0, 100);
+      display.print(tmp);
+
+      bool known_relay = false;
+      for (unsigned i = 0; i < 7; i++) {
+        if (by[i] != 0) { known_relay = true; break; }
+      }
+      if (known_relay) {
+        ContactInfo* c = the_mesh.lookupContactByPubKey(by, 7);
+        char filtered[32];
+        display.translateUTF8ToBlocks(filtered, c ? c->name : "unknown node", sizeof(filtered));
+        sprintf(tmp, "by %s", filtered);
+        display.drawTextEllipsized(0, 110, display.width(), tmp);
+      }
+
+    } else if (_page == HomePage::FIRST) {
       display.setColor(UIColor::primary_txt);
       display.setTextSize(2);
       sprintf(tmp, "MSG: %d", _task->getMsgCount());
@@ -433,6 +602,11 @@ public:
         display.drawTextCentered(display.width() / 2, 64 - 11, "hibernate:" PRESS_LABEL);
       }
     }
+    // These two are 30s samplers; redrawing them faster shows the same frame and, on
+    // e-ink, costs a refresh to do it. The driver's CRC check already skips an
+    // identical frame, but not the work of building one.
+    if (_page == HomePage::WATERFALL || _page == HomePage::LINK) return MESH_STAT_BUCKET_MS;
+
     return 5000;   // next render after 5000 ms
   }
 
@@ -658,6 +832,10 @@ void UITask::msgRead(int msgcount) {
 
 void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) {
   _msgcount = msgcount;
+
+  _mark_head = (_mark_head + 1) % UI_MSG_MARKS;
+  _marks[_mark_head].at_ms = millis();
+  StrHelper::strncpy(_marks[_mark_head].from, from_name, sizeof(_marks[_mark_head].from));
 
   ((MsgPreviewScreen *) msg_preview)->addPreview(path_len, from_name, text);
   setCurrScreen(msg_preview);

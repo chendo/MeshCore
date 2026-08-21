@@ -384,9 +384,70 @@ void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path
     strcpy(p->name, contact.name);
     p->recv_timestamp = getRTCClock()->getCurrentTime();
     p->path_len = mesh::Packet::copyPath(p->path, path, path_len);
+    p->snr = last_rx_snr;  // logRx() saw this very packet, on this same call chain
   }
 
   if (!is_new) dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY); // only schedule lazy write for contacts that are in contacts[]
+}
+
+void MyMesh::rollStatBuckets() {
+  if (next_stat_roll == 0) {   // first call; start the clock rather than back-fill from boot
+    next_stat_roll = futureMillis(MESH_STAT_BUCKET_MS);
+    return;
+  }
+  // Bounded: after a long gap every bucket is stale anyway, so clearing the ring once
+  // is the same answer as spinning through it and much cheaper.
+  for (int i = 0; i < MESH_STAT_BUCKETS && millisHasNowPassed(next_stat_roll); i++) {
+    stat_head = (stat_head + 1) % MESH_STAT_BUCKETS;
+    stat_buckets[stat_head].rx = stat_buckets[stat_head].relayed = 0;
+    next_stat_roll = futureMillis(MESH_STAT_BUCKET_MS);
+  }
+}
+
+void MyMesh::logTx(mesh::Packet* packet, int len) {
+  if (!packet->isRouteFlood()) return;  // only a flood can be picked up and rebroadcast
+
+  uint8_t hash[MAX_HASH_SIZE];
+  packet->calculatePacketHash(hash);
+  memcpy(tx_hashes[tx_hash_head], hash, 4);
+  tx_hash_head = (tx_hash_head + 1) % MESH_TX_HASH_RING;
+  n_flood_sent++;
+}
+
+void MyMesh::logRx(mesh::Packet* packet, int len, float score) {
+  last_rx_snr = packet->_snr;
+
+  rollStatBuckets();
+  MeshStatBucket* b = &stat_buckets[stat_head];
+  if (b->rx < 255) b->rx++;
+
+  int idx = ((int)packet->getSNR() + 20) / 4;   // -20dB..+12dB
+  if (idx < 0) idx = 0;
+  if (idx >= MESH_SNR_BUCKETS) idx = MESH_SNR_BUCKETS - 1;
+  if (snr_hist[idx] < 0xFFFF) snr_hist[idx]++;
+
+  // Did somebody just rebroadcast one of ours? The hash ignores the path, so the copy
+  // coming back matches the one we sent even though a hop has been appended to it.
+  uint8_t hash[MAX_HASH_SIZE];
+  packet->calculatePacketHash(hash);
+  for (int i = 0; i < MESH_TX_HASH_RING; i++) {
+    static const uint8_t empty[4] = {0, 0, 0, 0};
+    if (memcmp(tx_hashes[i], empty, 4) == 0) continue;   // free slot, never a match
+    if (memcmp(tx_hashes[i], hash, 4) != 0) continue;
+
+    n_flood_relayed++;
+    if (b->relayed < 255) b->relayed++;
+
+    uint8_t count = packet->getPathHashCount();
+    if (count > 0) {   // last hop appended is the node that relayed it to us
+      uint8_t sz = packet->getPathHashSize();
+      uint8_t n = sz < sizeof(last_relay_by) ? sz : sizeof(last_relay_by);
+      memset(last_relay_by, 0, sizeof(last_relay_by));
+      memcpy(last_relay_by, &packet->path[(count - 1) * sz], n);
+    }
+    memset(tx_hashes[i], 0, 4);  // count each of our packets once, however many relay it
+    break;
+  }
 }
 
 static int sort_by_recent(const void *a, const void *b) {
@@ -871,9 +932,19 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   next_ack_idx = 0;
   sign_data = NULL;
   dirty_contacts_expiry = 0;
+  loop_passes = loop_slept_passes = 0;
+  loop_stats_since = 0;
   memset(advert_paths, 0, sizeof(advert_paths));
   memset(send_scope.key, 0, sizeof(send_scope.key));
   send_unscoped = false;
+  memset(stat_buckets, 0, sizeof(stat_buckets));
+  memset(snr_hist, 0, sizeof(snr_hist));
+  memset(tx_hashes, 0, sizeof(tx_hashes));
+  memset(last_relay_by, 0, sizeof(last_relay_by));
+  stat_head = tx_hash_head = 0;
+  next_stat_roll = 0;
+  n_flood_sent = n_flood_relayed = 0;
+  last_rx_snr = 0;
 
   // defaults
   _prefs.airtime_factor = 1.0;
@@ -932,8 +1003,6 @@ void MyMesh::begin(bool has_display) {
   }
 #endif
 
-  loop_passes = loop_slept_passes = 0;
-  loop_stats_since = 0;
   // load persisted prefs
   _store->loadPrefs(_prefs);
   sensors.node_lat = _prefs.node_lat;
@@ -2191,6 +2260,18 @@ void MyMesh::checkCLIRescueCmd() {
 
       }
 
+    } else if (strcmp(cli_command, "sleep") == 0) {
+      // Window resets on each read, so two runs a minute apart measure that minute
+      // rather than everything since boot — the point is to compare quiet vs busy.
+      unsigned long now = _ms->getMillis();
+      uint32_t secs = (now - loop_stats_since) / 1000;
+      if (secs == 0) secs = 1;  // polled back-to-back; don't divide by zero
+      Serial.printf("  > %u loops/sec, %u%% slept (%u of %u over %us)\n",
+                    loop_passes / secs,
+                    loop_passes ? (uint32_t)((uint64_t)loop_slept_passes * 100 / loop_passes) : 0,
+                    loop_slept_passes, loop_passes, secs);
+      loop_passes = loop_slept_passes = 0;
+      loop_stats_since = now;
     } else if (strcmp(cli_command, "reboot") == 0) {
       board.reboot();  // doesn't return
     } else {
@@ -2231,6 +2312,8 @@ void MyMesh::checkSerialInterface() {
 void MyMesh::loop() {
   BaseChatMesh::loop();
 
+  rollStatBuckets();  // must advance with no traffic too, or a quiet mesh reads as a stalled one
+
   if (_cli_rescue) {
     checkCLIRescueCmd();
   } else {
@@ -2260,18 +2343,6 @@ bool MyMesh::advert() {
     return true;
   } else {
     return false;
-    } else if (strcmp(cli_command, "sleep") == 0) {
-      // Window resets on each read, so two runs a minute apart measure that minute
-      // rather than everything since boot — the point is to compare quiet vs busy.
-      unsigned long now = _ms->getMillis();
-      uint32_t secs = (now - loop_stats_since) / 1000;
-      if (secs == 0) secs = 1;  // polled back-to-back; don't divide by zero
-      Serial.printf("  > %u loops/sec, %u%% slept (%u of %u over %us)\n",
-                    loop_passes / secs,
-                    loop_passes ? (uint32_t)((uint64_t)loop_slept_passes * 100 / loop_passes) : 0,
-                    loop_slept_passes, loop_passes, secs);
-      loop_passes = loop_slept_passes = 0;
-      loop_stats_since = now;
   }
 }
 
