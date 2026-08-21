@@ -48,14 +48,15 @@ public:
   uint16_t transport_codes[2];
   uint8_t path[MAX_PATH_SIZE];
   uint8_t payload[MAX_PACKET_PAYLOAD];
-  // Link metrics of the frame this packet arrived in. Local receive metadata:
-  // never encoded by writeTo(), never read by readFrom(). Meaningless (and left
-  // at zero) for packets this node creates itself.
-  // Declared widest-first so the three fit in the 2 bytes of tail padding the
-  // struct already had, rather than costing 4.
-  int16_t _rssi;   // dBm. int8_t would clip the SF11/SF12 end of the range.
+  // These are the link metrics of the frame that carried this packet. They are
+  // local receive data. The function writeTo() does not encode them. The
+  // function readFrom() does not read them. They have no meaning for a packet
+  // that this node makes itself, and they stay at zero.
+  // The widest field comes first. The three fields then fit in the 2 bytes of
+  // tail padding that the struct already had. Another order costs 4 bytes.
+  int16_t _rssi;   // dBm. An int8_t clips the SF11/SF12 end of the range.
   int8_t _snr;     // SNR * 4
-  uint8_t _cr;     // coding rate as the 4/x denominator, 5..8. 0 = unknown.
+  uint8_t _cr;     // the coding rate as the 4/x denominator, 5..8. 0 = unknown.
 
   /**
    * \brief calculate the hash of payload + type
@@ -100,8 +101,8 @@ public:
   int getRSSI() const { return _rssi; }
 
   /**
-   * \returns  the 4/x coding rate denominator (5..8) from the sender's LoRa
-   *           header, or 0 if the radio could not report it.
+   * \returns  the 4/x coding rate denominator (5..8) from the LoRa header of
+   *           the sender. The value is 0 if the radio cannot report it.
    */
   uint8_t getCodingRate() const { return _cr; }
 

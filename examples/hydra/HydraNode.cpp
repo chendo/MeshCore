@@ -11,28 +11,29 @@
 
 HydraNode hydra;
 
-// The arbiter applies each port's TX power just before that port transmits, so
-// identities can run at different powers on one PA. RadioLibWrapper has
-// setTxPower() but does not implement the interface, so adapt it here rather
-// than reach into src/.
+// The arbiter applies the TX power of a port just before that port transmits.
+// Identities can thus run at different powers on one PA. RadioLibWrapper has
+// setTxPower(), but it does not implement the interface. So this class adapts
+// it here, and no change is necessary in src/.
 class RadioTxPower : public TxPowerControl {
 public:
   void applyTxPower(int8_t dbm) override { radio_driver.setTxPower(dbm); }
 };
 static RadioTxPower s_tx_power;
 
-// Putting a wedged transceiver back together. Restores every parameter
-// MyMesh::begin() applies, not just the ones radio_init() leaves at driver
-// defaults -- coming back on the driver's default frequency is silently
-// off-band, which is worse than the fault being repaired. Shared by the
-// arbiter's RX-silence recovery and by the node LoRa watchdog below.
+// This function repairs a stuck transceiver. It restores every parameter that
+// MyMesh::begin() applies. It does not restore only the parameters that
+// radio_init() leaves at the driver defaults. If the radio came back on the
+// default frequency of the driver, it would be off-band with no warning. That
+// is worse than the fault that the function repairs. The RX-silence recovery of
+// the arbiter and the node LoRa watchdog below both use this function.
 static void hydra_radio_reinit() {
   Serial.println("hydra: radio silent, re-initialising");
   if (!radio_init()) {
     Serial.println("hydra: radio re-init FAILED");
     return;
   }
-  radio_driver.begin();   // re-attaches the DIO1 ISR that radio_init() dropped
+  radio_driver.begin();   // this attaches the DIO1 ISR again, which radio_init() removed
   NodePrefs* p = hydra.repeater().prefs();
   radio_driver.setParams(p->freq, p->bw, p->sf, p->cr);
   radio_driver.setTxPower(p->tx_power_dbm);
@@ -42,50 +43,52 @@ static void hydra_radio_reinit() {
 }
 
 #ifdef LORA_WATCHDOG_MS
-/* One watchdog for the board, not one per identity. Detection survives sharing
-   -- RX fans out, so a dead radio goes silent for every slot -- but the
-   response does not: N slots would each probe and each decide to reboot. The
-   airtime comes from the arbiter, which is the only thing here that sees the
-   real radio's whole traffic; the probe is slot 0's identity, since a fault
-   needs one advert, not N. */
+/* There is one watchdog for the board, not one for each identity. Detection
+   still works when the slots share the radio. RX goes to every port, so a dead
+   radio is silent for every slot. But the response does not work when the slots
+   share the radio. N slots would each send a probe and each decide to reboot.
+   The airtime comes from the arbiter. The arbiter is the only part here that
+   sees all the traffic of the real radio. The probe uses the identity of
+   slot 0, because one fault needs one advert and not N adverts. */
 static uint32_t lora_wd_airtime(void*) { return hydra.radio().airtimeMs(); }
 static void lora_wd_probe(void*) {
   hydra.repeater().mesh().sendSelfAdvertisement(500, false);   // zero-hop, no flood
 }
 static void lora_wd_reinit(void*) { hydra_radio_reinit(); }
 static void lora_wd_reboot(void*) {
-  hydra.flushPendingWrites();   // every slot: room ACLs are lazy-written too
+  hydra.flushPendingWrites();   // every slot. The code also delays the room ACL writes.
   board.reboot();
 }
 #endif
 
 static uint32_t rx_err_count() { return radio_driver.getPacketsRecvErrors(); }
 
-// Which of the three conditions behind RadioLibWrapper::isReceiving() actually
-// deferred us. isReceivingPacket() is protected, so the RSSI test is recomputed
-// from public state (it is the driver's own test, verbatim) and the remaining
-// paths are separated by whether CAD is even enabled — when it is not, the
-// preamble/header IRQ is the only one left and the answer is exact.
+// This function reports which of the three conditions in
+// RadioLibWrapper::isReceiving() delayed us. isReceivingPacket() is protected.
+// So the code calculates the RSSI test again from public state. That test is
+// the test of the driver itself, word for word. The code then separates the
+// other paths by whether CAD is enabled. When CAD is off, the preamble and
+// header IRQ is the only path left, and the answer is exact.
 static int hydra_channel_busy_probe() {
   int thresh = hydra.radio().interferenceThreshold();
   if (thresh != 0 && radio_driver.getCurrentRSSI() > radio_driver.getNoiseFloor() + thresh) {
     return TXWAIT_RSSI;
   }
   if (!hydra.radio().cadEnabled()) return TXWAIT_RX_PACKET;
-  // Only reached with CAD on, so the extra scan this costs is one the node was
-  // already paying for on every send attempt.
+  // The code reaches this line only when CAD is on. So the extra scan costs
+  // nothing new. The node already paid for that scan at every send attempt.
   return radio_driver.isChannelActive() ? TXWAIT_CAD : TXWAIT_RX_PACKET;
 }
 
 HydraNode::HydraNode() : _core(radio_driver), _fs(NULL) {
   memset(_cfg, 0, sizeof(_cfg));
   _slots[0] = &_slot0;
-  _cfg[0].type = SLOT_REPEATER;   // decision D: slot 0 is the repeater, always
+  _cfg[0].type = SLOT_REPEATER;   // decision D: slot 0 is always the repeater
 #if HYDRA_NUM_CHAT_SLOTS > 0
   for (int i = 0; i < HYDRA_NUM_CHAT_SLOTS; i++) {
     _slots[i + 1] = &_chat[i];
-    // Decision H: a fresh node is slot 0 only. Everything else is opt in, and
-    // has no name until someone gives it one.
+    // Decision H. A new node has slot 0 only. Every other slot is optional. A
+    // slot has no name until an operator gives it one.
     _cfg[i + 1].type = SLOT_OFF;
     _cfg[i + 1].advert_mins = HYDRA_CHAT_ADVERT_MINS;
   }
@@ -102,12 +105,13 @@ const char* HydraNode::typeName(SlotType t) {
 }
 
 void HydraNode::slotIdName(int idx, char* dest, size_t sz) {
-  // Slot 0 keeps the stock "_main" name, so a board reflashed from
-  // simple_repeater to hydra comes back up as the same node to the mesh.
+  // Slot 0 keeps the standard "_main" name. A board that you reflash from
+  // simple_repeater to hydra thus comes back as the same node to the mesh.
   //
-  // Everything else is "_slotN", derived from the INDEX and nothing else. Not
-  // the type, not the display name: this is the path a keypair is filed under,
-  // and letting it move is how identities get lost (decision 7).
+  // Every other slot is "_slotN". That name comes from the INDEX and from
+  // nothing else. It does not come from the type. It does not come from the
+  // display name. This is the path that holds a keypair. If the path moves, the
+  // node loses the identity (decision 7).
   if (idx == 0) StrHelper::strncpy(dest, "_main", sz);
   else snprintf(dest, sz, "_slot%d", idx);
 }
@@ -116,8 +120,9 @@ void HydraNode::begin(FILESYSTEM* fs) {
   _fs = fs;
   loadSlotConfig();
 
-  // Every slot's port is registered before anything is pumped, active or not,
-  // so port index == slot index and the packet trace stays readable.
+  // The node registers the port of every slot before it pumps anything. It does
+  // this for an active slot and for an inactive slot. Thus port index == slot
+  // index, and the packet trace stays easy to read.
   for (int i = 0; i < HYDRA_NUM_SLOTS; i++) {
     int idx = _core.addPort(_slots[i]->port(), _cfg[i].type != SLOT_OFF);
     _core.setPortName(idx, i == 0 ? "repeater" : typeName(_cfg[i].type));
@@ -126,29 +131,31 @@ void HydraNode::begin(FILESYSTEM* fs) {
   _core.setRadioReinit(hydra_radio_reinit);
   _core.setRxErrorCounter(rx_err_count);
   _core.setChannelBusyProbe(hydra_channel_busy_probe);
-  // Routing is what the rest of the mesh depends on; chat traffic is not. Rank
-  // rather than special-case slot 0, so a room server can be given the same
-  // standing without the arbiter learning what a slot is.
+  // The rest of the mesh depends on the routes. It does not depend on the chat
+  // traffic. The code gives each port a rank. It does not make slot 0 a special
+  // case. You can thus give a room server the same rank, and the arbiter does
+  // not have to know what a slot is.
   _core.setPortPriority(0, 0);
   for (int i = 1; i < HYDRA_NUM_SLOTS; i++) _core.setPortPriority(i, 1);
-  // Identities on one antenna are deaf to each other (half duplex), so slot 0
-  // could never repeat for slot 1. Loopback makes each transmit look like a
-  // receive to the sibling ports, which is what a second physical node in the
-  // same room would experience.
+  // Identities on one antenna cannot hear each other, because the radio is half
+  // duplex. So slot 0 could never repeat for slot 1. Loopback makes each
+  // transmit look like a receive to the other ports. That is what a second
+  // physical node in the same room would hear.
   _core.setLoopback(true);
-  _core.observer().setClock(&rtc_clock);   // so peers' advert clocks mean something
+  _core.observer().setClock(&rtc_clock);   // the advert clocks of peers then have a meaning
 
-  // Seeded once, node-scoped: StdRNG is a facade over the global Arduino PRNG,
-  // so per-slot seeding would only re-seed the same generator — and each call
-  // pokes the shared transceiver for entropy.
+  // The code seeds the RNG once, for the whole node. StdRNG is a front end for
+  // the global Arduino PRNG. A seed for each slot would seed the same generator
+  // again. And each call asks the shared transceiver for entropy.
   StdRNG seeder;
   seeder.begin(radio_driver.getRngSeed());
 
-  startSlot(0);   // repeater: always on, whatever the config says
+  startSlot(0);   // the repeater is always on, whatever the config says
   NodePrefs* p = _slot0.prefs();
-  // Duty cycle belongs to the antenna, so the whole node draws on one pool.
-  // Slot 0's airtime_factor sets it; the chat slots' own Dispatcher budgets
-  // still exist but are no longer what limits the node.
+  // The duty cycle belongs to the antenna. So the whole node takes from one
+  // pool. The airtime_factor of slot 0 sets that pool. The chat slots still
+  // have their own Dispatcher budgets, but those budgets no longer limit the
+  // node.
   _core.setDutyCycle(p->airtime_factor);
 #ifdef LORA_WATCHDOG_MS
   _lora_wd.begin(LORA_WATCHDOG_MS, this, lora_wd_airtime, lora_wd_probe,
@@ -165,8 +172,9 @@ void HydraNode::begin(FILESYSTEM* fs) {
       _slots[i]->port().setPortTxPower(p->tx_power_dbm);
       _core.setPortIdentity(i, _slots[i]->identity().pub_key);
     } else {
-      // A slot refused at boot stays off for this boot but keeps its config, so
-      // the reason stays visible in `slots` and nothing is silently rewritten.
+      // A slot that the node refuses at boot stays off for this boot. It keeps
+      // its config. Thus `slots` still shows the reason, and the code rewrites
+      // nothing without a warning.
       _core.setPortActive(i, false);
       Serial.printf("hydra: slot %d not started - %s\n", i, slotEnableError(r));
     }
@@ -189,11 +197,12 @@ SlotEnableResult HydraNode::startSlot(int idx) {
   SlotEnableResult chk = slotEnableCheck(idx, HYDRA_NUM_SLOTS, _cfg[idx].type, _cfg[idx].name);
   if (chk != SLOT_ENABLE_OK) return chk;
 
-  /* Decision G's reserve floor. Pin it first, then let the slot allocate what
-     is left: a slot that starts has provably not eaten into the reserve, and
-     one that cannot is refused NOW rather than returning NULL from allocNew()
-     at 3am. Nothing here measures free heap — free-at-boot is not free-at-peak
-     and this node is meant to sit unattended. */
+  /* This is the reserve floor of decision G. Pin the floor first. Then let the
+     slot allocate what is left. A slot that starts has thus taken none of the
+     reserve. The node refuses a slot that cannot do this. It refuses that slot
+     NOW, and allocNew() does not return NULL at 3am. Nothing here measures the
+     free heap. The free heap at boot is not the free heap at peak load, and
+     this node must run with no operator present. */
   RamFloor floor(HYDRA_RAM_RESERVE);
   if (!floor.held()) return SLOT_ENABLE_NO_RAM;
 
@@ -201,7 +210,7 @@ SlotEnableResult HydraNode::startSlot(int idx) {
   slotIdName(idx, id_name, sizeof(id_name));
   IdentityStore store(*_fs, "");
   if (!_slots[idx]->begin(_fs, store, id_name, _cfg[idx].name, _cfg[idx].type)) {
-    return SLOT_ENABLE_NO_RAM;   // begin() only fails when the heap refused
+    return SLOT_ENABLE_NO_RAM;   // begin() fails only when the heap refused
   }
   floor.release();
   _core.setPortActive(idx, true);
@@ -215,18 +224,20 @@ SlotEnableResult HydraNode::startSlot(int idx) {
 }
 
 void HydraNode::stopSlot(int idx) {
-  if (idx <= 0 || idx >= HYDRA_NUM_SLOTS) return;   // slot 0 is not disableable
-  // The identity stays constructed; only its port is silenced, so it stops
-  // hearing and stops transmitting immediately and can be brought back without
-  // touching the heap. Its keypair, ACL and contacts are untouched on disk.
+  if (idx <= 0 || idx >= HYDRA_NUM_SLOTS) return;   // you cannot disable slot 0
+  // The identity object stays in memory. The code silences only its port. The
+  // slot then stops all receive and all transmit at once. The slot can come
+  // back with no call to the heap. Its keypair, its ACL and its contacts stay
+  // as they are on the disk.
   _slots[idx]->flushPendingWrites();
   _core.setPortActive(idx, false);
 }
 
 bool HydraNode::hasPendingWork() const {
-  // EVERY active slot, not just slot 0. The powersave gate sleeps the board;
-  // a slot whose queue is only consulted when slot 0 happens to be busy would
-  // stall silently for as long as slot 0 stays quiet.
+  // This checks EVERY active slot, not only slot 0. The powersave gate puts the
+  // board to sleep. The code must not read the queue of a slot only when slot 0
+  // is busy. That slot would then stop with no warning. It would stay stopped
+  // for as long as slot 0 stayed quiet.
   for (int i = 0; i < HYDRA_NUM_SLOTS; i++) {
     if (_core.portActive(i) && _slots[i]->hasPendingWork()) return true;
   }
@@ -239,29 +250,31 @@ void HydraNode::flushPendingWrites() {
 }
 
 void HydraNode::loop() {
-  // ORDER MATTERS (see SharedRadio.h): every identity consumes the current
-  // frame before the arbiter fetches the next one.
+  // THE ORDER IS IMPORTANT (see SharedRadio.h). Every identity takes the
+  // current frame before the arbiter gets the next one.
   for (int i = 0; i < HYDRA_NUM_SLOTS; i++) {
     if (_core.portActive(i)) _slots[i]->loop();
   }
   _core.pump();
 #ifdef LORA_WATCHDOG_MS
-  _lora_wd.loop();   // paces itself, see LoraWatchdog::CHECK_EVERY_MS
+  _lora_wd.loop();   // this paces itself. See LoraWatchdog::CHECK_EVERY_MS.
 #endif
 }
 
 // ---------------------------------------------------------------- slot config
 
-// Deliberately a fixed-size binary record and not JSON: it is read once at boot
-// before any identity exists, and prefs.json is already owned by slot 0's
-// CommonCLI.
+// This is a binary record of a fixed size, and not JSON. That is on purpose.
+// The code reads it once at boot, before any identity exists. And the CommonCLI
+// of slot 0 already owns prefs.json.
 //
-// SAFE MODE. Every failure path here lands on "plain repeater, other slots off"
-// (decision D): a missing file returns early, a bad magic keeps the defaults, a
-// short read breaks and keeps what came before it, and a type this build does
-// not implement maps to SLOT_OFF rather than being reinterpreted. A stored name
-// that would not pass the CLI's own check disables the slot too, so the "no
-// nameless identity" rule survives a reboot and a corrupt file.
+// SAFE MODE. Every failure path here gives "a plain repeater, with the other
+// slots off" (decision D). A file that is not there makes the function return
+// at once. A bad magic number keeps the defaults. A short read breaks the loop
+// and keeps what came before it. A type that this build does not implement
+// becomes SLOT_OFF, and the code does not give it a new meaning. A stored name
+// that fails the check of the CLI also disables the slot. The rule that no
+// identity has an empty name thus stays true after a reboot and after a corrupt
+// file.
 void HydraNode::loadSlotConfig() {
   if (!_fs->exists(HYDRA_SLOT_CFG_FILE)) return;
 #if defined(RP2040_PLATFORM)
@@ -274,9 +287,10 @@ void HydraNode::loadSlotConfig() {
   if (f.read(hdr, 2) != 2 || hdr[0] != 'H') { f.close(); return; }
 
   if (hdr[1] == 1) {
-    /* v1 had no names, only a type byte per slot. An enabled v1 slot is already
-       on the mesh under the name ChatSlot used to synthesise, so migrate to
-       exactly that string rather than disabling a working identity. */
+    /* v1 had no names. It had only one type byte for each slot. An enabled v1
+       slot is already on the mesh under the name that ChatSlot made for it. So
+       the code moves it to exactly that string. It does not disable an identity
+       that works. */
     for (int i = 1; i < HYDRA_NUM_SLOTS; i++) {
       uint8_t t = SLOT_OFF;
       if (f.read(&t, 1) != 1) break;
@@ -293,8 +307,8 @@ void HydraNode::loadSlotConfig() {
   for (int i = 1; i < HYDRA_NUM_SLOTS; i++) {
     uint8_t rec[4];
     char name[SLOT_NAME_MAX];
-    // A slot count that shrank between builds leaves stale bytes; a partial
-    // record at the tail must not half-apply.
+    // A slot count that got smaller between two builds leaves old bytes. The
+    // code must not apply a part of a record at the tail.
     if (f.read(rec, 4) != 4) break;
     if (f.read((uint8_t*)name, SLOT_NAME_MAX) != SLOT_NAME_MAX) break;
     name[SLOT_NAME_MAX - 1] = 0;
@@ -347,9 +361,9 @@ void HydraNode::formatSlotTable(char* reply, size_t reply_sz) {
     if (w < 0) break;
     n += w;
   }
-  // Decision G asks for headroom here. This is a probe, not a free-heap
-  // measurement, and nothing sizes itself from it: it is the largest single
-  // block the allocator would still hand out right now.
+  // Decision G asks for the headroom here. This is a probe. It is not a
+  // measurement of the free heap, and nothing sets its own size from it. It is
+  // the largest single block that the allocator still gives out now.
   if (n > 0 && (size_t)n < reply_sz) {
     size_t largest = probeLargestBlock(64 * 1024);
     snprintf(reply + n, reply_sz - n, " reserve=%uB largest-block=%uB",
@@ -382,9 +396,9 @@ void HydraNode::handleCommand(uint32_t sender_timestamp, char* command,
     return;
   }
   if (strcmp(command, "peers") == 0) {
-    /* Decision E. This is a map of who can hear whom across the neighbourhood,
-       assembled from third parties who never agreed to be in it, so it does not
-       go out over the air — the same rule upstream applies to `get acl` and
+    /* Decision E. This is a map of who can hear whom in the neighbourhood. It
+       comes from third parties who never agreed to be in it. So it does not go
+       out over the air. Upstream applies the same rule to `get acl` and to
        `get prv.key`. Physical access to the console is the authentication. */
     if (sender_timestamp != 0) {
       StrHelper::strncpy(reply, "ERR: peers is console-only - it describes third parties", reply_sz);
@@ -393,7 +407,7 @@ void HydraNode::handleCommand(uint32_t sender_timestamp, char* command,
     reportPeers(reply, reply_sz);
     return;
   }
-  if (strcmp(command, "stats-shared") == 0) {   // the arbiter's view, node-wide
+  if (strcmp(command, "stats-shared") == 0) {   // the arbiter view, for the whole node
     snprintf(reply, reply_sz,
              "rx=%u tx=%u contend=%u stuck=%u refused=%u dropped=%u peers=%d idle=%us "
              "duty=%u/%us used=%us",
@@ -405,7 +419,7 @@ void HydraNode::handleCommand(uint32_t sender_timestamp, char* command,
              (unsigned)(_core.txChargedMs() / 1000));
     return;
   }
-  if (strcmp(command, "trace") == 0) {          // the packet trace, newest last
+  if (strcmp(command, "trace") == 0) {          // the packet trace, newest entry last
 #if PKT_TRACE_ENTRIES
     Serial.printf("trace: %d entries x %d raw bytes, air rx=%us tx=%us\n",
                   SharedRadioCore::PKT_LOG_SIZE, SharedRadioCore::PKT_LOG_RAW_CAP,
@@ -433,8 +447,8 @@ void HydraNode::handleCommand(uint32_t sender_timestamp, char* command,
     }
     snprintf(reply, reply_sz, "OK - %d entries", total);
 #else
-    // Sized out, not broken: PKT_TRACE_ENTRIES is 0 in shipped builds because
-    // the ring is 10.9 KB of RAM at the full depth.
+    // The build removes this. It is not broken. PKT_TRACE_ENTRIES is 0 in a
+    // shipped build, because the ring is 10.9 KB of RAM at the full depth.
     StrHelper::strncpy(reply, "trace disabled - build with -D PKT_TRACE_ENTRIES=N", reply_sz);
 #endif
     return;
@@ -462,9 +476,10 @@ void HydraNode::handleCommand(uint32_t sender_timestamp, char* command,
     return;
   }
 
-  // Unqualified: slot 0. A hydra node still answers the whole repeater CLI, and
-  // that fallthrough IS the node namespace — the radio, the watchdogs, the LED
-  // and the board all hang off slot 0's prefs because there is one of each.
+  // A command with no slot prefix goes to slot 0. A hydra node still answers
+  // the whole repeater CLI. That fall-through IS the node namespace. The radio,
+  // the watchdogs, the LED and the board all come from the prefs of slot 0,
+  // because there is one of each.
   _slot0.handleCommand(sender_timestamp, command, reply, reply_sz);
 }
 
@@ -472,7 +487,8 @@ void HydraNode::handleCommand(uint32_t sender_timestamp, char* command,
 
 void HydraNode::handleSlotCommand(int idx, uint32_t sender_timestamp, char* arg,
                                   char* reply, size_t reply_sz) {
-  // Slot 0 is the repeater and its CLI is the stock one, qualified or not.
+  // Slot 0 is the repeater. Its CLI is the standard one, with or without a
+  // slot prefix.
   if (idx == 0) {
     if (strcmp(arg, "on") == 0 || strcmp(arg, "off") == 0 ||
         strcmp(arg, "chat") == 0 || strcmp(arg, "room") == 0) {
@@ -492,18 +508,19 @@ void HydraNode::handleSlotCommand(int idx, uint32_t sender_timestamp, char* arg,
   else if (strcmp(arg, "room") == 0) want = SLOT_ROOM;
 
   if (want != SLOT_OFF) {
-    /* A slot that has already run this boot has a mesh object built for the
-       type it started as, and `slot N off` only silences the port. type() is
-       SLOT_OFF until begin() runs, so this catches the stopped case too — which
-       is the one that would otherwise come back up as the wrong thing. */
+    /* A slot that already ran in this boot has a mesh object for the type that
+       it started as. And `slot N off` only silences the port. type() is
+       SLOT_OFF until begin() runs. So this test also catches a slot that
+       stopped. That slot is the one that would otherwise come back as the wrong
+       type. */
     if (_slots[idx]->type() != SLOT_OFF && _slots[idx]->type() != want) {
       snprintf(reply, reply_sz, "ERR: slot %d already ran as %s this boot - reboot to retype",
                idx, typeName(_slots[idx]->type()));
       return;
     }
-    /* Decision H: the name gate runs BEFORE anything is persisted or started,
-       so a refused enable leaves no trace and there is never an identity
-       adverting with nothing to call itself. */
+    /* Decision H. The name gate runs BEFORE the code stores or starts anything.
+       A refused enable thus leaves no trace. And an identity never adverts with
+       no name. */
     SlotEnableResult chk = slotEnableCheck(idx, HYDRA_NUM_SLOTS, want, _cfg[idx].name);
     if (chk != SLOT_ENABLE_OK) { StrHelper::strncpy(reply, slotEnableError(chk), reply_sz); return; }
 
@@ -536,9 +553,9 @@ void HydraNode::handleSlotCommand(int idx, uint32_t sender_timestamp, char* arg,
 
 void HydraNode::handleSlotSet(int idx, uint32_t sender_timestamp, char* arg,
                               char* reply, size_t reply_sz) {
-  /* Decision 8. A slot asking for a radio parameter is refused rather than
-     served: there is one transceiver, and slot 3 retuning it would take every
-     other identity off the air with it. */
+  /* Decision 8. The node refuses a slot that asks for a radio parameter. There
+     is one transceiver. If slot 3 retuned it, every other identity would go off
+     the air with it. */
   if (slotVerbIsNodeLevel(arg)) { StrHelper::strncpy(reply, slotNodeLevelError(), reply_sz); return; }
 
   if (strncmp(arg, "name ", 5) == 0) {
@@ -549,7 +566,7 @@ void HydraNode::handleSlotSet(int idx, uint32_t sender_timestamp, char* arg,
     }
     StrHelper::strncpy(_cfg[idx].name, v, sizeof(_cfg[idx].name));
     saveSlotConfig();
-    _slots[idx]->setName(_cfg[idx].name);   // live: the next advert carries it
+    _slots[idx]->setName(_cfg[idx].name);   // live: the next advert carries the name
     snprintf(reply, reply_sz, "OK - slot %d is \"%s\"", idx, _cfg[idx].name);
     return;
   }
@@ -557,16 +574,18 @@ void HydraNode::handleSlotSet(int idx, uint32_t sender_timestamp, char* arg,
 #if ENABLE_PRIVATE_KEY_IMPORT
     setSlotPrivateKey(idx, arg + 8, reply, reply_sz);
 #else
-    // Upstream gates key import behind this flag and comments it "comment these
-    // out for more secure firmware". With it off the command does not exist.
+    // Upstream puts the key import behind this flag. Its comment reads "comment
+    // these out for more secure firmware". When the flag is off, the command
+    // does not exist.
     StrHelper::strncpy(reply, "ERR: unknown setting", reply_sz);
 #endif
     return;
   }
   if (strncmp(arg, "advert.interval ", 16) == 0) {
-    // Same floor and ceiling as CommonCLI's node-level advert.interval: 0 is
-    // "never", and anything else has to be at least an hour apart. One antenna
-    // and N identities means N times the adverts if the floor is not kept.
+    // These are the same limits as the node-level advert.interval in CommonCLI.
+    // A value of 0 means "never". Every other value must be one hour or more.
+    // There is one antenna and there are N identities. Without the lower limit,
+    // the node would send N times as many adverts.
     int mins = atoi(arg + 16);
     if (mins < 0 || (mins > 0 && mins < 60) || mins > 240) {
       StrHelper::strncpy(reply, "ERR: interval is 0 (never) or 60-240 minutes", reply_sz);
@@ -610,9 +629,9 @@ void HydraNode::handleSlotGet(int idx, uint32_t sender_timestamp, char* arg,
     mesh::Utils::toHex(&reply[2], _slots[idx]->identity().pub_key, PUB_KEY_SIZE);
 #if ENABLE_PRIVATE_KEY_EXPORT
   } else if (sender_timestamp == 0 && strcmp(arg, "prv.key") == 0) {
-    // Console only, like upstream's `get prv.key`: it IS the identity. Worth
-    // having on a slot whose key was generated here, because otherwise the only
-    // copy is on a filesystem nobody has backed up.
+    // This is for the console only, like `get prv.key` upstream. The key IS the
+    // identity. The command is useful on a slot whose key this node made.
+    // Otherwise the only copy is on a filesystem that nobody has backed up.
     if (!_core.portActive(idx)) { StrHelper::strncpy(reply, "ERR: slot not running", reply_sz); return; }
     uint8_t prv[PRV_KEY_SIZE];
     mesh::LocalIdentity id = _slots[idx]->identity();
@@ -626,27 +645,28 @@ void HydraNode::handleSlotGet(int idx, uint32_t sender_timestamp, char* arg,
 }
 
 #if ENABLE_PRIVATE_KEY_IMPORT
-/* Moving an existing identity onto a slot.
+/* How to move an existing identity onto a slot.
 
-   THIS WRITES A KEYPAIR TO FLASH, which is the operation this project has lost
-   identities to before (see slot_types.h on origin/time-converge). Three rules,
-   all of them here on purpose:
+   THIS WRITES A KEYPAIR TO FLASH. This project has lost identities to that
+   operation before (see slot_types.h on origin/time-converge). There are three
+   rules. All three are here on purpose:
 
-   1. The storage name comes from slotIdName(), i.e. from the slot INDEX, and is
-      the same call begin() loads with. There is no second convention, and no
-      path that depends on the slot's type or its display name.
-   2. The slot must be OFF. A running identity has contacts, an ACL and a mesh
-      object keyed to the old key; swapping underneath them would leave a node
-      that is half one identity and half another. Off means the only state is
-      the file, and begin() reads it fresh.
-   3. Write, then READ BACK and compare before reporting success. A truncated or
-      failed LittleFS write otherwise reports OK and is discovered at the next
-      boot, with the old key already gone. */
+   1. The storage name comes from slotIdName(), that is, from the slot INDEX.
+      begin() loads the identity with the same call. There is no second
+      convention. No path depends on the type of the slot or on its display
+      name.
+   2. The slot must be OFF. An identity that runs has contacts, an ACL and a
+      mesh object that all use the old key. A change below them would leave a
+      node that is half one identity and half another. OFF means that the file
+      is the only state, and begin() reads that file again.
+   3. Write the key. Then READ IT BACK and compare it before you report success.
+      If you do not, a short or failed LittleFS write reports OK. You then find
+      the fault at the next boot, and the old key is already gone. */
 bool HydraNode::setSlotPrivateKey(int idx, const char* hex, char* reply, size_t reply_sz) {
-  /* Rule 2. type() is SLOT_OFF only while begin() has never run, so this also
-     refuses a slot that was started and then switched off: its mesh object,
-     contacts and ACL are still keyed to the old identity in RAM, and `slot N
-     on` would not re-read the file. */
+  /* Rule 2. type() is SLOT_OFF only while begin() has never run. So this test
+     also refuses a slot that started and then went off. Its mesh object, its
+     contacts and its ACL in RAM still use the old identity. And `slot N on`
+     would not read the file again. */
   if (_slots[idx]->type() != SLOT_OFF) {
     StrHelper::strncpy(reply, "ERR: slot has run this boot - reboot with it off, then set the key", reply_sz);
     return false;
@@ -661,7 +681,7 @@ bool HydraNode::setSlotPrivateKey(int idx, const char* hex, char* reply, size_t 
   new_id.readFrom(prv, PRV_KEY_SIZE);
 
   char id_name[16];
-  slotIdName(idx, id_name, sizeof(id_name));   // rule 1: index, nothing else
+  slotIdName(idx, id_name, sizeof(id_name));   // rule 1: the index, and nothing else
   IdentityStore store(*_fs, "");
   if (!store.save(id_name, new_id)) {
     StrHelper::strncpy(reply, "ERR: could not write identity - key NOT changed", reply_sz);

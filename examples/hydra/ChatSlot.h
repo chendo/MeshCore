@@ -1,18 +1,21 @@
 #pragma once
 
-// Slots 1..N: an identity that is not the repeater — a chat client or a room
-// server. One class covers both because everything below the ACL and the post
-// buffer is identical: a keypair, a name, contacts, adverts, and no forwarding.
+// Slots 1..N hold an identity that is not the repeater. It is a chat client or
+// a room server. One class covers both, because everything below the ACL and
+// the post buffer is the same: a keypair, a name, contacts, adverts, and no
+// packet forward.
 //
-// SCAFFOLDING. This boots, gets its own keypair, adverts, and tracks contacts —
-// enough to prove a second identity can live on the shared radio and be seen by
-// the mesh as a separate node. It has no companion interface and answers no
-// messages; the message/ack callbacks are deliberately empty.
+// THIS IS A FRAME FOR LATER WORK. The slot boots, gets its own keypair, adverts
+// and keeps a list of contacts. That is enough to prove that a second identity
+// can live on the shared radio, and that the mesh sees it as a separate node.
+// The slot has no companion interface, and it answers no messages. The
+// callbacks for a message and for an ack are empty on purpose.
 //
-// SLOT_ROOM IS PARTIAL. A room slot gets a real, private ClientACL and a real
-// post buffer, and adverts as ADV_TYPE_ROOM, so membership and the RAM
-// accounting behave as they will. The room PROTOCOL — post delivery, client
-// sync, push retries — is not implemented; onCommandDataRecv is still empty.
+// SLOT_ROOM IS NOT COMPLETE. A room slot gets a real, private ClientACL and a
+// real post buffer. It adverts as ADV_TYPE_ROOM. So the membership and the RAM
+// accounting behave as they will in the finished code. The room PROTOCOL is not
+// written. That protocol is the delivery of posts, the sync of clients and the
+// retry of pushes. The function onCommandDataRecv is still empty.
 
 #include "HydraSlot.h"
 #include "RoomStore.h"
@@ -20,11 +23,12 @@
 #include <helpers/AdvertDataHelpers.h>
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/BaseChatMesh.h>
-#include <target.h>   // board, radio_driver, rtc_clock: node-scoped, one each
+#include <target.h>   // board, radio_driver, rtc_clock: node-scoped, one of each
 
-// Non-repeater slots are sized down hard: sizeof(mesh::Packet) is 262 B, so the
-// repeater's 32-entry pool is ~8.3 KB on its own. A chat identity only ever has
-// its own traffic in flight — it forwards nothing — so 8 is generous.
+// A slot that is not the repeater gets a much smaller size. sizeof(mesh::Packet)
+// is 262 B, so the 32-entry pool of the repeater alone is ~8.3 KB. A chat
+// identity only ever has its own traffic in flight, because it forwards
+// nothing. So 8 entries are more than enough.
 #ifndef HYDRA_CHAT_POOL
   #define HYDRA_CHAT_POOL     8
 #endif
@@ -47,9 +51,9 @@ protected:
   float getAirtimeBudgetFactor() const override { return 1.0f; }
   int calcRxDelay(float score, uint32_t air_time) const override { return 0; }
 
-  // A chat identity is an endpoint, not a relay. Slot 0 is already forwarding
-  // everything this radio hears; a second identity forwarding the same floods
-  // would put two copies of each on the air from one antenna.
+  // A chat identity is an end point, not a relay. Slot 0 already forwards
+  // everything that this radio hears. If a second identity forwarded the same
+  // floods, one antenna would put two copies of each flood on the air.
   bool allowPacketForward(const mesh::Packet* packet) override { return false; }
 
   void onDiscoveredContact(ContactInfo& c, bool is_new, uint8_t path_len, const uint8_t* path) override {}
@@ -70,9 +74,10 @@ protected:
 public:
   ChatMesh(mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng,
            mesh::RTCClock& rtc, mesh::PacketManager& mgr, mesh::MeshTables& tables)
-      // Flood by default: a slot nobody can discover is not useful, and an
-      // operator should not have to know to turn discovery on. Airtime is
-      // bounded by _advert_mins, which is the dial that matters.
+      // A slot floods its advert by default. A slot that nobody can find is
+      // not useful. The operator does not have to know to enable discovery.
+      // The value _advert_mins limits the airtime. It is the setting that
+      // matters.
       : BaseChatMesh(radio, ms, rng, rtc, mgr, tables), _next_advert(0),
         _advert_mins(HYDRA_CHAT_ADVERT_MINS), _flood(true), _adv_type(ADV_TYPE_CHAT) {
     _name[0] = 0;
@@ -98,14 +103,14 @@ public:
     mesh::Packet* pkt = createAdvert(self_id, app_data, len);
     if (pkt == NULL) return;
     if (flood) sendFlood(pkt, delay_millis); else sendZeroHop(pkt, delay_millis);
-    // Decision C: the interval starts when the slot is enabled, so enabling is
-    // also the announce-myself moment rather than a wait for the first cycle.
+    // Decision C. The interval starts when you enable the slot. So the slot
+    // announces itself at that moment. It does not wait for the first cycle.
     _next_advert = _advert_mins ? futureMillis((int)(_advert_mins * 60000UL)) : 0;
   }
 
   void loop() {
     BaseChatMesh::loop();
-    // zero until the slot's first advert, so a slot that never started is quiet
+    // this is zero until the first advert. A slot that never started stays quiet.
     if (_advert_mins > 0 && _next_advert != 0 && millisHasNowPassed(_next_advert)) {
       advertise(0, _flood);
     }
@@ -119,7 +124,7 @@ class ChatSlot : public HydraSlot {
   SlotMeshTables<HYDRA_CHAT_HASHES> _tables;
   DeferredPacketManager           _mgr;
   ChatMesh                        _mesh;
-  RoomStore*                      _room;   // non-null only while a room slot runs
+  RoomStore*                      _room;   // not null only while a room slot runs
   FILESYSTEM*                     _fs;
   char                            _acl_file[20];
   unsigned long                   _acl_dirty_at;   // 0 = clean
@@ -139,12 +144,12 @@ public:
   const char* name() const override { return _mesh.nodeName(); }
   void setName(const char* n) override { _mesh.setNodeName(n); }
   bool hasPendingWork() const override { return _begun && _mesh.hasPendingWork(); }
-  ChatMesh& mesh() { return _mesh; }   // hook for the companion facade / diag bot
+  ChatMesh& mesh() { return _mesh; }   // a hook for the companion or the diag bot
   RoomStore* room() { return _room; }
 
-  // What enabling this slot will ask the heap for, before it asks. Reporting
-  // only — the actual gate is RamFloor, which pins the reserve and then lets
-  // these allocations run against what is left.
+  // This is what the slot will ask the heap for, before it asks. It is a report
+  // only. The real gate is RamFloor. RamFloor pins the reserve, and then lets
+  // these allocations use what is left.
   static size_t heapCost(SlotType t) {
     size_t n = (size_t)HYDRA_CHAT_POOL * sizeof(mesh::Packet) + 256;
     if (t == SLOT_ROOM) n += RoomStore::heapCost();
@@ -154,12 +159,13 @@ public:
   bool begin(FILESYSTEM* fs, IdentityStore& store, const char* id_name,
              const char* display_name, SlotType type) override {
     if (_begun) return true;
-    if (!_mgr.allocatePool()) return false;   // heap refused: RAM floor did its job
+    if (!_mgr.allocatePool()) return false;   // the heap refused: the RAM floor works
     _fs = fs;
     if (!store.load(id_name, _mesh.self_id)) {
-      // radio_new_identity() samples RSSI noise, which drops the transceiver
-      // out of receive. Only on first boot of a slot, and the next pump()
-      // re-arms RX, so it costs one loop iteration of deafness.
+      // radio_new_identity() samples the RSSI noise. This takes the transceiver
+      // out of receive. It happens only at the first boot of a slot. The next
+      // pump() puts the radio back in receive. So the node is deaf for one
+      // iteration of the loop.
       _mesh.self_id = radio_new_identity();
       for (int i = 0; i < 10 && (_mesh.self_id.pub_key[0] == 0x00 || _mesh.self_id.pub_key[0] == 0xFF); i++) {
         _mesh.self_id = radio_new_identity();
@@ -171,16 +177,18 @@ public:
 
     if (type == SLOT_ROOM) {
       _room = new (std::nothrow) RoomStore();
-      if (_room == nullptr) return false;   // as above: refuse, do not half-start
-      // Scoped by the slot's STORAGE name, which is fixed at creation and does
-      // not follow the type (decision 7), so retyping a slot keeps its members.
+      if (_room == nullptr) return false;   // as above: refuse, do not start a part
+      // The scope is the STORAGE name of the slot. That name is fixed at
+      // creation and does not follow the type (decision 7). So a slot that
+      // changes its type keeps its members.
       snprintf(_acl_file, sizeof(_acl_file), "/acl%s", id_name);
       _room->load(_fs, _mesh.self_id, _acl_file);
     }
 
-    // Only the base begin(). Unlike the repeater's MyMesh::begin(), a chat slot
-    // pushes no freq/bw/sf/cr or TX power at the radio — those are node
-    // settings, owned by slot 0's prefs, and there is one transceiver.
+    // This calls only the base begin(). MyMesh::begin() in the repeater sends
+    // freq, bw, sf, cr and the TX power to the radio. A chat slot sends none of
+    // them. They are node settings, the prefs of slot 0 own them, and there is
+    // one transceiver.
     _mesh.begin();
     _type = type;
     _begun = true;
@@ -188,10 +196,11 @@ public:
     return true;
   }
 
-  // Disabling a slot silences its port but does not free the room: bringing it
-  // back must not depend on the heap still having a contiguous block months
-  // later, and re-running _mesh.begin() is not something this scaffolding
-  // promises. The ACL is flushed here so nothing pending is lost.
+  // When you disable a slot, the code silences its port. It does not free the
+  // room. The slot must be able to come back without a continuous block from
+  // the heap months later. This code also does not promise that _mesh.begin()
+  // can run a second time. This function writes the ACL, so that nothing
+  // pending is lost.
   void flushPendingWrites() override {
     if (_room && _acl_dirty_at && _fs) {
       _room->save(_fs, _acl_file);
@@ -202,9 +211,10 @@ public:
   void loop() override {
     if (!_begun) return;
     _mesh.loop();
-    // Coalesced the same way the repeater coalesces its ACL, and for the same
-    // reason: the write blocks the loop for ~1.6 s and wears the flash, so a
-    // run of `setperm`s costs one write rather than one each.
+    // The code groups these writes in the same way as the repeater groups its
+    // ACL writes. The reason is the same. The write blocks the loop for ~1.6 s
+    // and wears the flash. So a series of `setperm` commands costs one write,
+    // and not one write for each command.
     if (_acl_dirty_at && (long)(millis() - _acl_dirty_at) >= 0) flushPendingWrites();
   }
 
@@ -224,8 +234,9 @@ public:
       handleSetPerm(command + 8, reply, reply_sz);
     } else if (strcmp(command, "clear acl") == 0) {
       if (_room == nullptr) { StrHelper::strncpy(reply, "ERR: not a room slot", reply_sz); return; }
-      // Demoting to guest is how ClientACL deletes. Bail if the count ever
-      // fails to drop rather than spinning the loop watchdog into a reboot.
+      // ClientACL deletes a client when the code changes that client to a guest.
+      // Stop if the count ever fails to fall. If the code did not stop, the loop
+      // watchdog would reboot the node.
       for (int n = _room->acl.getNumClients(); n > 0; n = _room->acl.getNumClients()) {
         ClientInfo* c = _room->acl.getClientByIdx(0);
         _room->acl.applyPermissions(_mesh.self_id, c->id.pub_key, PUB_KEY_SIZE, PERM_ACL_GUEST);
@@ -234,8 +245,9 @@ public:
       markAclDirty();
       StrHelper::strncpy(reply, "OK - room ACL cleared", reply_sz);
     } else if (sender_timestamp == 0 && strcmp(command, "acl") == 0) {
-      // Reached as `slot N get acl` (HydraNode strips the "get "). Serial only,
-      // like the repeater's `get acl`: it lists third parties.
+      // The user reaches this as `slot N get acl`. HydraNode removes the "get ".
+      // This is for the serial console only, like `get acl` on the repeater. It
+      // lists third parties.
       if (_room == nullptr) { StrHelper::strncpy(reply, "ERR: not a room slot", reply_sz); return; }
       Serial.printf("room ACL (%s):\n", _mesh.nodeName());
       for (int i = 0; i < _room->acl.getNumClients(); i++) {
@@ -256,8 +268,9 @@ public:
   }
 
 private:
-  // Same 5 s window as the repeater's LAZY_CONTACTS_WRITE_DELAY. 0 means
-  // clean, so a deadline that lands exactly on the millis() wrap is nudged.
+  // This is the same 5 s window as LAZY_CONTACTS_WRITE_DELAY in the repeater. A
+  // value of 0 means clean. So the code moves a deadline that falls exactly on
+  // the millis() wrap.
   void markAclDirty() {
     _acl_dirty_at = millis() + 5000;
     if (_acl_dirty_at == 0) _acl_dirty_at = 1;
@@ -277,7 +290,7 @@ private:
     }
     uint8_t perms = (uint8_t)atoi(sp);
     if (_room->acl.applyPermissions(_mesh.self_id, pubkey, hex_len / 2, perms)) {
-      markAclDirty();   // written by loop(), not here: no flash write in a CLI call
+      markAclDirty();   // loop() writes this, not here. A CLI call does no flash write.
       snprintf(reply, reply_sz, "OK - %d members", _room->acl.getNumClients());
     } else {
       StrHelper::strncpy(reply, "ERR: invalid params", reply_sz);

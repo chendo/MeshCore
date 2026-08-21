@@ -1,31 +1,33 @@
 #pragma once
 
-// Rendering MeshObserver's peer table for the `peers` command.
+// This file draws the peer table of MeshObserver for the `peers` command.
 //
-// Split out from the CLI so the formatting can be tested on a host, and
-// because getting it wrong would quietly destroy the only two facts the table
-// is for. MeshObserver.h states them; this file exists to keep them apart on
-// the way out:
+// It is separate from the CLI for two reasons. You can test the format on a
+// host. And an error here would destroy the only two facts that the table
+// exists to show, and would give no warning. MeshObserver.h states the two
+// facts. This file keeps them apart on the way out:
 //
-//   WE HEAR THEM    only from `direct_rx` — the node was the LAST entry in a
-//                   path, so it transmitted the frame we received. The mean SNR
-//                   describes THAT link and nothing else. A peer seen only
-//                   mid-path (`relays`) has told us nothing about its link to
-//                   us and must never be rendered as if it had.
-//   THEY HEAR US    only from `heard_us` — a >=2-byte hash appearing right
-//                   after one of ours. `heard_us_1b` is the same shape of
-//                   evidence at 1 byte, which collides 1 in 256, so it is
-//                   printed as an unconfirmed count and never as a yes.
+//   WE HEAR THEM    This comes only from `direct_rx`. The node was the LAST
+//                   entry in a path, so it sent the frame that we received. The
+//                   mean SNR describes THAT link and nothing else. A peer that
+//                   we see only in the middle of a path (`relays`) has told us
+//                   nothing about its link to us. Never draw it as if it had.
+//   THEY HEAR US    This comes only from `heard_us`. It is a hash of 2 bytes or
+//                   more that comes directly after one of ours. `heard_us_1b`
+//                   is the same kind of evidence at 1 byte. A 1-byte hash
+//                   collides 1 time in 256. So the table prints it as an
+//                   unconfirmed count, and never as a yes.
 //
-// A 1-byte-wide entry is likewise not an identified node. It is shown, because
-// refusing to show it would hide real traffic, but it is marked.
+// An entry that is 1 byte wide is also not an identified node. The table shows
+// it, because to hide it would hide real traffic. But the table marks it.
 
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <helpers/MeshObserver.h>
 
-// "12s", "5m", "3h", "2d" — enough resolution to tell live from stale.
+// "12s", "5m", "3h", "2d". This is enough detail to tell a live peer from a
+// stale one.
 inline void peerFmtAge(char* out, size_t cap, uint32_t ms) {
   uint32_t s = ms / 1000;
   if (s < 100)          snprintf(out, cap, "%us", (unsigned)s);
@@ -34,8 +36,9 @@ inline void peerFmtAge(char* out, size_t cap, uint32_t ms) {
   else                  snprintf(out, cap, "%ud", (unsigned)(s / 86400));
 }
 
-// SNR arrives as quarter-dB and is printed to one decimal by integer maths:
-// %f on newlib-nano needs a linker flag this firmware does not set.
+// The SNR comes in quarter-dB. Integer maths prints it to one decimal place.
+// The %f format on newlib-nano needs a linker flag that this firmware does not
+// set.
 inline void peerFmtSnrQ4(char* out, size_t cap, int32_t q4) {
   int32_t tenths = (q4 * 10) / 4;
   const char* sign = tenths < 0 ? "-" : "+";
@@ -47,7 +50,7 @@ inline const char* peerColumnHeader() {
   return "  hash    hop  we-hear-them          they-hear-us     seen   identity";
 }
 
-// One row. `now_ms` is millis(); subtraction is wrap-safe on uint32.
+// One row. `now_ms` is millis(). The subtraction is safe at the uint32 wrap.
 inline int formatPeerRow(char* out, size_t cap, const MeshObserver::PeerEntry& e,
                          uint32_t now_ms) {
   char hash[8] = {0};
@@ -59,8 +62,8 @@ inline int formatPeerRow(char* out, size_t cap, const MeshObserver::PeerEntry& e
   if (e.min_hops == 0) snprintf(hop, sizeof(hop), "?");
   else snprintf(hop, sizeof(hop), "%u", (unsigned)e.min_hops);
 
-  // -- we hear them: direct sightings only. `relays` is mesh activity and is
-  // reported as such, never folded into an rx count.
+  // -- we hear them: only direct sightings. `relays` is mesh traffic. The table
+  // reports it as mesh traffic. The table never adds it to an rx count.
   char us_them[32];
   if (e.direct_rx == 0) {
     snprintf(us_them, sizeof(us_them), "no (relayed x%u)", (unsigned)e.relays);
@@ -72,8 +75,9 @@ inline int formatPeerRow(char* out, size_t cap, const MeshObserver::PeerEntry& e
     snprintf(us_them, sizeof(us_them), "rx=%u snr=%s", (unsigned)e.direct_rx, snr);
   }
 
-  // -- they hear us: only >=2-byte matches are proof. The 1-byte tally is
-  // carried alongside so it is visible without being credited.
+  // -- they hear us: only a match of 2 bytes or more is proof. The table shows
+  // the 1-byte count beside it. The count is thus visible, but it gets no
+  // credit.
   char them_us[24];
   if (e.heard_us > 0) {
     if (e.heard_us_1b > 0) {
@@ -91,8 +95,9 @@ inline int formatPeerRow(char* out, size_t cap, const MeshObserver::PeerEntry& e
   char seen[8];
   peerFmtAge(seen, sizeof(seen), now_ms - e.last_ms);
 
-  // -- identity, harvested from adverts. Absent until the node adverts; a
-  // 1-byte table entry is not an identification even when it carries a name.
+  // -- the identity, which comes from adverts. It is absent until the node
+  // adverts. A 1-byte table entry does not identify a node, even when it
+  // carries a name.
   char ident[48];
   bool have_pub = false;
   for (int i = 0; i < 6; i++) if (e.pub[i]) { have_pub = true; break; }
@@ -109,7 +114,7 @@ inline int formatPeerRow(char* out, size_t cap, const MeshObserver::PeerEntry& e
                   e.width < 2 ? "  [1-byte hash: unproven]" : "");
 }
 
-// The summary line. Hash widths are reported because a table dominated by
+// The summary line. It reports the hash widths, because a table with mostly
 // 1-byte entries is a much weaker picture than the same count at 3 bytes.
 inline int formatPeerSummary(char* out, size_t cap, const MeshObserver& obs) {
   return snprintf(out, cap,

@@ -1,25 +1,27 @@
 #pragma once
 
-// What a room slot owns beyond its identity: its OWN access list and its own
-// post buffer.
+// A room slot owns two things in addition to its identity. It owns its OWN
+// access list and its own post buffer.
 //
-// PER-ROOM, NOT SHARED (decision H). A room's members are its own business, so
-// the ACL is neither the node's nor another slot's. ClientACL persists itself
-// to a single fixed path (/s_contacts, slot 0's), so the load/save here go
-// through its public API into a slot-scoped file instead. `acl.save()` and
-// `acl.load()` must never be called on one of these — they would overwrite the
-// repeater's list.
+// ONE PER ROOM, NOT SHARED (decision H). The members of a room are the business
+// of that room. So the ACL does not belong to the node, and it does not belong
+// to another slot. ClientACL saves itself to one fixed path, /s_contacts, which
+// is the path of slot 0. The load and save functions here therefore use the
+// public API of ClientACL and write to a slot-scoped file. Never call
+// `acl.save()` or `acl.load()` on one of these. They would overwrite the list
+// of the repeater.
 //
-// POSTS ARE RAM ONLY (decision G). A flash write per post is the ~1.6 s blocked
-// loop and the wear problem the ACL work exists to avoid. Posts are lost on
-// reboot, by decision, and MAX_UNSYNCED_POSTS is a delivery window for
-// stragglers rather than history — raising it does not give new joiners a
-// backlog.
+// POSTS ARE IN RAM ONLY (decision G). One flash write for each post gives the
+// ~1.6 s block of the loop and the wear problem that the ACL work exists to
+// avoid. By decision, a reboot loses the posts. MAX_UNSYNCED_POSTS is a
+// delivery window for late clients. It is not a history. A larger value does
+// not give a new member a backlog.
 //
-// Everything here is heap-allocated when the slot is ENABLED and freed when it
-// is disabled, matching DeferredPacketManager: a configured-but-off room costs
-// one pointer. That is also what makes the node RAM reserve floor meaningful —
-// enabling a room is the moment the heap is actually asked for the memory.
+// The code allocates everything here on the heap when you ENABLE the slot. It
+// frees it when you disable the slot. This matches DeferredPacketManager. A
+// room that is configured but off costs one pointer. This is also what makes
+// the node RAM reserve floor useful. To enable a room is the moment when the
+// code asks the heap for the memory.
 
 #include <helpers/ClientACL.h>
 #include <helpers/IdentityStore.h>
@@ -31,17 +33,19 @@
 
 #define MAX_POST_TEXT_LEN  (160 - 9)
 
-// Same shape as examples/simple_room_server's PostInfo. Redeclared rather than
-// included: that header defines a class MyMesh, and slot 0 already has one.
+// This has the same shape as PostInfo in examples/simple_room_server. We
+// declare it again and do not include that header. That header defines a class
+// MyMesh, and slot 0 already has one.
 struct PostInfo {
   mesh::Identity author;
   uint32_t post_timestamp;   // by OUR clock
   char text[MAX_POST_TEXT_LEN + 1];
 };
 
-// v1 record: pubkey, permissions, out-path, sync point. The shared secret is
-// recomputed on load, so a slot whose private key changed picks up working
-// secrets without a stale copy on disk to disagree with.
+// A v1 record holds the pubkey, the permissions, the out-path and the sync
+// point. The code calculates the shared secret again at each load. So a slot
+// whose private key changed gets secrets that work. There is no old copy on the
+// disk to disagree with them.
 #define ROOM_ACL_MAGIC_0  'R'
 #define ROOM_ACL_MAGIC_1  1
 
@@ -58,7 +62,7 @@ public:
 
   static size_t heapCost() { return sizeof(RoomStore); }
 
-  // ---- ACL persistence, in a slot-scoped file -------------------------------
+  // ---- how the code stores the ACL, in a slot-scoped file -------------------
 
   void load(FILESYSTEM* fs, const mesh::LocalIdentity& self_id, const char* file) {
     if (!fs->exists(file)) return;
@@ -78,9 +82,9 @@ public:
         ok = ok && (f.read(&path_len, 1) == 1);
         ok = ok && (f.read(path, MAX_PATH_SIZE) == MAX_PATH_SIZE);
         ok = ok && (f.read((uint8_t*)&sync_since, 4) == 4);
-        if (!ok) break;   // EOF or a short tail; keep what was read
-        // applyPermissions() is the only public route that also derives the
-        // shared secret, which is why the record does not store one.
+        if (!ok) break;   // the end of the file, or a short tail. Keep what we read.
+        // applyPermissions() is the only public function that also calculates
+        // the shared secret. This is why the record does not store one.
         if (perms == 0 || !acl.applyPermissions(self_id, pub, PUB_KEY_SIZE, perms)) continue;
         ClientInfo* c = acl.getClient(pub, PUB_KEY_SIZE);
         if (c) {
