@@ -1,6 +1,7 @@
 
 #define RADIOLIB_STATIC_ONLY 1
 #include "RadioLibWrappers.h"
+#include <string.h>
 
 #define STATE_IDLE       0
 #define STATE_RX         1
@@ -122,6 +123,30 @@ bool RadioLibWrapper::isInRecvMode() const {
   return (state & ~STATE_INT_READY) == STATE_RX;
 }
 
+void RadioLibWrapper::recordRecvError(int16_t err, const uint8_t* bytes, int len) {
+  last_recv_error = err;
+  switch (err) {
+    case RADIOLIB_ERR_CRC_MISMATCH:         n_err_crc++;     break;
+    case RADIOLIB_ERR_LORA_HEADER_DAMAGED:  n_err_header++;  break;
+    case RADIOLIB_ERR_RX_TIMEOUT:           n_err_timeout++; break;
+    default:                                n_err_other++;   break;
+  }
+#if RX_ERR_PAYLOAD_BYTES > 0
+  // Only the two cases where RadioLib has actually read the frame out of the
+  // radio before failing it. A timeout returns before that, so the buffer would
+  // still hold whatever was in it last.
+  if (err == RADIOLIB_ERR_CRC_MISMATCH || err == RADIOLIB_ERR_LORA_HEADER_DAMAGED) {
+    int cap = (int)sizeof(last_err_payload);
+    last_err_len = (uint8_t)(len > cap ? cap : (len < 0 ? 0 : len));
+    memcpy(last_err_payload, bytes, last_err_len);
+  } else {
+    last_err_len = 0;
+  }
+#else
+  (void)bytes; (void)len;
+#endif
+}
+
 int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
   int len = 0;
   if (state & STATE_INT_READY) {
@@ -131,6 +156,7 @@ int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
       int err = _radio->readData(bytes, len);
       if (err != RADIOLIB_ERR_NONE) {
         MESH_DEBUG_PRINTLN("RadioLibWrapper: error: readData(%d)", err);
+        recordRecvError((int16_t)err, bytes, len);
         len = 0;
         n_recv_errors++;
       } else {
