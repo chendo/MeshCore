@@ -77,6 +77,17 @@ public:
 
   virtual bool setRxBoostedGainMode(bool) { return false; }
   virtual bool getRxBoostedGainMode() const { return false; }
+
+  /**
+   * \brief  Decode the 3-bit coding-rate field of a LoRa explicit header.
+   * \param  raw  the field as the modem reports it
+   * \returns  the 4/x denominator, 5..8, or 0 for anything not defined there
+   *           (reserved values, long-interleaved codes, or a read taken before
+   *           any frame has been decoded)
+   */
+  static uint8_t decodeHeaderCodingRate(uint8_t raw) {
+    return (raw >= 1 && raw <= 4) ? (uint8_t)(4 + raw) : 0;
+  }
   
   virtual bool configSideDetectors(const uint8_t sideDetSFs[], uint8_t num, float bw) { return false; }
 };
