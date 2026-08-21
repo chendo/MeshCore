@@ -53,6 +53,11 @@ button.sec{background:none;border:1px solid var(--line);color:var(--tx);padding:
 .relay.sure{background:#14361f;color:#5fd694;border:1px solid #2c6b45}
 .relay.weak{background:#3a2d16;color:#e8c874;border:1px solid #6b5320}
 .relay.direct{background:#12293d;color:#6cb6f0;border:1px solid #2a5a80}
+/* collisions, marked on the airtime itself: a proven overlap carries the ms it
+   lost, a suspicion carries only the mark, because the two are different
+   strengths of evidence and should not look alike */
+.collx{color:#e05d5d;font-weight:700;cursor:help;margin-left:4px}
+.collx.maybe{color:#d99b6c}
 tr.relayrow td{background:#12211a}
 /* heard straight off the air — no repeater in between. The left edge marks it
    so a burst of direct traffic is visible without reading every row. */
@@ -116,11 +121,13 @@ tbody.directonly tr:not(.directrow){display:none}
     <div class="mut" style="font-size:11px;margin-bottom:6px">
       learned from routing paths &mdash; <b>we hear</b> counts frames where the node was the
       last forwarder (so its SNR is our link to it); <b>hears us</b> counts times it relayed
-      one of ours, and only 2-byte hash matches count &mdash; 1 byte is 1-in-256 and shown as "?"
+      one of ours, and only 2-byte hash matches count &mdash; 1 byte is 1-in-256 and shown as "?".
+      <b>clock</b> is that node's time minus ours, read from its own signed advert timestamp and
+      only ever from a zero-hop advert &mdash; a relayed one would measure flood delay instead
     </div>
     <div style="overflow-x:auto"><table><thead><tr><th>node</th><th>hops</th><th>we hear</th>
-      <th>hears us</th><th>SNR</th><th>relays</th><th>dist</th><th>last</th></tr></thead>
-    <tbody id="dash-nearby"><tr><td colspan=8 class=mut>listening...</td></tr></tbody></table></div>
+      <th>hears us</th><th>SNR</th><th>relays</th><th>dist</th><th>clock</th><th>last</th></tr></thead>
+    <tbody id="dash-nearby"><tr><td colspan=9 class=mut>listening...</td></tr></tbody></table></div>
   </div>
   <div class="card"><h3>GPS &amp; clock <span class="mut" id="gps-hdr" style="font-weight:400;font-size:11px"></span></h3>
     <div id="gps-body" class="mut">-</div>
@@ -231,13 +238,39 @@ tbody.directonly tr:not(.directrow){display:none}
       <button class="sec" onclick="fieldSave('gps on','pw-status')">Power up</button></div>
     <div id="pw-status" class="mut" style="font-size:12px"></div>
   </div>
+  <div class="card"><h3>MQTT uplink <span class="mut" id="mqtt-state" style="font-weight:400;font-size:11px"></span></h3>
+    <div class="mut" style="font-size:12px;margin-bottom:8px">Publishes what this node hears to an MQTT broker.
+    Authentication to the curated brokers uses a <b>token signed by this node's own mesh identity</b> — there is no
+    password to set; the broker verifies the signature against the public key in the token. A <b>custom</b> broker
+    skips that and uses the username/password below instead.</div>
+    <div id="mqtt-brokers" style="margin-bottom:8px"></div>
+    <div class="row" style="gap:6px;flex-wrap:wrap">
+      <input id="mq-host" placeholder="custom host" style="width:190px" data-1p-ignore>
+      <input id="mq-port" placeholder="port" style="width:70px" data-1p-ignore>
+      <select id="mq-transport" style="width:90px"><option value="tcp">mqtt://</option><option value="wss">wss://</option></select>
+    </div>
+    <div class="row" style="gap:6px;flex-wrap:wrap;margin-top:4px">
+      <input id="mq-user" placeholder="username" style="width:150px" data-1p-ignore>
+      <input id="mq-pass" type="password" placeholder="password (write-only)" style="width:190px" data-1p-ignore>
+      <button onclick="mqttSaveCustom()">save custom broker</button>
+    </div>
+    <div class="row" style="gap:6px;flex-wrap:wrap;margin-top:6px">
+      <input id="mq-iata" placeholder="IATA" style="width:80px" data-1p-ignore>
+      <input id="mq-email" placeholder="owner email" style="width:190px" data-1p-ignore>
+      <button onclick="mqttSaveMeta()">save</button>
+      <span id="mqtt-status" class="mut" style="font-size:12px"></span>
+    </div>
+  </div>
   <div class="card"><h3>Identity slots</h3>
-    <div class="mut" style="font-size:12px;margin-bottom:8px">Each enabled slot is a full extra chat identity — its own
-    keypair, contacts and app connection on its own TCP port. Enabling and disabling take effect <b>immediately, no
-    reboot</b>; a disabled slot goes off air and its identity and data stay on the filesystem, so re-enabling brings the
-    same node back. (Its RAM is only reclaimed at the next restart.)</div>
+    <div class="mut" style="font-size:12px;margin-bottom:8px">Five spare radio ports, each able to run a full extra
+    identity with its own keypair and storage. A <b>chat</b> slot is a companion node driven by the phone app on its own
+    TCP port; a <b>room</b> slot is a room server managed here. Switching a slot <b>off</b> takes effect immediately;
+    changing it between chat and room needs a <b>reboot</b>, because the running node is the wrong class to convert in
+    place. A slot's identity and files are keyed to the slot, not to its type, so retyping never loses a keypair — and a
+    slot that is off keeps everything on the filesystem, ready to come back.</div>
     <div id="slots-list" class="mut" style="font-size:13px">loading...</div>
     <div id="slots-status" class="mut" style="font-size:12px;margin-top:6px"></div>
+    <div id="slot-admin" style="margin-top:10px"></div>
   </div>
   <div class="card"><h3>Panel</h3>
     <div class="row"><a href="/app" style="color:var(--acc)">Classic panel (/app)</a>
@@ -273,7 +306,11 @@ tbody.directonly tr:not(.directrow){display:none}
       <span class="relay sure">&#8618; relayed</span> a neighbour passed on something we sent (2-byte+ hash — certain) ·
       <span class="relay weak">&#8618; relayed?</span> same, but a 1-byte hash, so ~1 in 256 could be coincidence
     </div>
-  <div style="overflow-x:auto"><table><thead><tr><th>time</th><th>dir</th><th>route</th><th>type</th><th>src</th><th>info</th><th>len</th><th>SNR</th><th>RSSI</th></tr></thead>
+  <div style="margin:8px 0 10px">
+    <canvas id="air-tl" height="118" style="width:100%;height:118px;display:block"></canvas>
+    <div class="mut" style="font-size:11px;margin-top:3px" id="air-tl-legend">collecting…</div>
+  </div>
+  <div style="overflow-x:auto"><table><thead><tr><th>time</th><th>air</th><th>CR</th><th>SNR</th><th>RSSI</th><th>len</th><th>dir</th><th>route</th><th>type</th><th>hash</th><th>src</th><th>info</th></tr></thead>
   <tbody id="pkt-rows"></tbody></table></div></div>
 </div>
 
@@ -479,6 +516,8 @@ function portState(p){
   return {cls:"", word:"active "+age(p.idle_s)+" ago"};
 }
 const LABELS={repeater:"REPEATER", room:"ROOM", companion:"CHAT"};
+// a slot is labelled by its role, with its slot name kept as the subtitle
+const ROLE_LABELS={room:"ROOM", chat:"CHAT"};
 function renderRail(){
   if(!lastDebug||!lastDebug.ports) return;
   const rp=(lastDebug.stats.repeater||{}).packets||{};
@@ -488,11 +527,15 @@ function renderRail(){
     const st=portState(p);
     const pk=selfIds[p.name]||"";
     let detail;
-    if(p.name==="repeater") detail=(rp.flood_tx||0)+" fwd · "+p.heard+"/"+p.sent+" heard back";
-    else if(p.name==="room") detail=p.tx+" sent · "+p.rx+" rx";
-    else detail=contacts.length+" contacts · app "+(lastDebug.companion.client?"connected":"—");
+    // Describe a port by what it RUNS, not by where it sits in the list: a
+    // slot may be a room, and quoting contacts/app-connected at it is wrong.
+    const role=p.role||p.name;
+    if(role==="repeater") detail=(rp.flood_tx||0)+" fwd · "+p.heard+"/"+p.sent+" heard back";
+    else if(role==="room") detail=p.tx+" sent · "+p.rx+" rx";
+    else if(role==="companion") detail=contacts.length+" contacts · app "+(lastDebug.companion.client?"connected":"—");
+    else detail=p.tx+" sent · "+p.rx+" rx";
     h+="<div class=role><div class=rname><span class='dot "+st.cls+"'></span>"+
-      (LABELS[p.name]||p.name.toUpperCase())+"</div>"+
+      (LABELS[p.name]||ROLE_LABELS[p.role]||p.name.toUpperCase())+(LABELS[p.name]?"":" <span class=mut style='font-size:10px'>"+esc(p.name)+"</span>")+"</div>"+
       "<div>"+esc(railNames[p.name]||(p.name==="companion"?($("self-name").textContent||"").replace(/[()]/g,""):""))+"</div>"+
       (pk?"<div class=rkey title='click to copy prefix' onclick=\"copyText('"+pk+"')\">"+pk+"</div>":"")+
       "<div class=rstat>"+esc(st.word)+"</div>"+
@@ -686,6 +729,404 @@ function annot(p){
   return {src,infoHtml,relay,hops};
 }
 
+
+
+// Time on air. At this node's preset a small packet is already ~140 ms and a
+// full one ~800 ms, so this is the dominant cost of everything the mesh does —
+// worth seeing per packet rather than inferring from length.
+function airCell(p){
+  if(!p.a) return "<td class=mut>-</td>";
+  // colour by how much of the channel one packet occupies: a mesh lives or dies
+  // on airtime, and 500 ms is already a long time to hold a shared channel
+  const c = p.a>=600?"#e05d5d" : p.a>=300?"#e0b34d" : "#8b98a5";
+  // a receive is costed at the CR its own header carried, not at ours
+  const why = (p.d==="rx"&&p.cr) ? "time on air, at the 4/"+p.cr+" this packet was sent with"
+                                 : "time on air at the current radio settings";
+  // the collision mark lands here, filled in later — how much of this airtime
+  // was shared with another packet belongs next to the airtime itself
+  return "<td style='color:"+c+";font-variant-numeric:tabular-nums' title='"+why+"'>"+
+    (p.a>=1000?(p.a/1000).toFixed(2)+"s":p.a+"ms")+
+    "<span id='ca-"+p.s+"'></span></td>";
+}
+
+// Coding rate, as the 4/x denominator the LoRa header carries. It is the other
+// half of the airtime story next to the air column: 4/8 spends 60% longer on
+// the channel than 4/5 for the same bytes, buying error correction with it.
+//
+// A RECEIVED packet's CR is the sender's own — it travels in the explicit
+// header, so a neighbour running a different one still decodes here — and that
+// is exactly the case worth flagging rather than assuming away: it means that
+// node is on a different preset to this one.
+let radioCr=0;                       // CR this node transmits at (from the API)
+function crCell(p){
+  if(!p.cr) return "<td class=mut>-</td>";
+  const odd = p.d==="rx" && radioCr && p.cr!==radioCr;
+  return "<td"+(odd?" style='color:#e0b34d' title='sender used 4/"+p.cr+
+    ", this node runs 4/"+radioCr+"'":" class=mut")+">4/"+p.cr+"</td>";
+}
+
+// ---- airtime timeline ------------------------------------------------------
+// Occupancy of the shared channel over the last minute. Each bar is one
+// packet: WIDTH is the time it held the channel, HEIGHT is the SNR it arrived
+// at, and COLOUR is the packet hash — so a flood and every forward of it share
+// a colour, and the cost of that redundancy is visible as width rather than
+// inferred from a row count.
+//
+// The two timestamps mean different things and must be drawn differently: a
+// transmit is logged when it STARTS (SharedRadioCore::tryStartSend), a receive
+// only once the packet has fully arrived. So a TX bar runs forward from its
+// timestamp and an RX bar runs backward to it. Drawing both the same way would
+// shift every received packet one airtime to the right — at this preset ~200 ms,
+// enough to make a forward look like it preceded the packet it was forwarding.
+// A minute, not five: at this preset a packet is a few hundred ms, so a 5-minute
+// window squeezed each one into a sliver too narrow to compare and packed them
+// too tightly to see which overlapped which. A minute is wide enough that a
+// collision is visible as a collision.
+const AIR_WINDOW_MS=60000;
+const SNR_MIN=-20, SNR_MAX=12;       // dB range mapped onto bar height
+let airLog=[], noiseLog=[];
+
+// ---- collisions ------------------------------------------------------------
+// This radio decodes one signal at a time, so two packets cannot share the
+// channel and both survive. That makes an overlap between two airtime windows
+// arithmetic rather than a guess: the windows are built from measured
+// timestamps and real airtimes (a receive is stamped when it completes, a
+// transmit when it starts), so if they intersect, two transmitters were talking
+// at once.
+//
+// Three signals, strongest first:
+//   1. an overlap where one side failed, or where one side is our own transmit
+//   2. a CRC failure with an intact header — the payload was hit part-way
+//      through, which is what a collision does to a packet; a damaged header is
+//      what distance does to one
+//   3. a strong signal carrying the SNR of a weak one — another transmitter's
+//      energy lands in the RSSI without landing in the wanted signal
+//
+// The thing this CANNOT see is the ordinary case: the receiver locks onto one
+// signal, so the interferer usually never becomes a log entry at all. A mark
+// here is strong evidence of a collision; the absence of one is no evidence of
+// its absence, and the legend says so.
+
+// Two CLEAN receives that overlap are physically impossible, so such a pair is
+// pure timestamp skew — the log stamp is taken in the main loop, not in the
+// radio's ISR. Live traces put that skew at 4-7 ms, so under this is noise,
+// over it is real, and impossible pairs are dropped rather than reported.
+const COLL_JITTER_MS=12;
+// ---- usable SNR floor ------------------------------------------------------
+// The lowest SNR we have actually pulled a whole packet out of. This is an
+// OBSERVED bound on what this receiver can do, not a theoretical one, and it is
+// one-sided: it says "something this weak decoded", never "anything weaker
+// fails". A quiet hour with only strong neighbours talking leaves it looking
+// optimistic, which is why it is drawn as a trailing minimum rather than a
+// single all-time figure — one lucky packet should not define the line forever.
+const SNR_FLOOR_WINDOW_MS=300000;    // trailing 5 minutes
+let snrLog=[];
+// The chip stops reporting SNR somewhere around +12 dB, so cap the expectation
+// there before holding a packet's SNR against its RSSI.
+const SNR_CEIL_DB=12, SNR_DEFICIT_DB=8;
+const PKT_ERR_CRC=-7;                // RadioLib's RADIOLIB_ERR_CRC_MISMATCH
+
+function analyseCollisions(){
+  const es=airLog.slice().sort((a,b)=>a.start-b.start);
+  for(const e of es){ e.hit=null; e.shape=null; }
+  for(let i=0;i<es.length;i++){
+    for(let j=i+1;j<es.length;j++){
+      const a=es[i], b=es[j];
+      if(b.start>=a.end) break;              // sorted by start: nothing later can reach back
+      const lap=Math.min(a.end,b.end)-b.start;
+      if(lap<COLL_JITTER_MS) continue;
+      if(a.rx&&b.rx&&!a.err&&!b.err) continue;   // impossible, so it is skew, not a collision
+      const kind=(!a.rx||!b.rx)?"ours":"hidden";
+      // keep the worst overlap per packet: one badge that means something beats
+      // a list of near-misses
+      if(!a.hit||lap>a.hit.lap) a.hit={other:b,lap,kind};
+      if(!b.hit||lap>b.hit.lap) b.hit={other:a,lap,kind};
+    }
+  }
+  // Lone evidence, for the collisions whose other half we never heard — which
+  // is most of them.
+  const nf=noiseLog.length?noiseLog[noiseLog.length-1].n:null;
+  for(const e of es){
+    if(!e.rx) continue;
+    const why=[];
+    if(e.err&&e.code===PKT_ERR_CRC) why.push("header parsed but the payload did not — something arrived mid-frame");
+    if(nf!==null&&e.rssi!=null&&e.snr!=null){
+      const deficit=Math.min(e.rssi-nf,SNR_CEIL_DB)-e.snr;
+      if(deficit>=SNR_DEFICIT_DB){
+        why.push("SNR "+deficit.toFixed(0)+" dB below what "+e.rssi+" dBm over a "+nf+
+                 " dBm floor should give — strong signal, ruined by something");
+      }
+    }
+    if(why.length) e.shape=why;
+  }
+  return es;
+}
+
+// WHO was transmitting, which is the question a collision raises: two radios
+// were keying up at once and the useful thing to know is which two.
+//
+// The last hop a packet carries is the node that put it on the air — every
+// forwarder appends its own hash, so the tail of the path is the transmitter,
+// not the originator. At zero hops there is no path and the two are the same
+// node, so the identity comes from the payload instead: an advert's public key,
+// or the source hash every other type carries in its second byte.
+function txPrefix(p){
+  if(p.d!=="rx") return {label:p.d};                    // our own transmit: we know exactly
+  const q=parsePkt(p);
+  if(!q) return null;
+  if(q.groups.length) return {g:q.groups[q.groups.length-1], note:"last hop, so this is who transmitted it"};
+  if(q.type===4&&q.pay.length>=32) return {g:q.pay.slice(0,4), note:"zero hops, so the originator transmitted it"};
+  if(q.pay.length>=2) return {g:[q.pay[1]], note:"zero hops, so the originator transmitted it"};
+  return null;
+}
+
+// A hoverable prefix, matched against the known-nodes database the same way
+// path hops are — contacts, our own identities, heard neighbours.
+function prefixChip(t){
+  if(!t) return "<span class=mut>?</span>";
+  if(t.label) return "<span class=hop title='transmitted by this node'>"+esc(t.label)+"</span>";
+  const cands=hopCands(t.g);
+  const tip=(t.note?t.note+" — ":"")+
+    (cands.length?"could be: "+cands.join(", "):"no known node matches hash "+gHex(t.g));
+  return "<span class=hop title=\""+esc(tip)+"\">"+gHex(t.g)+"</span>";
+}
+
+// The pair, for the info column: which two transmitters were talking over each
+// other. Hover either prefix for who we think it was.
+function collInfo(e){
+  if(!e.hit||!e.pkt) return "";
+  return "<span class=collx style='margin:0'>!</span> "+prefixChip(txPrefix(e.pkt))+
+    " &#10005; "+prefixChip(txPrefix(e.hit.other.pkt))+" &nbsp;";
+}
+
+// The mark that sits beside a packet's airtime. A proven overlap says how many
+// of those milliseconds were shared with another packet — that number is the
+// damage. A suspicion gets the bare mark and explains itself only on hover,
+// because it has no millisecond to offer: nothing else was ever decoded.
+function collMark(e){
+  if(e.hit){
+    const o=e.hit.other, when=stamp(o.rx?o.end:o.start);
+    const who=!e.rx ? "this transmit overlapped a packet arriving"
+            : !o.rx ? "our own transmit ran over this"
+                    : "another transmitter ran over this";
+    return "<span class='collx' title=\""+who+" — "+e.hit.lap+" ms shared with "+
+      (o.rx?"the packet received":"the transmit started")+" at "+when+
+      (o.err?", which failed":"")+". Two transmitters on the channel at once.\">!"+
+      e.hit.lap+"ms</span>";
+  }
+  if(e.shape){
+    return "<span class='collx maybe' title=\""+esc(e.shape.join("; "))+
+      ". Nothing in the log overlaps it, so there is no figure to give — the "+
+      "other transmitter was never decoded, which is the normal case.\">!</span>";
+  }
+  return "";
+}
+
+// Marks are painted after the fact: a packet only turns out to have collided
+// once the packet that hit it has been received, which is always later.
+function paintCollisions(es){
+  for(const e of es){
+    const air=$("ca-"+e.s);
+    if(air) air.innerHTML=collMark(e);
+    const info=$("ci-"+e.s);
+    if(info) info.innerHTML=collInfo(e);
+  }
+}
+
+function stamp(t){
+  const d=new Date(Date.now()-((devNow||0)-t));
+  return d.toTimeString().slice(0,8)+"."+String(d.getMilliseconds()).padStart(3,"0");
+}
+
+// Diagonal hatch, used to mark packets that failed CRC. A colour alone would
+// not do: a corrupt packet still has a hash and a colour, and the point is to
+// see at a glance that a chunk of airtime was spent and produced nothing.
+function hatch(ctx,x,y,w,h,col){
+  ctx.save(); ctx.beginPath(); ctx.rect(x,y,w,h); ctx.clip();
+  ctx.strokeStyle=col; ctx.lineWidth=1;
+  for(let i=-h;i<w+h;i+=4){
+    ctx.beginPath(); ctx.moveTo(x+i,y+h); ctx.lineTo(x+i+h,y); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// Ring a bar that collided. The shared slice of time is drawn as well, but at a
+// 60-second window a 38 ms overlap is a third of a pixel — accurate and
+// invisible. Outlining both packets is what actually shows you the pair.
+function outline(ctx,x,y,w,h){
+  ctx.strokeStyle="#e05d5d"; ctx.lineWidth=1;
+  ctx.strokeRect(Math.round(x)-0.5,Math.round(y)-0.5,Math.round(w)+1,Math.round(h)+1);
+}
+
+function drawAirTimeline(){
+  const cv=$("air-tl"); if(!cv) return;
+  const w=cv.clientWidth||600;
+  if(cv.width!==w) cv.width=w;            // match CSS width or it renders blurry
+  const h=cv.height, ctx=cv.getContext("2d");
+  ctx.clearRect(0,0,w,h);
+  const now=devNow||0, t0=now-AIR_WINDOW_MS;
+  airLog=airLog.filter(p=>p.end>t0);
+  noiseLog=noiseLog.filter(n=>n.t>t0);
+  const es=analyseCollisions();
+  paintCollisions(es);
+
+  // bands: rx bars grow up from the midline, tx down from it, noise below
+  const rxBase=58, txTop=60, txH=16, nsTop=84, nsH=26;
+  const X=t=>(t-t0)/AIR_WINDOW_MS*w;
+
+  ctx.strokeStyle="#243040"; ctx.lineWidth=1; ctx.font="9px system-ui";
+  for(let s=0;s<=6;s++){                  // a gridline every 10 s across the minute
+    const x=Math.round(w-(s/6)*w)+0.5;
+    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,nsTop+nsH); ctx.stroke();
+    if(s){ ctx.fillStyle="#5c6875"; ctx.fillText("-"+(s*10)+"s",Math.max(2,x+2),h-2); }
+  }
+  ctx.strokeStyle="#35414f";
+  ctx.beginPath(); ctx.moveTo(0,rxBase+0.5); ctx.lineTo(w,rxBase+0.5); ctx.stroke();
+  ctx.fillStyle="#5c6875";
+  ctx.fillText("rx  ↑ SNR",2,10); ctx.fillText("tx",2,txTop+12); ctx.fillText("noise",2,nsTop+10);
+
+  let busy=0, crc=0;
+  for(const p of airLog){
+    const x1=X(p.start), bw=Math.max(1.5,X(p.end)-x1);
+    busy+=Math.min(p.end,now)-Math.max(p.start,t0);
+    const col=p.ph?hashColor(p.ph):"hsl(210,10%,45%)";
+    ctx.fillStyle=col;
+    if(p.rx){
+      // height carries SNR; a floor of 3px keeps a very weak packet visible
+      const f=Math.max(0,Math.min(1,((p.snr==null?SNR_MIN:p.snr)-SNR_MIN)/(SNR_MAX-SNR_MIN)));
+      const bh=Math.max(3,Math.round(f*(rxBase-6)));
+      ctx.fillRect(x1,rxBase-bh,bw,bh);
+      if(p.err){ crc++; hatch(ctx,x1,rxBase-bh,bw,bh,"#0d1218"); }
+      if(p.hit) outline(ctx,x1,rxBase-bh,bw,bh);
+    }else{
+      ctx.fillRect(x1,txTop,bw,txH);
+      if(p.hit) outline(ctx,x1,txTop,bw,txH);
+    }
+  }
+
+  // The usable-SNR floor, on the same scale as the bars so it can be read
+  // against them: every bar standing above the line is a packet that arrived
+  // with margin to spare, and one touching it is a packet we only just got.
+  // Sampled across the window rather than drawn as one flat line, because the
+  // floor moves — it is the trailing minimum, and a weak decode drops it for
+  // the next five minutes and then lets it recover.
+  snrLog=snrLog.filter(v=>v.t>now-SNR_FLOOR_WINDOW_MS*2);
+  const snrY=v=>rxBase-Math.max(3,Math.round(Math.max(0,Math.min(1,(v-SNR_MIN)/(SNR_MAX-SNR_MIN)))*(rxBase-6)));
+  let floorNow=null;
+  if(snrLog.length){
+    ctx.strokeStyle="#5fd694"; ctx.lineWidth=1; ctx.setLineDash([3,3]);
+    ctx.beginPath();
+    let drawn=false;
+    for(let px=0;px<=w;px+=6){
+      const t=t0+(px/w)*AIR_WINDOW_MS;
+      let lo=null;
+      for(const v of snrLog){ if(v.t<=t&&v.t>t-SNR_FLOOR_WINDOW_MS&&(lo===null||v.snr<lo)) lo=v.snr; }
+      if(lo===null){ drawn=false; continue; }
+      floorNow=lo;
+      const y=snrY(lo)+0.5;
+      drawn?ctx.lineTo(px,y):ctx.moveTo(px,y);
+      drawn=true;
+    }
+    ctx.stroke(); ctx.setLineDash([]);
+    if(floorNow!==null){
+      ctx.fillStyle="#5fd694";
+      ctx.fillText(floorNow.toFixed(1)+" dB floor",2,Math.max(8,snrY(floorNow)-3));
+    }
+  }
+
+  // Collisions. A proven overlap is drawn as the slice of time the two packets
+  // actually shared — that band IS the collision, and its width is how much of
+  // one packet the other one ruined. A packet whose damage merely looks like a
+  // collision gets a caret instead: same suspicion, weaker evidence, and the
+  // difference has to be visible or the picture overclaims.
+  let pairs=new Set(), shaped=0;
+  for(const p of airLog){
+    if(p.hit){
+      const o=p.hit.other, key=Math.min(p.s,o.s)+":"+Math.max(p.s,o.s);
+      if(pairs.has(key)) continue;
+      pairs.add(key);
+      const xa=X(Math.max(p.start,o.start)), xb=Math.max(X(Math.min(p.end,o.end)),xa+2);
+      ctx.fillStyle="rgba(224,93,93,0.28)";
+      ctx.fillRect(xa,0,xb-xa,nsTop);
+      ctx.strokeStyle="#e05d5d"; ctx.lineWidth=1;
+      ctx.beginPath();
+      ctx.moveTo(xa+0.5,0); ctx.lineTo(xa+0.5,nsTop);
+      ctx.moveTo(xb-0.5,0); ctx.lineTo(xb-0.5,nsTop);
+      ctx.stroke();
+    }else if(p.shape){
+      shaped++;
+      const xm=(X(p.start)+X(p.end))/2;
+      ctx.fillStyle="#d99b6c";
+      ctx.beginPath(); ctx.moveTo(xm,7); ctx.lineTo(xm-4,1); ctx.lineTo(xm+4,1); ctx.fill();
+    }
+  }
+
+  // noise floor over the window, on its own scale so it cannot be confused with SNR
+  if(noiseLog.length>1){
+    const vs=noiseLog.map(n=>n.n);
+    let lo=Math.min(...vs), hi=Math.max(...vs);
+    if(hi-lo<4){ const mid=(hi+lo)/2; lo=mid-2; hi=mid+2; }
+    ctx.strokeStyle="#4da3ff"; ctx.lineWidth=1.2; ctx.beginPath();
+    noiseLog.forEach((n,i)=>{
+      const x=X(n.t), y=nsTop+nsH-((n.n-lo)/(hi-lo))*nsH;
+      i?ctx.lineTo(x,y):ctx.moveTo(x,y);
+    });
+    ctx.stroke();
+    ctx.fillStyle="#5c6875";
+    ctx.fillText(hi.toFixed(0),w-24,nsTop+8); ctx.fillText(lo.toFixed(0),w-24,nsTop+nsH-1);
+  }
+
+  const pct=busy/AIR_WINDOW_MS*100;
+  const cls=pct>=25?"err":pct>=10?"":"ok";
+  const style=cls===""?" style='color:#e0b34d'":"";
+  const nf=noiseLog.length?noiseLog[noiseLog.length-1].n:null;
+  $("air-tl-legend").innerHTML=
+    "last 60 s &middot; <b>"+airLog.length+"</b> packets &middot; <b>"+(busy/1000).toFixed(2)+
+    "s</b> on air &middot; busy <span class='"+cls+"'"+style+">"+pct.toFixed(1)+"%</span>"+
+    (crc?" &middot; <span class=err>"+crc+" CRC fail</span>":"")+
+    (pairs.size?" &middot; <span class=err>"+pairs.size+" collision"+(pairs.size>1?"s":"")+"</span>":"")+
+    (shaped?" &middot; <span style='color:#d99b6c'>"+shaped+" collision-shaped</span>":"")+
+    (nf!==null?" &middot; noise <b>"+nf+"</b> dBm":"")+
+    (floorNow!==null?" &middot; decoded down to <b title='lowest SNR a whole packet has"+
+      " survived in the last 5 min — an observed bound, not a limit: nothing weaker"+
+      " may have been sent'>"+floorNow.toFixed(1)+"</b> dB":"")+
+    " <span class=mut>&mdash; width = airtime, height = SNR, colour = packet hash,"+
+    " hatched = CRC failure, red band = two transmitters at once, caret = damage that"+
+    " looks like a collision whose other half we never heard, dashed green = lowest"+
+    " SNR still decoding</span>";
+}
+
+// ---- packet hash colouring ----------------------------------------------
+// MeshCore's packet hash covers the PAYLOAD and not the path, so every copy of
+// one flood — the originator's transmission and each repeater's forward — shares
+// a hash. Colouring by it turns "is this new traffic or the same packet going
+// round again?" into something you can see without reading a single field.
+//
+// The colour is derived from the hash itself rather than allocated from a
+// palette, so it is stable across reloads and across devices: the same packet is
+// the same colour on two different nodes watching the same mesh.
+const pktSeen=new Map();          // hash -> times seen in this session
+function hashHue(h){
+  let x=0;
+  for(let i=0;i<h.length;i++) x=(x*31+h.charCodeAt(i))>>>0;
+  return x%360;
+}
+function hashColor(h){ return "hsl("+hashHue(h)+",80%,74%)"; }
+function hashCell(p){
+  if(!p.ph) return "<td class=mut>-</td>";
+  const n=(pktSeen.get(p.ph)||0)+1;
+  pktSeen.set(p.ph,n);
+  // bound the map: the trace is a rolling window, not a permanent ledger
+  if(pktSeen.size>800){ const k=pktSeen.keys().next().value; pktSeen.delete(k); }
+  const hue=hashHue(p.ph);
+  const style="background:hsl("+hue+",55%,20%);color:"+hashColor(p.ph)+";"+
+    "padding:1px 5px;border-radius:4px;font-family:monospace;font-size:11px";
+  // A repeat is the interesting case, so say so explicitly as well as by colour
+  const rep=n>1?" <span class=mut style='font-size:10px' title='copy number "+n+
+    " of this packet seen by this node'>&#8635;"+n+"</span>":"";
+  return "<td><span style='"+style+"' title=\"MeshCore packet hash (payload only, "+
+    "path excluded) — copies of one packet share it\">"+p.ph+"</span>"+rep+"</td>";
+}
 // CSS-driven so rows arriving from the next poll obey it without re-filtering
 function applyPktFilter(){
   $("pkt-rows").classList.toggle("directonly", $("pkt-direct-only").checked);
@@ -694,11 +1135,23 @@ async function pollPkts(){
   try{
     const d=await (await api("/api/multi/packets?after="+lastSeq)).json();
     devNow=d.now;
+    if(d.cr) radioCr=d.cr;
     for(const p of d.pkts){
       lastSeq=Math.max(lastSeq,p.s);
+      if(p.a){   // see drawAirTimeline for why rx and tx anchor differently
+        const rx=p.d==="rx";
+        // rssi and the error code ride along for the collision heuristics; the
+        // seq is what ties an entry back to its row once a later packet reveals
+        // that this one was collided with
+        airLog.push({start:rx?p.t-p.a:p.t, end:rx?p.t:p.t+p.a, air:p.a, ph:p.ph, rx,
+                     snr:rx?p.snr:null, err:p.e===1, s:p.s, rssi:rx?p.rssi:null, code:p.x, pkt:p});
+        // only a WHOLE packet counts towards the usable floor — a CRC failure
+        // proves the opposite of what this line is measuring
+        if(rx&&p.e!==1&&p.snr!=null) snrLog.push({t:p.t,snr:p.snr});
+        if(airLog.length>400) airLog.splice(0,airLog.length-400);
+      }
       const tr=document.createElement("tr");
-      const wd=new Date(Date.now()-(devNow-p.t));
-      const when=wd.toTimeString().slice(0,8)+"."+String(wd.getMilliseconds()).padStart(3,"0");
+      const when=stamp(p.t);
       const rx=p.d==="rx";
       if(p.e===1){          // RX failure, labelled by RadioLib error code
         const why=p.x===-7?"CRC mismatch":p.x===-16?"LoRa header damaged":
@@ -710,19 +1163,23 @@ async function pollPkts(){
         // rendered in the same columns as a good packet — the RX-CRC label and
         // the modal's banner carry the "this may be wrong" warning
         const rt=p.raw?ROUTES[p.h&3]:"-", ty=p.raw?PTYPES[(p.h>>2)&15]:"-";
-        tr.innerHTML="<td>"+when+"</td><td style='color:#e08a4d' title='"+esc(why)+"'>"+
-          (p.x===-7?"RX-CRC":"RX-ERR")+"</td><td>"+rt+"</td><td>"+ty+"</td><td>"+
-          esc(a.src)+"</td><td class=mut>"+(p.raw?a.infoHtml:esc(why))+"</td><td>"+(p.l||"-")+"</td><td>"+
-          (p.snr?snrSpan(p.snr):"")+"</td><td>"+(p.rssi?rssiSpan(p.rssi):"")+"</td>";
+        tr.innerHTML="<td>"+when+"</td>"+airCell(p)+crCell(p)+
+          "<td>"+(p.snr?snrSpan(p.snr):"")+"</td><td>"+(p.rssi?rssiSpan(p.rssi):"")+"</td><td>"+(p.l||"-")+"</td>"+
+          "<td style='color:#e08a4d' title='"+esc(why)+"'>"+
+          (p.x===-7?"RX-CRC":"RX-ERR")+"</td><td>"+rt+"</td><td>"+ty+"</td>"+hashCell(p)+"<td>"+
+          esc(a.src)+"</td><td class=mut><span id='ci-"+p.s+"'></span>"+
+          (p.raw?a.infoHtml:esc(why))+"</td>";
         if(p.raw){ tr.style.cursor="pointer"; tr.title="click to decode (corrupt)";
           tr.onclick=()=>openPktModal(p,when,why); }
       } else if(p.e===3){   // send deferred: a sibling identity held the radio
         const owner=(p.x>=0&&lastDebug)?(["repeater","room","companion","chat1","chat2","chat3","chat4","chat5"][p.x]||("port "+p.x)):"another identity";
-        tr.innerHTML="<td>"+when+"</td><td style='color:#e0b34d'>TX-BUSY:"+esc(p.d)+"</td><td colspan=4 class=mut>"+
-          "send deferred — "+esc(owner)+" was transmitting (will retry)</td><td>-</td><td></td><td></td>";
+        tr.innerHTML="<td>"+when+"</td>"+airCell(p)+crCell(p)+"<td class=mut>-</td><td class=mut>-</td><td class=mut>-</td>"+
+          "<td style='color:#e0b34d'>TX-BUSY:"+esc(p.d)+"</td><td colspan=5 class=mut><span id='ci-"+p.s+"'></span>"+
+          "send deferred — "+esc(owner)+" was transmitting (will retry)</td>";
       } else if(p.e===2){   // TX never completed
-        tr.innerHTML="<td>"+when+"</td><td style='color:#e05d5d'>TX-FAIL:"+esc(p.d)+"</td><td colspan=4 class=mut>"+
-          "send timed out before TX-done (radio contention?)</td><td>-</td><td></td><td></td>";
+        tr.innerHTML="<td>"+when+"</td>"+airCell(p)+crCell(p)+"<td class=mut>-</td><td class=mut>-</td><td class=mut>-</td>"+
+          "<td style='color:#e05d5d'>TX-FAIL:"+esc(p.d)+"</td><td colspan=5 class=mut><span id='ci-"+p.s+"'></span>"+
+          "send timed out before TX-done (radio contention?)</td>";
       } else {
         const a=annot(p);
         // An empty path means no repeater has appended its hash yet, so this is
@@ -745,9 +1202,11 @@ async function pollPkts(){
             "\">&#8618; relayed "+esc(a.relay.role)+(sure?"":"?")+"</span>";
           tr.className="relayrow";
         }
-        tr.innerHTML="<td>"+when+"</td><td class="+(rx?"ok":"err")+">"+(rx?"RX":"TX:"+p.d)+"</td><td>"+
-          ROUTES[p.h&3]+"</td><td>"+PTYPES[(p.h>>2)&15]+"</td><td>"+esc(a.src)+"</td><td class=mut>"+badge+a.infoHtml+
-          "</td><td>"+p.l+"</td><td>"+(rx?snrSpan(p.snr):"")+"</td><td>"+(rx?rssiSpan(p.rssi):"")+"</td>";
+        tr.innerHTML="<td>"+when+"</td>"+airCell(p)+crCell(p)+
+          "<td>"+(rx?snrSpan(p.snr):"")+"</td><td>"+(rx?rssiSpan(p.rssi):"")+"</td><td>"+p.l+"</td>"+
+          "<td class="+(rx?"ok":"err")+">"+(rx?"RX":"TX:"+p.d)+"</td><td>"+
+          ROUTES[p.h&3]+"</td><td>"+PTYPES[(p.h>>2)&15]+"</td>"+hashCell(p)+"<td>"+esc(a.src)+
+          "</td><td class=mut><span id='ci-"+p.s+"'></span>"+badge+a.infoHtml+"</td>";
         tr.style.cursor="pointer";
         tr.title="click to decode";
         tr.onclick=()=>openPktModal(p,when);
@@ -755,7 +1214,13 @@ async function pollPkts(){
       const tb=$("pkt-rows"); tb.insertBefore(tr,tb.firstChild);
       while(tb.children.length>120) tb.removeChild(tb.lastChild);
     }
+    if(lastDebug&&lastDebug.radio&&typeof lastDebug.radio.noise==="number"&&devNow){
+      const last=noiseLog[noiseLog.length-1];
+      if(!last||devNow-last.t>2000) noiseLog.push({t:devNow,n:lastDebug.radio.noise});
+      if(noiseLog.length>600) noiseLog.splice(0,noiseLog.length-600);
+    }
     $("pkt-count").textContent="(seq "+lastSeq+")";
+    drawAirTimeline();
   }catch(e){}
 }
 
@@ -763,6 +1228,25 @@ async function pollPkts(){
 const KINDS=["?","chat","repeater","room","sensor"];
 function age(sec){ if(sec<=0)return"-"; if(sec<90)return sec+"s"; if(sec<5400)return Math.round(sec/60)+"m";
   if(sec<129600)return Math.round(sec/3600)+"h"; return Math.round(sec/86400)+"d"; }
+// A peer's clock minus ours, signed. Colour is about consequence, not neatness:
+// MeshCore stamps messages and adverts with the SENDER's clock, so a node tens
+// of seconds out shows its messages in the wrong order in any client that sorts
+// by timestamp, and one minutes out makes advert freshness comparisons wrong.
+// Blank (not zero) when we have never heard the node advert at zero hops.
+function skewCell(p){
+  if(p.clk_d===undefined||p.clk_d===null) return "<span class=mut>-</span>";
+  const d=p.clk_d, a=Math.abs(d);
+  const mag=a<90?a+"s":a<5400?Math.round(a/60)+"m":a<129600?Math.round(a/3600)+"h":Math.round(a/86400)+"d";
+  const txt=(d<0?"-":"+")+mag;
+  // deltas are quantised to whole seconds and the advert sat in a queue for
+  // some of that, so anything inside a few seconds is measurement noise
+  const style=a<=5?"class=ok":a<=60?"style='color:#e0b34d'":"class=err";
+  // age() renders 0 as "-", which reads as "unknown" rather than "just now"
+  const when=p.clk_age_s>0?age(p.clk_age_s)+" ago":"just now";
+  const t="their clock is "+(d<0?mag+" behind":d>0?mag+" ahead of":"level with")+" ours · measured "+
+          when+" from "+p.clk_n+" zero-hop advert"+(p.clk_n===1?"":"s");
+  return "<span "+style+" title='"+t+"'>"+txt+"</span>";
+}
 async function buildMesh(){
   if(!compReady){ try{ await initComp(); }catch(e){} }
   const nbrs=neighbours();
@@ -1021,7 +1505,19 @@ function openPktModal(p,when,corruptWhy){
   const rx=p.d==="rx";
   h+="<div class=mut style='font-size:12px;margin-bottom:8px'>"+(rx?"received":"sent by "+esc(p.d))+
     " · "+ROUTES[p.h&3]+" · "+PTYPES[(p.h>>2)&15]+" · "+p.l+" bytes on air"+
+    (p.cr?" · CR 4/"+p.cr+(rx?" (the sender's"+(radioCr&&p.cr!==radioCr?", not our 4/"+radioCr:"")+")":""):"")+
     (rx?" · SNR "+snrSpan(p.snr)+" dB · RSSI "+rssiSpan(p.rssi)+" dBm":"")+"</div>";
+  // If this packet shared the channel, say so here too, with both transmitters
+  // named — the reader is already looking at one of them.
+  const ce=airLog.find(e=>e.s===p.s);
+  if(ce&&ce.hit){
+    const o=ce.hit.other;
+    h+="<div class=warn style='margin-bottom:8px'><b>Collided</b> — "+ce.hit.lap+
+       " ms of this packet's airtime was shared with "+(o.rx?"a packet received":"a transmit started")+
+       " at "+stamp(o.rx?o.end:o.start)+(o.err?" (which failed)":"")+".<br>Transmitters: "+
+       prefixChip(txPrefix(p))+" &#10005; "+prefixChip(txPrefix(o.pkt))+
+       " <span class=mut>— hover a prefix for the node it is likely to be</span></div>";
+  }
   if(q){
     h+="<div style='font-size:13px'>";
     h+="<div><span class=mut>header</span> 0x"+hx1(p.h)+" — route "+ROUTES[q.route]+", type "+PTYPES[q.type]+", ver "+((p.h>>6)&3)+"</div>";
@@ -1525,8 +2021,27 @@ function renderGps(){
       h+="<span style='display:inline-block;width:4px;margin-right:2px;height:"+(4+i*1.4)+
          "px;background:"+(i<=n?(n>=5?"#5fd694":"#e0b34d"):"#243040")+";vertical-align:bottom'></span>";
     return h; };
-  const drift=g.drift_ppm?(g.drift_ppm.toFixed(1)+" ppm ("+
-      (g.drift_ppm*86400/1e6).toFixed(1)+" s/day)"):"not measured yet";
+  // The MEDIAN over the retained history. Not the last interval (which carries
+  // the full measurement error of both its endpoints) and not the mean, which
+  // a few samples taken across a stalled loop drag a long way: measured here,
+  // mean 28.8 ppm vs median 23.9 on the same history.
+  const drift=g.drift_samples>0?(g.drift_ppm_est.toFixed(2)+" ppm ("+
+      (g.drift_ppm_est*86400/1e6).toFixed(2)+" s/day) <span class=mut>median of "+g.drift_samples+
+      " usable sample"+(g.drift_samples===1?"":"s")+", last "+g.drift_ppm.toFixed(2)+" ppm</span>")
+      :"not measured yet";
+  // Whether the number above means anything at all. With no I2C RTC the clock
+  // being read IS the one SNTP sets, so it can only ever measure itself as
+  // perfect — worth saying out loud rather than showing a confident 0.00 ppm.
+  const rtcWhat=g.rtc_hw?("<span class=ok>"+esc(g.rtc)+"</span>"+
+      (g.subsec?" <span class=mut>· sub-second phase measurement</span>"
+               :" <span class=mut>· whole-second fallback</span>"))
+    :"<span style='color:#e0b34d'>none found</span> <span class=mut>&mdash; using the ESP32 clock "+
+     "that NTP itself sets, so drift here is unmeasurable</span>";
+  const trim=!g.rtc_hw?"<span class=mut>n/a</span>"
+    :(g.trim?("<span class=ok>on</span> <span class=mut>&middot; "+g.trim_steps+
+       " step"+(g.trim_steps===1?"":"s")+" applied, "+(g.trim_pending_ms/1000).toFixed(1)+
+       " s carried into this interval</span>")
+      :"<span class=mut>off</span>");
   const nextS=g.every_h?(g.next_s>0?age(g.next_s):"due now"):"never (auto-sync off)";
   const lastSync=g.last_sync?(new Date(g.last_sync*1000).toLocaleString()):"never";
   $("gps-hdr").innerHTML=g.enabled?("auto-sync every "+g.every_h+" h"):"auto-sync disabled";
@@ -1543,7 +2058,9 @@ function renderGps(){
     "<div class=row><span class=mut style='width:150px'>Last GPS sync</span><span>"+esc(lastSync)+
       " &middot; "+g.syncs+" total</span></div>"+
     "<div class=row><span class=mut style='width:150px'>Next attempt</span><span>"+nextS+"</span></div>"+
+    "<div class=row><span class=mut style='width:150px'>RTC hardware</span><span>"+rtcWhat+"</span></div>"+
     "<div class=row><span class=mut style='width:150px'>RTC drift</span><span>"+drift+"</span></div>"+
+    "<div class=row><span class=mut style='width:150px'>Drift correction</span><span>"+trim+"</span></div>"+
     (g.skips_low_batt?"<div class=row><span class=mut style='width:150px'>Skipped</span><span class=mut>"+
       g.skips_low_batt+" x battery below threshold</span></div>":"");
 }
@@ -1594,7 +2111,7 @@ function renderNearby(){
     return "<tr><td>"+nm+" <span class=mut style='font-size:10px'>"+p.h+"</span></td><td>"+hop+
       "</td><td>"+(p.direct||"-")+"</td><td>"+hu+"</td><td>"+
       (p.snr!==null&&p.snr!==undefined?snrSpan(Math.round(p.snr*4)):"-")+"</td><td class=mut>"+p.relays+
-      "</td><td>"+dist+"</td><td class=mut>"+age(p.direct_age_s!==null&&p.direct_age_s!==undefined?p.direct_age_s:p.age_s)+"</td></tr>";
+      "</td><td>"+dist+"</td><td>"+skewCell(p)+"</td><td class=mut>"+age(p.direct_age_s!==null&&p.direct_age_s!==undefined?p.direct_age_s:p.age_s)+"</td></tr>";
   }).join("");
   const conf=(lastDebug&&lastDebug.peers_confirmed)||0;
   $("nearby-count").innerHTML="("+rows.length+" seen \u00b7 <span class=ok>"+conf+
@@ -1767,28 +2284,127 @@ function drawSpark(cid,vid,pts){
   $(vid).textContent="now "+vs[vs.length-1]+"  min "+min+"  max "+max;
 }
 
+
+// ---- settings: MQTT uplink -------------------------------------------------
+// Everything here drives the firmware's own `mqtt` / `set mqtt.*` commands, so
+// the panel cannot drift from the CLI or hold its own idea of the config.
+const MQTT_BROKERS=["eastmesh-au","meshmapper","waev","letsmesh-eu","letsmesh-us","custom"];
+async function loadMqtt(){
+  let txt;
+  try{ txt=stripReply(await cmd("mqtt")); }catch(e){ return; }
+  if(!txt||txt.indexOf("not started")>=0){ $("mqtt-state").textContent="(starting…)"; return; }
+  const on={};
+  const bm=txt.match(/brokers:(.*)/);
+  if(bm) for(const tok of bm[1].trim().split(/\s+/)){
+    const [k,v]=tok.split("="); on[k]=(v==="on");
+  }
+  $("mqtt-brokers").innerHTML=MQTT_BROKERS.map(b=>
+    "<label style='margin-right:12px;font-size:13px;cursor:pointer'><input type=checkbox "+
+    (on[b]?"checked":"")+" onchange=\"mqttBroker('"+b+"',this.checked)\"> "+b+"</label>").join("");
+  const cm=txt.match(/custom: host=(\S+) port=(\d+) transport=(\S+) user=(\S+) pass=(\S+)/);
+  if(cm){
+    if($("mq-host")!==document.activeElement) $("mq-host").value=cm[1]==="-"?"":cm[1];
+    if($("mq-port")!==document.activeElement) $("mq-port").value=cm[2]==="0"?"":cm[2];
+    $("mq-transport").value=(cm[3]||"").indexOf("wss")>=0?"wss":"tcp";
+    if($("mq-user")!==document.activeElement) $("mq-user").value=cm[4]==="-"?"":cm[4];
+    $("mq-pass").placeholder=cm[5]==="set"?"password (set — type to replace)":"password (write-only)";
+  }
+  // first line of `mqtt` is the firmware's own status summary
+  $("mqtt-state").textContent=txt.split("\n")[0].slice(0,90);
+}
+async function mqttBroker(name,on){
+  $("mqtt-status").textContent=stripReply(await cmd("set mqtt.broker "+name+" "+(on?"on":"off")));
+  setTimeout(loadMqtt,800);
+}
+async function mqttSaveCustom(){
+  const q=[];
+  if(v("mq-host")) q.push("set mqtt.host "+v("mq-host"));
+  if(v("mq-port")) q.push("set mqtt.port "+v("mq-port"));
+  q.push("set mqtt.transport "+$("mq-transport").value);
+  if(v("mq-user")) q.push("set mqtt.user "+v("mq-user"));
+  if(v("mq-pass")) q.push("set mqtt.pass "+v("mq-pass"));
+  let last="";
+  for(const c of q) last=stripReply(await cmd(c));
+  $("mq-pass").value="";                       // never leave a secret on screen
+  $("mqtt-status").textContent=last||"saved";
+  setTimeout(loadMqtt,800);
+}
+async function mqttSaveMeta(){
+  let last="";
+  if(v("mq-iata"))  last=stripReply(await cmd("set mqtt.iata "+v("mq-iata")));
+  if(v("mq-email")) last=stripReply(await cmd("set mqtt.email "+v("mq-email")));
+  $("mqtt-status").textContent=last||"saved";
+  setTimeout(loadMqtt,800);
+}
 // ---- settings: identity slots ----
+// Parses the firmware's `slots` listing, which is the single source of truth
+// for what each slot is and whether it is up:
+//   slot 1 (chat1) type=room running
+//   slot 2 (chat2) type=chat stopped tcp/5001
+//   slot 3 (chat3) type=off
+let slotState=[];
 async function loadSlots(){
   const txt=await cmd("slots");
   const rows=stripReply(txt).split("\n").filter(Boolean);
-  let h="";
+  let h=""; slotState=[];
   for(const line of rows){
-    const m=line.match(/^chat(\d+):\s*(enabled|disabled)(.*?)\s*\(app port (\d+)\)/);
+    const m=line.match(/^slot (\d+) \((\w+)\) type=(off|chat|room)(?:\s+(running|stopped))?(?:\s+tcp\/(\d+))?/);
     if(!m){ h+="<div class=mut style='margin-bottom:4px'>"+esc(line)+"</div>"; continue; }
-    const [,n,state,note,port]=m;
-    const on=state==="enabled";
-    h+="<div class=row style='margin-bottom:2px'><label style='min-width:220px'>"+
-      "<input type=checkbox "+(on?"checked":"")+" onchange=\"setSlot("+n+",this.checked)\"> chat "+n+
-      " <span class=mut>· app port "+port+"</span></label>"+
-      (note.trim()?"<span class=err style='font-size:12px'>"+esc(note.trim().replace(/^—\s*/,""))+"</span>":
-        (on?"<span class=ok style='font-size:12px'>running</span>":""))+"</div>";
+    const [,n,name,type,run,port]=m;
+    slotState.push({n:+n,name,type,running:run==="running"});
+    const sel=["off","chat","room"].map(t=>
+      "<option value="+t+(t===type?" selected":"")+">"+t+"</option>").join("");
+    // "running" is the honest signal, not the configured type: after retyping,
+    // the slot is stopped and stays that way until a reboot, and saying so is
+    // the difference between "it didn't work" and "it needs a restart".
+    const status = type==="off" ? "<span class=mut style='font-size:12px'>off</span>"
+      : run==="running" ? "<span class=ok style='font-size:12px'>running</span>"
+      : "<span style='color:#e0b34d;font-size:12px'>stopped &mdash; reboot to start</span>";
+    h+="<div class=row style='margin-bottom:3px'>"+
+      "<span style='min-width:150px'>slot "+n+" <span class=mut>("+esc(name)+")</span></span>"+
+      "<select onchange=\"setSlotType("+n+",this.value)\" style='margin-right:8px'>"+sel+"</select>"+
+      status+(port?" <span class=mut style='font-size:12px'>&middot; app port "+port+"</span>":"")+"</div>";
   }
   $("slots-list").innerHTML=h;
+  renderSlotAdmin();
+  loadMqtt();
 }
-async function setSlot(n,on){
-  const r=stripReply(await cmd("set slot.chat"+n+" "+(on?"on":"off")));
-  $("slots-status").textContent=r+" — applied live, no reboot";
+async function setSlotType(n,t){
+  const r=stripReply(await cmd("set slot."+n+" type "+t));
+  $("slots-status").textContent=r;
   setTimeout(loadSlots,1500);
+}
+
+// Per-slot management. Room slots expose the same controls as the fixed room
+// because `slot N <cmd>` routes straight into that identity's own CLI — there
+// is no separate command surface to keep in step.
+function renderSlotAdmin(){
+  const rooms=slotState.filter(s=>s.type==="room"&&s.running);
+  if(!rooms.length){ $("slot-admin").innerHTML=""; return; }
+  let h="<div class=mut style='font-size:12px;margin:8px 0 4px'>Room slots &mdash; name and join password are "+
+        "read from and written to each room's own identity.</div>";
+  for(const s of rooms){
+    h+="<div class=row style='margin-bottom:4px;gap:6px'>"+
+      "<span style='min-width:150px'>slot "+s.n+" <span class=mut>("+esc(s.name)+")</span></span>"+
+      "<input id=sl-nm-"+s.n+" placeholder='name' style='width:150px' data-1p-ignore>"+
+      "<button onclick=\"slotSet("+s.n+",'set name','sl-nm-"+s.n+"')\">set name</button>"+
+      "<input id=sl-pw-"+s.n+" placeholder='join password' style='width:150px' data-1p-ignore>"+
+      "<button onclick=\"slotSet("+s.n+",'password','sl-pw-"+s.n+"')\">set password</button>"+
+      "<span id=sl-st-"+s.n+" class=mut style='font-size:12px'></span></div>";
+  }
+  $("slot-admin").innerHTML=h;
+  for(const s of rooms) slotLoadName(s.n);
+}
+async function slotLoadName(n){
+  try{ const v=stripReply(await cmd("slot "+n+" get name")); if(v) $("sl-nm-"+n).value=v.trim(); }catch(e){}
+}
+async function slotSet(n,verb,inputId){
+  const v=$(inputId).value.trim();
+  if(!v){ $("sl-st-"+n).textContent="enter a value first"; return; }
+  const r=stripReply(await cmd("slot "+n+" "+verb+" "+v));
+  $("sl-st-"+n).textContent=r||"OK";
+  if(verb==="password") $(inputId).value="";     // don't leave it on screen
+  setTimeout(()=>{ $("sl-st-"+n).textContent=""; },4000);
 }
 
 // ---- settings: firmware OTA upload ----
