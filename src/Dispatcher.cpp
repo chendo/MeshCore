@@ -203,18 +203,20 @@ void Dispatcher::checkRecv() {
         MESH_DEBUG_PRINTLN("%s Dispatcher::checkRecv(): WARNING: received data, no unused packets available!", getLogDateTime());
       } else {
         if (tryParsePacket(pkt, raw, len)) {
-          // All three must be read here, before anything else touches the radio:
-          // they describe the frame the modem has just handed us and are latched
-          // only until the next one is decoded. getLastRxCodingRate() in
-          // particular reads a register the modem rewrites per frame, so a later
-          // read reports some other packet's coding rate.
+          // Read all three values here, before anything else uses the radio.
+          // They describe the frame that the modem just gave us. The modem
+          // latches them only until it decodes the next frame. The function
+          // getLastRxCodingRate() reads a register that the modem rewrites for
+          // each frame. A later read thus reports the coding rate of another
+          // packet.
           pkt->_snr = _radio->getLastSNR() * 4.0f;
           pkt->_rssi = (int16_t)_radio->getLastRSSI();
           pkt->_cr = _radio->getLastRxCodingRate();
           score = _radio->packetScore(_radio->getLastSNR(), len);
-          // Priced at the SENDER's coding rate: that is how long this frame
-          // actually held the channel, and rx_air_time is a measure of channel
-          // occupancy, not of what we would have spent saying the same thing.
+          // The price uses the coding rate of the SENDER. That is the time that
+          // this frame held the channel. The value rx_air_time measures how much
+          // the channel is in use. It does not measure what we would spend to
+          // send the same bytes.
           air_time = _radio->getEstAirtimeForCR(len, pkt->_cr);
           rx_air_time += air_time;
         } else {

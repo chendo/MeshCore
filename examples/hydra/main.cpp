@@ -1,4 +1,4 @@
-#include <Arduino.h>   // needed for PlatformIO
+#include <Arduino.h>   // PlatformIO needs this
 #include <Mesh.h>
 
 #include "HydraNode.h"
@@ -12,10 +12,11 @@
 #endif
 #ifdef LOOP_WATCHDOG_MS
   #include <helpers/nrf52/LoopWatchdog.h>
-  /* setup() is watched far more loosely than the running loop: a LittleFS
-     format, identity generation (once per slot here) or the SoftDevice role
-     ladder are all legitimately slow, and resetting partway through one would
-     boot-loop. */
+  /* The watchdog limit for setup() is much larger than the limit for the
+     running loop. A LittleFS format is slow. The creation of an identity is
+     slow, and this code does it once for each slot. The SoftDevice role ladder
+     is slow. All three are correctly slow. A reset in the middle of one of them
+     would give a boot loop. */
   #define BOOT_WATCHDOG_MS 120000
   #define WDOG_FEED() LoopWatchdog::feed()
 #else
@@ -35,7 +36,7 @@ static char command[160];
 static void halt() {
   Serial.println("HALT: radio init failed, rebooting");
   Serial.flush();
-  delay(2000);              // let the message out, and rate-limit a boot loop
+  delay(2000);              // let the message go out, and slow down a boot loop
   board.reboot();
   while (1) ;
 }
@@ -52,8 +53,9 @@ void setup() {
   WDOG_FEED();
 
 #if defined(NRF52_PLATFORM) && defined(PIN_WIRE_SDA) && defined(PIN_WIRE_SCL)
-  /* A reset partway through a read leaves the slave holding SDA low, and the
-     core's TWIM driver then spins forever on EVENTS_STOPPED with no timeout. */
+  /* A reset in the middle of a read leaves the slave device with SDA low. The
+     TWIM driver in the core then waits for ever on EVENTS_STOPPED. It has no
+     timeout. */
   if (!I2CBusRecovery::recover(PIN_WIRE_SDA, PIN_WIRE_SCL)) {
     Serial.println("I2C: bus stuck, recovery failed");
   }
@@ -83,8 +85,9 @@ void setup() {
   WDOG_FEED();
 
 #if WITH_STATUS_LED
-  // Colour is the radio, brightness is the direction: green = LoRa, dim =
-  // receive, bright = transmit. Shared across every slot — there is one radio.
+  // The colour shows the radio and the brightness shows the direction. Green
+  // is LoRa. Dim is receive. Bright is transmit. Every slot shares the LED,
+  // because there is one radio.
   status_led.begin(LED_BLUE, LED_GREEN, LED_STATE_ON);
 #endif
 
@@ -108,7 +111,7 @@ void loop() {
   if (len > 0 && command[len - 1] == '\r') {
     Serial.print('\n');
     command[len - 1] = 0;
-    char reply[160];   // MyMesh's CLI writes up to this; do not shrink
+    char reply[160];   // the MyMesh CLI writes up to this size. Do not make it smaller.
     reply[0] = 0;
     hydra.handleCommand(0, command, reply, sizeof(reply));   // 0 = serial console
     if (reply[0]) { Serial.print("  -> "); Serial.println(reply); }
@@ -117,8 +120,8 @@ void loop() {
 
 #ifdef LOOP_WATCHDOG_MS
   LoopWatchdog::feed();
-  /* The tight runtime limit is only safe once the loop has proved it runs;
-     until here the boot limit covers setup(). */
+  /* The short runtime limit is safe only after the loop has shown that it
+     runs. Before this point the boot limit covers setup(). */
   static bool wdog_tightened = false;
   if (!wdog_tightened) {
     wdog_tightened = true;
@@ -126,7 +129,7 @@ void loop() {
   }
 #endif
 
-  hydra.loop();          // every slot, then the arbiter — order matters
+  hydra.loop();          // every slot, then the arbiter. The order is important.
 
 #if WITH_STATUS_LED
   status_led.loop();
@@ -134,12 +137,13 @@ void loop() {
   sensors.loop();
   rtc_clock.tick();
 
-  // Powersaving is a node decision, so the queue check has to span every slot —
-  // sleeping on slot 0's idleness alone would stall the chat slots' sends for
-  // as long as the repeater had nothing to say.
+  // Powersave is a decision of the node. So the queue check must cover every
+  // slot. The node must not sleep when only slot 0 is idle. That would stop the
+  // sends of the chat slots. It would stop them for as long as the repeater had
+  // nothing to say.
   if (hydra.repeater().prefs()->powersaving_enabled && !hydra.hasPendingWork()) {
 #if defined(NRF52_PLATFORM)
-    board.sleep(0);   // nRF ignores the seconds param; wakes on LoRa or timer
+    board.sleep(0);   // the nRF ignores the seconds. It wakes on LoRa or a timer.
 #else
     board.sleep(30);
 #endif
