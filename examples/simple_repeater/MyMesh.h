@@ -14,13 +14,8 @@
   using File = fs::File;
 #endif
 
-#ifdef WITH_RS232_BRIDGE
-#include "helpers/bridges/RS232Bridge.h"
-#define WITH_BRIDGE
-#endif
-
-#ifdef WITH_ESPNOW_BRIDGE
-#include "helpers/bridges/ESPNowBridge.h"
+#ifdef BRIDGE_CLASS
+#include BRIDGE_HEADER
 #define WITH_BRIDGE
 #endif
 
@@ -36,10 +31,6 @@
 #include <helpers/RegionMap.h>
 #include <helpers/RoutingPolicy.h>
 #include "RateLimiter.h"
-
-#ifdef WITH_BRIDGE
-extern AbstractBridge* bridge;
-#endif
 
 struct RepeaterStats {
   uint16_t batt_milli_volts;
@@ -114,10 +105,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint8_t pending_sf;
   uint8_t pending_cr;
   int  matching_peer_indexes[MAX_CLIENTS];
-#if defined(WITH_RS232_BRIDGE)
-  RS232Bridge bridge;
-#elif defined(WITH_ESPNOW_BRIDGE)
-  ESPNowBridge bridge;
+#ifdef WITH_BRIDGE
+  BRIDGE_CLASS bridge;
 #endif
 
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
@@ -236,24 +225,8 @@ public:
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
   void loop();
 
-#if defined(WITH_BRIDGE)
-  void setBridgeState(bool enable) override {
-    if (enable == bridge.isRunning()) return;
-    if (enable)
-    {
-      bridge.begin();
-    }
-    else 
-    {
-      bridge.end();
-    }
-  }
-
-  void restartBridge() override {
-    if (!bridge.isRunning()) return;
-    bridge.end();
-    bridge.begin();
-  }
+#ifdef WITH_BRIDGE
+  AbstractBridge* getBridge() override { return &bridge; }
 #endif
 
   // To check if there is pending work

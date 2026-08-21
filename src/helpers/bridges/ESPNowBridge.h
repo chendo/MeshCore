@@ -4,7 +4,9 @@
 #include "esp_now.h"
 #include "helpers/bridges/BridgeBase.h"
 
-#ifdef WITH_ESPNOW_BRIDGE
+/** Declares the `bridge.channel` and `bridge.secret` CLI settings; see CommonCLI. */
+#define BRIDGE_HAS_CHANNEL 1
+#define BRIDGE_HAS_SECRET  1
 
 /**
  * @brief Bridge implementation using ESP-NOW protocol for packet transport
@@ -31,7 +33,7 @@
  * after encryption).
  *
  * Configuration:
- * - Define WITH_ESPNOW_BRIDGE to enable this bridge
+ * - Define BRIDGE_CLASS=ESPNowBridge and BRIDGE_HEADER to select this bridge
  * - Define _prefs->bridge_secret with a string to set the network encryption key
  *
  * Network Isolation:
@@ -111,6 +113,10 @@ public:
    */
   ESPNowBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc);
 
+  uint8_t getTypeCode() const override { return 0x03; }
+  const char *getTypeName() const override { return "espnow"; }
+  bool usesSharedSecret() const override { return true; }
+
   /**
    * Initializes the ESP-NOW bridge
    *
@@ -153,5 +159,3 @@ public:
    */
   void sendPacket(mesh::Packet *packet) override;
 };
-
-#endif

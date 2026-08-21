@@ -3,8 +3,6 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 
-#ifdef WITH_ESPNOW_BRIDGE
-
 // Static member to handle callbacks
 ESPNowBridge *ESPNowBridge::_instance = nullptr;
 
@@ -216,5 +214,3 @@ void ESPNowBridge::sendPacket(mesh::Packet *packet) {
 void ESPNowBridge::onPacketReceived(mesh::Packet *packet) {
   handleReceivedPacket(packet);
 }
-
-#endif

@@ -20,6 +20,19 @@
  */
 class BridgeBase : public AbstractBridge {
 public:
+  /**
+   * @brief Constructs a bridge
+   *
+   * Every bridge takes these three and nothing else; transport-specific
+   * configuration is read from build flags or prefs in begin().
+   *
+   * @param prefs Node preferences for configuration settings
+   * @param mgr PacketManager for allocating and queuing packets
+   * @param rtc RTCClock for timestamping debug messages
+   */
+  BridgeBase(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc)
+      : _prefs(prefs), _mgr(mgr), _rtc(rtc) {}
+
   virtual ~BridgeBase() = default;
 
   /**
@@ -64,16 +77,6 @@ protected:
 
   /** Tracks seen packets to prevent loops in broadcast communications */
   SimpleMeshTables _seen_packets;
-
-  /**
-   * @brief Constructs a BridgeBase instance
-   *
-   * @param prefs Node preferences for configuration settings
-   * @param mgr PacketManager for allocating and queuing packets
-   * @param rtc RTCClock for timestamping debug messages
-   */
-  BridgeBase(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc)
-      : _prefs(prefs), _mgr(mgr), _rtc(rtc) {}
 
   /**
    * @brief Gets formatted date/time string for logging
