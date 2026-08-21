@@ -44,6 +44,7 @@ void ThinkNodeM1SensorManager::stop_gps() {
 }
 
 bool ThinkNodeM1SensorManager::begin() {
+#if ENV_INCLUDE_GPS == 1
   Serial1.begin(9600);
 
   // Initialize GPS switch pin
@@ -57,6 +58,20 @@ bool ThinkNodeM1SensorManager::begin() {
   if (last_gps_switch_state == HIGH) {  // Switch is HIGH when ON
     start_gps();
   }
+#else
+  // GPS compiled out. This has to be handled HERE, not just by the
+  // ENV_INCLUDE_GPS guards in the companion example, because this manager
+  // starts the receiver from the physical slide switch alone — it never
+  // consults _prefs.gps_enabled. Leaving it stock would mean a build with
+  // "GPS disabled" still powered and read the receiver whenever the switch
+  // happened to be on, and still populated node_lat/node_lon.
+  //
+  // Hold the enable line low and leave the UART shut, so neither the switch
+  // nor a settings command can bring it back.
+  pinMode(GPS_EN, OUTPUT);
+  digitalWrite(GPS_EN, LOW);
+  gps_active = false;
+#endif
 
   return true;
 }
@@ -69,6 +84,9 @@ bool ThinkNodeM1SensorManager::querySensors(uint8_t requester_permissions, Cayen
 }
 
 void ThinkNodeM1SensorManager::loop() {
+#if ENV_INCLUDE_GPS != 1
+  return;   // GPS compiled out: never poll the switch, never start the receiver
+#else
   static long next_gps_update = 0;
   static long last_switch_check = 0;
 
@@ -107,6 +125,7 @@ void ThinkNodeM1SensorManager::loop() {
     }
     next_gps_update = millis() + 1000;
   }
+#endif   // ENV_INCLUDE_GPS
 }
 
 int ThinkNodeM1SensorManager::getNumSettings() const {

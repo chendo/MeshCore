@@ -186,7 +186,23 @@ void setup() {
 
 // add bluetooth interface
 #if defined(BLE_PIN_CODE)
-  bluetooth_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
+  #ifdef BLE_ANON_NAME_HEX_BYTES
+    // The BLE device name is broadcast continuously to anything in range, which
+    // makes it a different privacy question from the node name. The node name is
+    // for the mesh — other MeshCore users see it in their contact list and it is
+    // meant to be recognisable. Putting that same string in the BLE
+    // advertisement hands it to any passer-by with a phone, attached to a stable
+    // identifier they can follow between locations.
+    //
+    // So the BLE name is built from a short slice of the public key instead:
+    // enough to tell units apart when pairing, without naming the operator. The
+    // node name is untouched — still whatever the user set in the chat client.
+    char ble_name[BLE_ANON_NAME_HEX_BYTES * 2 + 1];
+    mesh::Utils::toHex(ble_name, the_mesh.self_id.pub_key, BLE_ANON_NAME_HEX_BYTES);
+    bluetooth_interface.begin(BLE_NAME_PREFIX, ble_name, the_mesh.getBLEPin());
+  #else
+    bluetooth_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
+  #endif
   interface_manager.addInterface(InterfaceType::Bluetooth, &bluetooth_interface);
 #endif
 
