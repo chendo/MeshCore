@@ -203,7 +203,14 @@ void Dispatcher::checkRecv() {
         MESH_DEBUG_PRINTLN("%s Dispatcher::checkRecv(): WARNING: received data, no unused packets available!", getLogDateTime());
       } else {
         if (tryParsePacket(pkt, raw, len)) {
+          // All three must be read here, before anything else touches the radio:
+          // they describe the frame the modem has just handed us and are latched
+          // only until the next one is decoded. getLastRxCodingRate() in
+          // particular reads a register the modem rewrites per frame, so a later
+          // read reports some other packet's coding rate.
           pkt->_snr = _radio->getLastSNR() * 4.0f;
+          pkt->_rssi = (int16_t)_radio->getLastRSSI();
+          pkt->_cr = _radio->getLastRxCodingRate();
           score = _radio->packetScore(_radio->getLastSNR(), len);
           air_time = _radio->getEstAirtimeFor(len);
           rx_air_time += air_time;
@@ -219,9 +226,9 @@ void Dispatcher::checkRecv() {
   if (pkt) {
     #if MESH_PACKET_LOGGING
     Serial.print(getLogDateTime());
-    Serial.printf(": RX, len=%d (type=%d, route=%s, payload_len=%d) SNR=%d RSSI=%d score=%d time=%d", 
+    Serial.printf(": RX, len=%d (type=%d, route=%s, payload_len=%d) SNR=%d RSSI=%d CR=4/%d score=%d time=%d",
             pkt->getRawLength(), pkt->getPayloadType(), pkt->isRouteDirect() ? "D" : "F", pkt->payload_len,
-            (int)pkt->getSNR(), (int)_radio->getLastRSSI(), (int)(score*1000), air_time);
+            (int)pkt->getSNR(), pkt->getRSSI(), (int)pkt->getCodingRate(), (int)(score*1000), air_time);
 
     static uint8_t packet_hash[MAX_HASH_SIZE];
     pkt->calculatePacketHash(packet_hash);
