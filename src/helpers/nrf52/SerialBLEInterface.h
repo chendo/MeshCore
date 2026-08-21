@@ -3,8 +3,14 @@
 #include "../BaseSerialInterface.h"
 #include <bluefruit.h>
 
+// Discovery is the weak link, not the link itself: an advert is a single unacked packet
+// with no retry, while an established connection just retransmits until it lands. A node
+// at -65 dBm carried its traffic perfectly yet could not be found by a scanning laptop.
+// +8 dBm (the nRF52840 max) buys 4 dB, ~1.6x range, for nothing that matters - the PA is
+// keyed a few hundred microseconds per 152 ms advert interval, ~0.02 mA averaged, against
+// the ~2.3 mA the scanner on the other end burns continuously.
 #ifndef BLE_TX_POWER
-#define BLE_TX_POWER 4
+#define BLE_TX_POWER 8
 #endif
 
 class SerialBLEInterface : public BaseSerialInterface {
