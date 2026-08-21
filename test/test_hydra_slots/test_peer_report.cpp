@@ -1,12 +1,13 @@
-// `peers` output. MeshObserver keeps two things apart that a careless renderer
-// would merge, and merging them is the only way this command can lie:
+// These tests cover the output of the `peers` command. MeshObserver keeps two
+// facts apart. A careless display can join them. If it joins them, the command
+// gives a wrong answer:
 //
-//   * "we can hear them" comes from direct sightings only. A node seen
-//     mid-path has said nothing about its link to us.
-//   * "they can hear us" is only proven by a >=2-byte hash match. A 1-byte
-//     match is a 1-in-256 coincidence.
+//   * "we can hear them" comes only from direct sightings. A node seen in the
+//     middle of a path tells us nothing about its link to us.
+//   * "they can hear us" needs a hash match of 2 bytes or more. A match of
+//     1 byte is a 1-in-256 coincidence.
 //
-// These tests exist to make either regression fail loudly.
+// These tests make either fault fail loudly.
 
 #include <gtest/gtest.h>
 #include <PeerReport.h>
@@ -32,8 +33,8 @@ bool has(const std::string& s, const char* sub) { return s.find(sub) != std::str
 
 TEST(PeerRow, ARelayOnlySightingIsNotReportedAsHearingThem) {
   MeshObserver::PeerEntry e = blank();
-  e.relays = 42;          // seen in other nodes' paths
-  e.direct_rx = 0;        // never the last hop
+  e.relays = 42;          // the node is in the paths of other nodes
+  e.direct_rx = 0;        // the node is never the last hop
   std::string s = row(e);
   EXPECT_TRUE(has(s, "no (relayed x42)"));
   EXPECT_FALSE(has(s, "rx=")) << s;
@@ -61,7 +62,7 @@ TEST(PeerRow, NegativeSnrKeepsItsSign) {
 TEST(PeerRow, SnrIsAMeanOverDirectSightingsOnly) {
   MeshObserver::PeerEntry e = blank();
   e.direct_rx = 4;
-  e.snr4_sum = 40;   // 4 readings summing to 10 dB*4 => mean +2.5 dB
+  e.snr4_sum = 40;   // 4 readings, total 10 dB * 4, so the mean is +2.5 dB
   e.snr_n = 4;
   EXPECT_TRUE(has(row(e), "snr=+2.5"));
 }
@@ -69,11 +70,12 @@ TEST(PeerRow, SnrIsAMeanOverDirectSightingsOnly) {
 TEST(PeerRow, NoSnrIsPrintedWhenNoneWasMeasured) {
   MeshObserver::PeerEntry e = blank();
   e.direct_rx = 5;
-  e.snr_n = 0;       // direct, but no usable SNR
+  e.snr_n = 0;       // a direct sighting, but no usable SNR
   std::string s = row(e);
   EXPECT_TRUE(has(s, "rx=5"));
   EXPECT_TRUE(has(s, "snr=?")) << s;
-  // No fabricated 0.0 dB: an unmeasured link must not read as a perfect one.
+  // The code must not invent 0.0 dB. A link with no measurement must not look
+  // perfect.
   EXPECT_FALSE(has(s, "+0.0")) << s;
 }
 
@@ -102,8 +104,8 @@ TEST(PeerRow, TheTwoTalliesAreShownSeparatelyWhenBothExist) {
   e.heard_us_1b = 4;
   std::string s = row(e);
   EXPECT_TRUE(has(s, "yes x31")) << s;
-  EXPECT_TRUE(has(s, "+4?")) << s;      // carried, flagged, not added to 31
-  EXPECT_FALSE(has(s, "x35")) << s;     // never summed
+  EXPECT_TRUE(has(s, "+4?")) << s;      // the code keeps and marks it, but does not add it to 31
+  EXPECT_FALSE(has(s, "x35")) << s;     // the code never adds the two counts
 }
 
 TEST(PeerRow, NoEvidenceEitherWayReadsAsNo) {
@@ -121,7 +123,7 @@ TEST(PeerRow, AOneByteEntryIsMarkedAsUnproven) {
   e.width = 1;
   std::string s = row(e);
   EXPECT_TRUE(has(s, "a1")) << s;
-  EXPECT_FALSE(has(s, "a1b2")) << s;    // only the bytes actually known
+  EXPECT_FALSE(has(s, "a1b2")) << s;    // only the bytes that are known
   EXPECT_TRUE(has(s, "1-byte hash")) << s;
 }
 
@@ -159,7 +161,7 @@ TEST(PeerRow, AKnownPubkeyIsShownWhenThereIsNoName) {
 
 TEST(PeerRow, AFullyPackedNameDoesNotRunPastItsField) {
   MeshObserver::PeerEntry e = blank();
-  memset(e.name, 'z', sizeof(e.name));   // deliberately unterminated
+  memset(e.name, 'z', sizeof(e.name));   // the name has no end byte, on purpose
   std::string s = row(e);
   EXPECT_EQ(std::string::npos, s.find(std::string(sizeof(e.name) + 1, 'z')));
 }
@@ -192,7 +194,7 @@ TEST(PeerAge, ScalesFromSecondsToDays) {
 
 TEST(PeerRow, AgeIsWrapSafe) {
   MeshObserver::PeerEntry e = blank();
-  e.last_ms = 0xFFFFF000u;          // seen just before millis() wrapped
+  e.last_ms = 0xFFFFF000u;          // we saw the peer just before millis() wrapped
   std::string s = row(e, 0x00001000u);
   EXPECT_TRUE(has(s, "8s")) << s;   // 8192 ms, not 49 days
 }
@@ -205,8 +207,8 @@ TEST(PeerSummary, ReportsOccupancyAndHashWidths) {
   formatPeerSummary(buf, sizeof(buf), obs);
   std::string s(buf);
   EXPECT_TRUE(has(s, "peers: 0 of 48")) << s;
-  // Widths are part of the summary because a table of 1-byte entries is a much
-  // weaker picture than the same count at three.
+  // The summary shows the widths. A table of 1-byte entries is much weaker than
+  // the same number of 3-byte entries.
   EXPECT_TRUE(has(s, "1B=")) << s;
   EXPECT_TRUE(has(s, "2B=")) << s;
   EXPECT_TRUE(has(s, "3B=")) << s;
@@ -215,7 +217,7 @@ TEST(PeerSummary, ReportsOccupancyAndHashWidths) {
 }
 
 TEST(PeerSummary, SeparatesConfirmedPeersFromTheTotal) {
-  // "48 peers" and "48 peers that can hear us" are very different claims.
+  // "48 peers" and "48 peers that can hear us" are very different statements.
   MeshObserver obs;
   char buf[200];
   formatPeerSummary(buf, sizeof(buf), obs);
@@ -244,8 +246,8 @@ TEST(PeerRow, FitsTheSerialReplyBuffer) {
   EXPECT_GT(n, 0);
 }
 
-// PeerReport pulls in the Arduino mock via MeshObserver.h; the observer itself
-// never reads the clock in these tests, but the symbol has to exist.
+// PeerReport includes the Arduino mock through MeshObserver.h. The observer
+// never reads the clock in these tests. But the symbol must exist.
 unsigned long g_fake_millis = 0;
 
 int main(int argc, char** argv) {
