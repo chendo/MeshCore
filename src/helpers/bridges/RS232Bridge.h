@@ -2,9 +2,8 @@
 
 #include "helpers/bridges/BridgeBase.h"
 
-#include <Stream.h>
-
-#ifdef WITH_RS232_BRIDGE
+/** Declares the `bridge.baud` CLI setting; see CommonCLI. */
+#define BRIDGE_HAS_BAUD 1
 
 /**
  * @brief Bridge implementation using RS232/UART protocol for packet transport
@@ -33,9 +32,10 @@
  * validation ensures only valid packets are forwarded to the mesh.
  *
  * Configuration:
- * - Define WITH_RS232_BRIDGE to enable this bridge
- * - Define WITH_RS232_BRIDGE_RX with the RX pin number
- * - Define WITH_RS232_BRIDGE_TX with the TX pin number
+ * - Define BRIDGE_CLASS=RS232Bridge and BRIDGE_HEADER to select this bridge
+ * - Define RS232_BRIDGE_SERIAL with the hardware serial port to use
+ * - Define RS232_BRIDGE_RX with the RX pin number
+ * - Define RS232_BRIDGE_TX with the TX pin number
  *
  * Platform Support:
  * Different platforms require different pin configuration methods:
@@ -46,20 +46,12 @@
  */
 class RS232Bridge : public BridgeBase {
 public:
-  /**
-   * @brief Constructs an RS232Bridge instance
-   *
-   * @param prefs Node preferences for configuration settings
-   * @param serial The hardware serial port to use
-   * @param mgr PacketManager for allocating and queuing packets
-   * @param rtc RTCClock for timestamping debug messages
-   */
-  RS232Bridge(NodePrefs *prefs, Stream &serial, mesh::PacketManager *mgr, mesh::RTCClock *rtc);
+  using BridgeBase::BridgeBase;
 
   /**
    * Initializes the RS232 bridge
    *
-   * - Validates that RX/TX pins are defined
+   * - Validates that the port and RX/TX pins are defined
    * - Configures UART pins based on target platform
    * - Sets baud rate to 115200 for consistent communication
    * - Platform-specific pin configuration methods are used
@@ -110,6 +102,9 @@ public:
    */
   void onPacketReceived(mesh::Packet *packet) override;
 
+  uint8_t getTypeCode() const override { return 0x01; }
+  const char *getTypeName() const override { return "rs232"; }
+
 private:
   /**
    * RS232 Protocol Structure:
@@ -135,14 +130,9 @@ private:
    */
   static constexpr uint16_t MAX_SERIAL_PACKET_SIZE = (MAX_TRANS_UNIT + 1) + SERIAL_OVERHEAD;
 
-  /** Hardware serial port interface */
-  Stream *_serial;
-
   /** Buffer for building received packets */
   uint8_t _rx_buffer[MAX_SERIAL_PACKET_SIZE];
 
   /** Current position in the receive buffer */
   uint16_t _rx_buffer_pos = 0;
 };
-
-#endif

@@ -9,9 +9,11 @@
 #include <helpers/CommonRadioPrefs.h>
 #include <helpers/DynamicConfigSerializer.h>
 
-#if defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE)
+#ifdef BRIDGE_CLASS
 #define WITH_BRIDGE
 #endif
+
+class AbstractBridge;
 
 #define ADVERT_LOC_NONE       0
 #define ADVERT_LOC_SHARE      1
@@ -276,12 +278,8 @@ public:
     // no op by default
   }
 
-  virtual void setBridgeState(bool enable) {
-    // no op by default
-  };
-
-  virtual void restartBridge() {
-    // no op by default
+  virtual AbstractBridge* getBridge() {
+    return nullptr;  // no bridge in this build
   };
 
   virtual bool setRxBoostedGain(bool enable) {

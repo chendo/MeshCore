@@ -43,4 +43,21 @@ public:
    * @param packet The packet that was received.
    */
   virtual void onPacketReceived(mesh::Packet* packet) = 0;
+
+  /**
+   * @brief The transport's code in the repeater status reply feature byte.
+   *
+   * Goes out over the air, so values are fixed: 0x01 UART, 0x03 ESP-NOW.
+   */
+  virtual uint8_t getTypeCode() const = 0;
+
+  /**
+   * @brief The transport's name, as reported by the `bridge.type` CLI query.
+   */
+  virtual const char* getTypeName() const = 0;
+
+  /**
+   * @brief Whether the transport isolates networks with a shared secret.
+   */
+  virtual bool usesSharedSecret() const { return false; }
 };
