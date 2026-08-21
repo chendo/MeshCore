@@ -23,6 +23,8 @@
 #include <helpers/web/WebPanelServer.h>
 #include "multi_web.h"
 #include "battery_pct.h"
+#include "slot_types.h"
+#include "bot_api.h"
 
 // ---------- stats history sampler ----------
 // One sample per minute into a PSRAM ring; 1440 samples = 24h of history.
@@ -291,6 +293,16 @@ static esp_err_t handleDebug(httpd_req_t* req) {
       out += ",\"idle_s\":";
       out += String(c->portEverActive(i) ? c->portIdleMs(i) / 1000 : 0);
       out += ",\"seen\":"; out += c->portEverActive(i) ? "true" : "false";
+      // What this port actually IS. The first three are the fixed roles; the
+      // rest are typed slots, and without this the panel would go on assuming
+      // every slot is a chat identity and describe a room server in terms of
+      // contacts and phone-app connections.
+      const char* role = "chat";
+      if (i == 0) role = "repeater";
+      else if (i == 1) role = "room";
+      else if (i == 2) role = "companion";
+      else role = slotTypeName(slotTypeGet(i - 3));
+      out += ",\"role\":\""; out += role; out += '"';
       out += '}';
     }
   }
@@ -329,6 +341,14 @@ static esp_err_t handleDebug(httpd_req_t* req) {
       }
       out += ",\"direct_age_s\":";
       out += p->last_direct_ms ? String((millis() - p->last_direct_ms) / 1000) : String("null");
+      // clock skew against our own (NTP/GPS-disciplined) RTC, measured from
+      // zero-hop adverts only; absent entirely for a peer we have never heard
+      // advert directly, which is most of them
+      if (p->clock_ms) {
+        out += ",\"clk_d\":"; out += String((long)p->clock_delta_s);
+        out += ",\"clk_age_s\":"; out += String((millis() - p->clock_ms) / 1000);
+        out += ",\"clk_n\":"; out += String((unsigned long)p->clock_n);
+      }
       out += '}';
     }
   }
@@ -354,7 +374,17 @@ static esp_err_t handleDebug(httpd_req_t* req) {
       out += "]}";
     } }
   out += ",\"gps\":";
-  { char g[512]; g[0] = 0; multiGpsStatusJson(g, sizeof(g)); out += (g[0] == '{') ? g : "null"; }
+  // The clock/GPS block has grown a lot (drift estimate, sample count, trim
+  // state, oscillator flag) and silently outgrew a 512-byte buffer: snprintf
+  // truncated it mid-key, which is not a short answer but INVALID JSON, and
+  // took the whole debug endpoint — and so the panel's live data — down with it.
+  // Checking only the first byte could never catch that, so verify the reported
+  // length fits as well, and emit null rather than a broken object.
+  { char g[1024];
+    g[0] = 0;
+    int n = multiGpsStatusJson(g, sizeof(g));
+    bool ok = (g[0] == '{') && n > 0 && (size_t)n < sizeof(g);
+    out += ok ? g : "null"; }
   out += ",\"peers_confirmed\":";
   { SharedRadioCore* c = multiCore(); out += String(c ? c->confirmedPeerCount() : 0); }
   out += ",\"nvs\":{";
@@ -419,9 +449,13 @@ static esp_err_t handlePackets(httpd_req_t* req) {
   int n = core->pktLogCopy(entries, SharedRadioCore::PKT_LOG_SIZE, after);
 
   String out;
-  out.reserve(256 + n * (96 + PKT_RAW_CAP * 2));
+  out.reserve(256 + n * (104 + PKT_RAW_CAP * 2));
   out += "{\"now\":";
   out += String(millis());
+  // the CR this node itself runs at, so the panel can mark a received packet
+  // whose sender used a different one
+  out += ",\"cr\":";
+  out += String(core->codingRate());
   out += ",\"pkts\":[";
   for (int i = 0; i < n; i++) {
     PktLogEntry& e = entries[i];
@@ -437,8 +471,19 @@ static esp_err_t handlePackets(httpd_req_t* req) {
     out += ",\"l\":"; out += String(e.len);
     out += ",\"snr\":"; out += String(e.snr4 / 4.0f, 1);
     out += ",\"rssi\":"; out += String(e.rssi);
-    out += ",\"raw\":\"";
+    out += ",\"a\":"; out += String(e.air_ms);     // time on air, ms
+    // coding rate as the 4/x denominator: the sender's for a receive (read from
+    // its LoRa header), ours for a transmit. Omitted when not known.
+    if (e.cr) { out += ",\"cr\":"; out += String(e.cr); }
     static const char* hx = "0123456789abcdef";
+    // MeshCore's own packet hash (payload only, path excluded) — every copy of
+    // one flood shares it, so the panel can group repeats.
+    if (e.hash_ok) {
+      out += ",\"ph\":\"";
+      for (int b = 0; b < 4; b++) { out += hx[e.hash[b] >> 4]; out += hx[e.hash[b] & 15]; }
+      out += '"';
+    }
+    out += ",\"raw\":\"";
     for (int b = 0; b < e.raw_len; b++) {
       out += hx[e.raw[b] >> 4]; out += hx[e.raw[b] & 15];
     }
@@ -504,7 +549,7 @@ static esp_err_t handleRoomPosts(httpd_req_t* req) {
   if (!authOk(req)) return deny(req);
   char* buf = (char*)malloc(8192);
   if (buf == nullptr) return httpd_resp_send_500(req);
-  roomGetPostsJson(buf, 8192);
+  roomGetPostsJson(0, buf, 8192);
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   esp_err_t rc = httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);
@@ -592,7 +637,11 @@ static esp_err_t handleCompArchive(httpd_req_t* req) {
 
 // ---------- /multi page ----------
 
-#include "web_multi_page.h"
+// ONLY the gzipped copy is included. Including web_multi_page.h as well would
+// link the 120 KB raw string alongside the 38 KB compressed one and quietly
+// undo the saving — the generated header is produced from it at build time by
+// tools/gzip_panel.py, so the source of truth is still web_multi_page.h.
+#include "web_multi_page_gz.h"
 
 static esp_err_t handlePage(httpd_req_t* req) {
   httpd_resp_set_type(req, "text/html; charset=utf-8");
@@ -602,13 +651,136 @@ static esp_err_t handlePage(httpd_req_t* req) {
   // No validators are served, so a browser is free to heuristically cache a
   // bare 200 indefinitely. Say no.
   httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
-  return httpd_resp_send(req, MULTI_PAGE, HTTPD_RESP_USE_STRLEN);
+  // Served pre-compressed: the page is stored gzipped in flash and handed over
+  // as-is, so it costs 38 KB instead of 120 KB and transfers in a third of the
+  // bytes. Every browser sends Accept-Encoding: gzip; command-line clients need
+  // to ask for it (curl --compressed).
+  httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+  return httpd_resp_send(req, (const char*)MULTI_PAGE_GZ, MULTI_PAGE_GZ_LEN);
 }
 
 static esp_err_t handleLegacyMultiRedirect(httpd_req_t* req) {
   httpd_resp_set_status(req, "302 Found");
   httpd_resp_set_hdr(req, "Location", "/");
   return httpd_resp_send(req, nullptr, 0);
+}
+
+
+// ---------- bot API ----------
+// JSON in, JSON out, addressed by entity — see bot_api.h for why this exists
+// alongside the raw /comp/frame tunnel.
+
+static bool botEntityFromQuery(httpd_req_t* req, int* slot, char* id, size_t id_cap) {
+  snprintf(id, id_cap, "companion");                // default entity
+  char query[96];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+    char val[16];
+    if (httpd_query_key_value(query, "id", val, sizeof(val)) == ESP_OK) {
+      snprintf(id, id_cap, "%s", val);
+    }
+  }
+  return botResolveEntity(id, slot);
+}
+
+static esp_err_t handleBotEntities(httpd_req_t* req) {
+  if (!authOk(req)) return deny(req);
+  char buf[512];
+  botEntitiesJson(buf, sizeof(buf));
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  return httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t handleBotMessages(httpd_req_t* req) {
+  if (!authOk(req)) return deny(req);
+  int slot; char id[16];
+  if (!botEntityFromQuery(req, &slot, id, sizeof(id))) {
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_status(req, "404 Not Found");
+    return httpd_resp_send(req, "{\"error\":\"unknown or stopped entity\"}", HTTPD_RESP_USE_STRLEN);
+  }
+  uint32_t after = 0;
+  char query[96];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+    char val[16];
+    if (httpd_query_key_value(query, "after", val, sizeof(val)) == ESP_OK) {
+      after = strtoul(val, nullptr, 10);
+    }
+  }
+  const size_t cap = 24 * 1024;
+  char* out = (char*)heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (out == nullptr) out = (char*)malloc(8192);
+  if (out == nullptr) return httpd_resp_send_500(req);
+  botMessagesJson(slot, id, after, out, out == nullptr ? 0 : cap);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  esp_err_t rc = httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
+  free(out);
+  return rc;
+}
+
+// Minimal string-field extraction. A full JSON parser is not worth the flash
+// for two fields, but this must not be fooled by escaped quotes inside a value.
+static bool jsonField(const char* body, const char* key, char* out, size_t cap) {
+  char pat[24];
+  snprintf(pat, sizeof(pat), "\"%s\"", key);
+  const char* k = strstr(body, pat);
+  if (k == nullptr) return false;
+  const char* c = strchr(k + strlen(pat), ':');
+  if (c == nullptr) return false;
+  while (*++c == ' ') {}
+  if (*c != '"') return false;
+  c++;
+  size_t o = 0;
+  while (*c && o + 1 < cap) {
+    if (*c == '\\' && c[1]) {          // unescape \" \\ \n \t, pass others through
+      c++;
+      char e = *c++;
+      out[o++] = (e == 'n') ? '\n' : (e == 't') ? '\t' : e;
+      continue;
+    }
+    if (*c == '"') break;
+    out[o++] = *c++;
+  }
+  out[o] = 0;
+  return true;
+}
+
+static esp_err_t handleBotSend(httpd_req_t* req) {
+  if (!authOk(req)) return deny(req);
+  int len = req->content_len;
+  if (len <= 0 || len > 1024) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad body size");
+  }
+  char body[1025];
+  int got = 0;
+  while (got < len) {
+    int r = httpd_req_recv(req, body + got, len - got);
+    if (r <= 0) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body read failed");
+    got += r;
+  }
+  body[got] = 0;
+
+  char id[16] = "companion", to[80] = {0}, text[256] = {0};
+  jsonField(body, "id", id, sizeof(id));
+  jsonField(body, "to", to, sizeof(to));
+  jsonField(body, "text", text, sizeof(text));
+
+  char out[256];
+  int slot;
+  int status;
+  if (!botResolveEntity(id, &slot)) {
+    snprintf(out, sizeof(out), "{\"error\":\"unknown or stopped entity\"}");
+    status = 404;
+  } else {
+    status = botSend(slot, to, text, out, sizeof(out));
+  }
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  if (status == 400) httpd_resp_set_status(req, "400 Bad Request");
+  else if (status == 404) httpd_resp_set_status(req, "404 Not Found");
+  else if (status != 200) httpd_resp_set_status(req, "503 Service Unavailable");
+  return httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
 }
 
 // ---------- registration ----------
@@ -623,6 +795,9 @@ void multiWebRegisterRoutes(httpd_handle_t server, WebPanelServer* panel) {
   static const httpd_uri_t comp_uri  = {.uri = "/api/multi/comp/frame", .method = HTTP_POST, .handler = &handleCompFrame, .user_ctx = nullptr};
   static const httpd_uri_t arch_uri  = {.uri = "/api/multi/comp/archive", .method = HTTP_GET, .handler = &handleCompArchive, .user_ctx = nullptr};
   static const httpd_uri_t posts_uri = {.uri = "/api/multi/room/posts", .method = HTTP_GET, .handler = &handleRoomPosts, .user_ctx = nullptr};
+  static const httpd_uri_t bot_ent_uri = {.uri = "/api/multi/bot/entities", .method = HTTP_GET, .handler = &handleBotEntities, .user_ctx = nullptr};
+  static const httpd_uri_t bot_msg_uri = {.uri = "/api/multi/bot/messages", .method = HTTP_GET, .handler = &handleBotMessages, .user_ctx = nullptr};
+  static const httpd_uri_t bot_send_uri = {.uri = "/api/multi/bot/send", .method = HTTP_POST, .handler = &handleBotSend, .user_ctx = nullptr};
   httpd_register_uri_handler(server, &root_uri);
   httpd_register_uri_handler(server, &old_uri);
   httpd_register_uri_handler(server, &debug_uri);
@@ -631,4 +806,7 @@ void multiWebRegisterRoutes(httpd_handle_t server, WebPanelServer* panel) {
   httpd_register_uri_handler(server, &comp_uri);
   httpd_register_uri_handler(server, &arch_uri);
   httpd_register_uri_handler(server, &posts_uri);
+  httpd_register_uri_handler(server, &bot_ent_uri);
+  httpd_register_uri_handler(server, &bot_msg_uri);
+  httpd_register_uri_handler(server, &bot_send_uri);
 }

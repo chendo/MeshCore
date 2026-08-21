@@ -10,6 +10,8 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Preferences.h>
+#include <sys/time.h>
+#include <esp_sntp.h>
 #include <target.h>
 #include <helpers/SharedRadio.h>
 #include <helpers/NetworkService.h>
@@ -19,6 +21,11 @@
 #include "multi_web.h"
 #include "identity_backup.h"
 #include "diag_service.h"
+#include "slot_types.h"
+#include "bot_api.h"
+#ifdef WITH_MQTT_UPLINK
+#include <helpers/mqtt/MQTTUplink.h>
+#endif
 
 #ifndef SETUP_AP_SSID
 #define SETUP_AP_SSID "MeshCore-Multi-Setup"
@@ -180,6 +187,9 @@ static RadioParams radioStoreGet() {
 static void applyRadioParams(const RadioParams& p) {
   radio_driver.setParams(p.freq, p.bw, p.sf, p.cr);
   g_radio = p;
+  // the trace labels transmissions with the CR they went out at, so the arbiter
+  // is told whenever it changes rather than reading it back off the chip
+  if (g_core != nullptr) g_core->setCodingRate(p.cr);
 }
 
 // per-persona TX power via the real driver
@@ -245,15 +255,48 @@ static char g_ntp_server[64] = "pool.ntp.org";   // overridable: some LANs block
 // and, unlike NVS, costs no flash writes — this is diagnostics, not state
 // worth wearing flash for.
 struct ClockDriftSample {
-  uint32_t epoch;      // GPS time at the sync
-  int32_t  offset_s;   // gps - rtc  (positive => the RTC was running slow)
-  uint32_t elapsed_s;  // since the previous sync (0 if this was the first)
+  uint32_t epoch;       // reference time at the sync
+  int32_t  offset_ms;   // reference - rtc, MILLISECONDS (positive => RTC slow)
+  uint32_t elapsed_s;   // since the previous sync (0 if this was the first)
+  // How wide the poll gap was when the tick edge was caught. The edge could
+  // have fallen anywhere inside it, so this IS the measurement uncertainty:
+  // +/- gap/2. Normally a main-loop period (tens of ms); when the loop stalls
+  // on radio or web work it can be most of a second, and that sample is then
+  // worthless. Recording it is what makes a bad sample identifiable instead of
+  // just looking like exciting drift.
+  uint16_t gap_ms;
+  uint8_t  subsec;      // 1 = phase measurement, 0 = whole-second fallback
 };
-#define DRIFT_MAGIC 0x44524654u   // 'DRFT'
+// Bumped again for the gap/subsec fields — a stale history would be read with
+// the new fields full of noise and silently rejected or trusted at random.
+#define DRIFT_MAGIC 0x44524656u   // 'DRFV'
 #define DRIFT_SLOTS 24
 RTC_NOINIT_ATTR static uint32_t g_drift_magic;
 RTC_NOINIT_ATTR static ClockDriftSample g_drift[DRIFT_SLOTS];
 RTC_NOINIT_ATTR static uint32_t g_drift_count;    // total ever recorded
+
+// A sample this far out is not drift, it is an event — a reboot with a stale
+// clock, a botched sync, a garbage RTC read. Averaging those in would poison
+// the rate estimate that the trimmer below acts on, so they are kept in the
+// history (they are worth seeing) but excluded from every calculation.
+#define DRIFT_OUTLIER_PPM 1000.0f
+
+// A sample also needs a long enough baseline to mean anything. The phase
+// measurement carries a residual error of roughly half a main-loop period —
+// tens of milliseconds — and dividing that by a short interval manufactures an
+// enormous rate from nothing: a real +21 ms measurement over 22 s reads as
+// +954 ppm. Half an hour keeps that artefact under ~1 ppm, which is below the
+// drift being measured. Short samples are still recorded and shown; they just
+// do not vote on the rate.
+#define DRIFT_MIN_INTERVAL_S 1800u
+
+// A sample measured across a stalled loop is not a measurement. The observed
+// bad samples were all of this kind — +483 ms, -217 ms, +142 ms, every one a
+// sub-second reading rather than a whole-second fallback, i.e. the edge was
+// caught late by a loop that had gone away for a while. At an hourly cadence a
+// 250 ms gap is already +/-35 ppm of uncertainty on a 24 ppm signal, so
+// anything wider is discarded rather than averaged in.
+#define DRIFT_MAX_GAP_MS 250u
 
 static void driftInit() {
   if (g_drift_magic != DRIFT_MAGIC) {
@@ -263,19 +306,94 @@ static void driftInit() {
   }
 }
 
-static void driftRecord(uint32_t gps_epoch, int32_t offset_s, uint32_t elapsed_s) {
+static void driftRecord(uint32_t ref_epoch, int32_t offset_ms, uint32_t elapsed_s,
+                        uint16_t gap_ms, bool subsec) {
   driftInit();
-  g_drift[g_drift_count % DRIFT_SLOTS] = { gps_epoch, offset_s, elapsed_s };
+  g_drift[g_drift_count % DRIFT_SLOTS] =
+      { ref_epoch, offset_ms, elapsed_s, gap_ms, (uint8_t)(subsec ? 1 : 0) };
   g_drift_count++;
+}
+
+static float driftSamplePpm(const ClockDriftSample& s) {
+  if (s.elapsed_s == 0) return 0;
+  return (float)s.offset_ms * 1000.0f / (float)s.elapsed_s;
 }
 
 // parts-per-million from the most recent measured interval (0 if unknown)
 static float driftPpm() {
   driftInit();
   if (g_drift_count == 0) return 0;
-  const ClockDriftSample& s = g_drift[(g_drift_count - 1) % DRIFT_SLOTS];
-  if (s.elapsed_s == 0) return 0;
-  return (float)s.offset_s * 1000000.0f / (float)s.elapsed_s;
+  return driftSamplePpm(g_drift[(g_drift_count - 1) % DRIFT_SLOTS]);
+}
+
+// Mean rate over the retained history, outliers dropped. This — not the last
+// interval — is what a correction should be based on: one interval carries the
+// full measurement error of two endpoint readings, while the mean over a day
+// of six-hourly samples averages that down.
+// ---- drift correction -------------------------------------------------------
+// Knowing the rate makes it correctable. The RTC cannot be slewed the way ntpd
+// slews a host clock — every backend's setCurrentTime() takes whole seconds —
+// so instead the predicted accumulated error is tracked continuously and the
+// clock stepped by one second each time that prediction crosses a whole one.
+//
+// Between six-hourly NTP syncs this is the difference between drifting a second
+// or two and staying inside half of one. For a deployment with no network,
+// where the next reference might be days away, it is the difference between
+// seconds and minutes — and it is the only correction available there at all.
+//
+// Trimming is refused unless a real hardware RTC is present: on the fallback
+// path getCurrentTime() IS the system clock that SNTP disciplines, so there is
+// no independent oscillator to correct and "drift" is definitionally zero.
+static bool     g_trim_enabled = true;
+static int32_t  g_trim_applied_ms = 0;    // steps applied since the last sync
+static uint32_t g_trim_next_ms = 0;
+// What the last whole-second correction left in the clock (the chip's tick
+// phase). Removed from the next measurement so it is not billed as drift.
+static double   g_phase_residual_ms = 0;
+// Latched at boot: 1 = the RTC's oscillator had stopped since it was last
+// set (so its time was meaningless, not merely drifted), 0 = ran clean,
+// -1 = the chip cannot report it. See the sample in setup().
+static int      g_rtc_osc_stopped = -1;
+static uint32_t g_trim_steps = 0;         // total ever applied, for reporting
+
+// Is this sample fit to vote on the rate?
+static bool driftSampleUsable(const ClockDriftSample& s) {
+  if (s.elapsed_s < DRIFT_MIN_INTERVAL_S) return false;
+  if (!s.subsec) return false;              // whole-second fallback: 278 ppm quantum at 1 h
+  if (s.gap_ms > DRIFT_MAX_GAP_MS) return false;
+  float ppm = driftSamplePpm(s);
+  return !(ppm > DRIFT_OUTLIER_PPM || ppm < -DRIFT_OUTLIER_PPM);
+}
+
+// MEDIAN rate over the retained history, not the mean.
+//
+// This is not fastidiousness. Measured overnight: ten samples clustered inside
+// 23.6-24.2 ppm and five strays at -60, +37, +37, +39, +134. The mean of that
+// is 28.8 ppm; the median is 23.9. The trimmer acts on this number, so a mean
+// would have had it over-correcting by a fifth, forever, on the strength of a
+// handful of samples taken while the loop was busy elsewhere. A median cannot
+// be dragged that way — it does not care how wrong a minority is, only how
+// many of them there are.
+static float driftPpmEstimate(int* n_used = nullptr) {
+  driftInit();
+  uint32_t shown = g_drift_count < DRIFT_SLOTS ? g_drift_count : DRIFT_SLOTS;
+  uint32_t start = g_drift_count - shown;
+  float v[DRIFT_SLOTS];
+  int n = 0;
+  for (uint32_t i = start; i < g_drift_count; i++) {
+    const ClockDriftSample& s = g_drift[i % DRIFT_SLOTS];
+    if (!driftSampleUsable(s)) continue;
+    v[n++] = driftSamplePpm(s);
+  }
+  if (n_used) *n_used = n;
+  if (n == 0) return 0;
+  // insertion sort; n <= 24 and this runs about once a minute
+  for (int i = 1; i < n; i++) {
+    float k = v[i]; int j = i - 1;
+    while (j >= 0 && v[j] > k) { v[j + 1] = v[j]; j--; }
+    v[j + 1] = k;
+  }
+  return (n & 1) ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) * 0.5f;
 }
 
 // The M5 has a physical GPS slide switch on its side wired to PIN_GPS_SWITCH.
@@ -306,9 +424,179 @@ static void formatEpochUtc(uint32_t epoch, char* out, size_t cap) {
            tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
 }
 
+// ---- sub-second RTC error ---------------------------------------------------
+// getCurrentTime() is whole seconds on every backend, so differencing it
+// against a reference can only ever yield an integer — and at a six-hour sync
+// interval one second of quantisation IS 46 ppm, larger than the drift of any
+// crystal worth measuring. That is why this node's entire recorded history
+// reads +1s or +2s: the number was the quantum, not the clock.
+//
+// The sub-second information lives in the PHASE of the RTC's tick rather than
+// its value. Watch getCurrentTime() until it steps from S to S+1: at that
+// instant the RTC reads exactly S+1.000, and whatever the SNTP-disciplined
+// microsecond system clock says at the same instant is the truth to compare it
+// against. Resolution becomes the polling interval instead of a whole second.
+//
+// Polling is spread across main-loop passes. A second of blocking I2C reads
+// would stall the radio for the whole of a LoRa frame, and the mesh should not
+// pay that twice a day for a diagnostic.
+static const uint32_t RTCP_POLL_MS   = 2;      // between reads; also the resolution
+static const uint32_t RTCP_WINDOW_MS = 1500;   // a tick MUST fall inside 1s; this is the give-up
+static bool     g_rtcp_active = false;
+static bool     g_rtcp_done = false;           // an edge was caught
+static uint32_t g_rtcp_deadline_ms = 0, g_rtcp_next_poll_ms = 0, g_rtcp_prev_sec = 0;
+static uint32_t g_rtcp_last_poll_ms = 0;       // when the PREVIOUS poll ran
+static uint32_t g_rtcp_gap_ms = 0;             // the gap the edge was caught in
+static double   g_rtcp_error_ms = 0;           // reference - rtc, at the edge
+
+static void rtcPhaseStart() {
+  g_rtcp_active = true;
+  g_rtcp_done = false;
+  g_rtcp_prev_sec = rtc_clock.getCurrentTime();
+  g_rtcp_next_poll_ms = millis();
+  g_rtcp_last_poll_ms = millis();
+  g_rtcp_gap_ms = 0;
+  g_rtcp_deadline_ms = millis() + RTCP_WINDOW_MS;
+}
+
+// true once the sampler has finished — edge caught, or window expired
+static bool rtcPhaseTick() {
+  if (!g_rtcp_active) return true;
+  uint32_t now = millis();
+  if ((int32_t)(now - g_rtcp_next_poll_ms) < 0) return false;
+  // The poll cadence is really the main-loop period, which on this node is tens
+  // of milliseconds under load rather than the RTCP_POLL_MS we ask for. Record
+  // the gap actually achieved so the edge can be placed inside it.
+  g_rtcp_gap_ms = now - g_rtcp_last_poll_ms;
+  g_rtcp_last_poll_ms = now;
+  g_rtcp_next_poll_ms = now + RTCP_POLL_MS;
+
+  uint32_t s = rtc_clock.getCurrentTime();
+  if (s != g_rtcp_prev_sec) {
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    double ref = (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
+    // positive => the reference is ahead of the RTC, i.e. the RTC is running slow
+    g_rtcp_error_ms = (ref - (double)s) * 1000.0;
+    g_rtcp_done = true;
+    g_rtcp_active = false;
+    return true;
+  }
+  if ((int32_t)(now - g_rtcp_deadline_ms) >= 0) { g_rtcp_active = false; return true; }
+  return false;
+}
+
+// Has SNTP genuinely answered, as opposed to the system clock merely looking
+// plausible? This must be authoritative, because the failure it guards against
+// is subtle: ESP32RTCClock restores a persisted epoch from NVS at boot, which
+// can be a quarter of an hour stale and still passes any "is this a sane date"
+// test. Adopting it as an NTP answer writes that staleness into the RTC and
+// then reports a clean sync — which is how this node came to be half an hour
+// out while claiming it had synced 1.4 h earlier.
+//
+// sntp_get_sync_status() CANNOT be used for this. IDF clears the COMPLETED
+// status on read, so it is a one-shot consumed by whoever polls first — and
+// NetworkService::updateTimeSync() polls it continuously on its own loop, so
+// this code loses that race essentially every time. The notification callback
+// is a dedicated slot nothing else here registers for, and it fires on every
+// successful update.
+static volatile bool g_sntp_answered_cb = false;
+static void sntpSyncNotify(struct timeval*) { g_sntp_answered_cb = true; }
+static bool g_ntp_answered = false;
+static bool g_ntp_measuring = false;
+static uint32_t g_ntp_started_ms = 0;
+// How long to insist on a confirmed SNTP status before falling back to the
+// date test alone (see the escape hatch in ntpSyncTick).
+static const uint32_t NTP_STATUS_GRACE_MS = 15UL * 60UL * 1000UL;
+// Above kDefaultEpoch (ESP32RTCClock seeds an unset clock to 15 May 2024), so
+// the node's own placeholder can never be mistaken for an answer. See the
+// comment at the sanity gate below.
+static const time_t NTP_MIN_SANE_EPOCH = 1735689600L;   // 2025-01-01
+
+// Fold a completed measurement into the drift history and correct the clock.
+static void ntpApplySync(uint32_t now) {
+  struct timeval tv;
+  gettimeofday(&tv, nullptr);
+  uint32_t sys = (uint32_t)tv.tv_sec;
+
+  double raw_ms;
+  if (g_rtcp_done) {
+    // The edge fell somewhere inside the gap between the last two polls, and
+    // all we know is that it had happened by the end of it. The midpoint is the
+    // unbiased estimate. Using the gap ACTUALLY achieved rather than the one we
+    // asked for matters: a hardcoded 1 ms correction against a ~40 ms loop
+    // period leaves a systematic +20 ms, which at an hourly sync cadence is a
+    // phantom 6 ppm of drift — the same order as the real thing.
+    raw_ms = g_rtcp_error_ms - (double)g_rtcp_gap_ms / 2.0;
+  } else {
+    // No edge inside the window (a very slow RTC read). Still record something
+    // rather than silently skipping the sync — just at the old resolution.
+    raw_ms = ((double)sys - (double)rtc_clock.getCurrentTime()) * 1000.0;
+  }
+
+  // Add back whatever the trimmer already corrected during this interval, or
+  // the rate estimate would be measuring the trim rather than the crystal —
+  // the RTC would look perfect, the rate would fall to zero, and the trim
+  // would switch itself off.
+  // Subtract the residual the LAST correction left behind. Corrections are
+  // whole seconds, so each one leaves the chip's tick phase — about +48 ms
+  // here — sitting in the clock. That residual then turns up in full in the
+  // next measurement, and dividing it by the interval charges it to the
+  // crystal: at an hourly cadence a constant 48 ms reads as 13 ppm of drift
+  // that does not exist. The first hour-long sample measured +38.89 ppm; the
+  // real rate underneath it is nearer 25.
+  //
+  // No extra measurement is needed to remove it. After correcting by corr
+  // seconds the residual is exactly raw - corr*1000, so remembering that and
+  // subtracting it next time leaves only what the crystal actually did.
+  int32_t offset_ms = (int32_t)(raw_ms - g_phase_residual_ms + (double)g_trim_applied_ms);
+  uint32_t elapsed = g_clock_last_epoch ? (sys - g_clock_last_epoch) : 0;
+  // Recorded unconditionally. The previous code stored a sample only when the
+  // whole-second offset was non-zero, which threw away every interval where the
+  // clock was RIGHT and left an average computed purely from the bad ones.
+  driftRecord(sys, offset_ms, elapsed,
+              (uint16_t)(g_rtcp_done ? g_rtcp_gap_ms : 0), g_rtcp_done);
+
+  // Correct by WHOLE SECONDS, and only when a whole second is actually owed.
+  //
+  // The PCF8563 free-runs its divider: writing the seconds register changes the
+  // counter but does not move the tick edge, which on this chip sits ~52 ms
+  // after the true second and stays there. So the sub-second phase is a
+  // property of the hardware that no write can fix, and any attempt to fix it
+  // makes things worse — writing at an arbitrary moment injected a uniform
+  // 0-1000 ms error (measured: +793 ms), and writing on the reference's second
+  // boundary injected a consistent -948 ms, leaving the clock a full second
+  // FAST for 95% of every second.
+  //
+  // What is left is to get the integer right and leave the phase alone. This
+  // runs immediately after the sampler caught the chip's own tick edge, so
+  // rounding the measured error to whole seconds and adding that puts the
+  // counter on the nearest correct second; the residual is the chip's phase,
+  // bounded by half a second and in practice ~50 ms. When nothing is owed —
+  // the normal case once synced — nothing is written at all.
+  int32_t corr = (int32_t)llround(raw_ms / 1000.0);
+  if (corr != 0) rtc_clock.setCurrentTime(rtc_clock.getCurrentTime() + corr);
+  g_phase_residual_ms = raw_ms - (double)corr * 1000.0;
+
+  g_trim_applied_ms = 0;
+  g_clock_src = "NTP";
+  g_clock_last_epoch = sys;
+  g_clock_last_ms = now;
+  g_ntp_syncs++;
+  g_ntp_last_result = "synced";
+  Serial.printf("[ntp] RTC was %+ld ms out over %lu s%s; corrected %+ld s\n",
+                (long)offset_ms, (unsigned long)elapsed,
+                g_rtcp_done ? "" : " (whole-second fallback)", (long)corr);
+  g_ntp_next_ms = now + g_ntp_interval_h * 3600000UL;
+}
+
 static void ntpSyncTick() {
   if (WiFi.status() != WL_CONNECTED) {
-    if (g_ntp_started) { g_ntp_started = false; g_ntp_last_result = "waiting for wifi"; }
+    if (g_ntp_started) {
+      g_ntp_started = false; g_ntp_answered = false;
+      g_ntp_measuring = false;
+      g_ntp_last_result = "waiting for wifi";
+    }
     return;
   }
   uint32_t now = millis();
@@ -316,36 +604,199 @@ static void ntpSyncTick() {
     // Start (or restart after a reconnect) the SNTP client. Two public fallbacks
     // behind the configured server so a single unreachable host isn't fatal.
     configTzTime("UTC0", g_ntp_server, "time.cloudflare.com", "time.google.com");
+    sntp_set_time_sync_notification_cb(sntpSyncNotify);
     g_ntp_started = true;
+    // g_sntp_answered_cb is deliberately NOT cleared here: it means "SNTP has
+    // answered at some point this boot", and after a wifi blip the next update
+    // can be an hour away. Clearing it would strand the clock in the grace
+    // period for no reason.
+    g_ntp_answered = false;
+    g_ntp_started_ms = now;
     g_ntp_last_result = "querying...";
     g_ntp_next_ms = now + NTP_RETRY_MS;
     return;
   }
+
+  // A measurement is in progress: let the phase sampler run to completion
+  // before touching the clock, since correcting it would destroy the very
+  // error we are trying to read.
+  if (g_ntp_measuring) {
+    if (!rtcPhaseTick()) return;
+    g_ntp_measuring = false;
+    ntpApplySync(now);
+    return;
+  }
+
   if (now < g_ntp_next_ms) return;
 
-  time_t sys = time(nullptr);
-  if (sys < 1700000000L) {          // SNTP hasn't answered yet (or at all)
-    g_ntp_last_result = "no answer yet";
+  // Has SNTP actually answered? Asking the system clock alone is not enough: an
+  // ESP32 that has never been set still reports a plausible epoch (May 2024),
+  // which passed the old "is this a sane date" test and was adopted as truth.
+  // This node's own history contains two such samples — each one set the whole
+  // node's clock back two years until the following sync undid it.
+  if (!g_ntp_answered) {
+    if (g_sntp_answered_cb) {
+      g_ntp_answered = true;
+    } else if ((uint32_t)(now - g_ntp_started_ms) < NTP_STATUS_GRACE_MS) {
+      g_ntp_last_result = "no answer yet";
+      g_ntp_next_ms = now + NTP_RETRY_MS;
+      return;
+    } else {
+      // Escape hatch. The status flag is the only thing that can tell a real
+      // answer from a stale-but-plausible clock (ESP32RTCClock restores a
+      // persisted epoch on boot, which is recent enough to pass any date
+      // test). But if it never arrives — a platform quirk, a firewalled
+      // server — refusing to ever set the clock is the worse failure, so
+      // after the grace period fall through on the date test alone and say so.
+      g_ntp_last_result = "synced (unconfirmed: no SNTP status)";
+    }
+  }
+  if (time(nullptr) < NTP_MIN_SANE_EPOCH) {
+    g_ntp_last_result = "answer failed sanity check";
     g_ntp_next_ms = now + NTP_RETRY_MS;
     return;
   }
 
-  // measure the RTC's error BEFORE correcting it, exactly as the GPS path does,
-  // so drift stays measurable whichever source disciplined it last
-  uint32_t before = rtc_clock.getCurrentTime();
-  int32_t offset = (int32_t)((uint32_t)sys - before);
-  uint32_t elapsed = g_clock_last_epoch ? ((uint32_t)sys - g_clock_last_epoch) : 0;
-  if (offset != 0 || elapsed == 0) driftRecord((uint32_t)sys, offset, elapsed);
+  rtcPhaseStart();
+  g_ntp_measuring = true;
+}
 
-  rtc_clock.setCurrentTime((uint32_t)sys);
-  g_clock_src = "NTP";
-  g_clock_last_epoch = (uint32_t)sys;
-  g_clock_last_ms = now;
-  g_ntp_syncs++;
-  g_ntp_last_result = "synced";
-  Serial.printf("[ntp] clock synced to %lu (RTC was %+ld s out)\n",
-                (unsigned long)sys, (long)offset);
-  g_ntp_next_ms = now + g_ntp_interval_h * 3600000UL;
+
+#ifdef WITH_MQTT_UPLINK
+// ---- MQTT uplink -----------------------------------------------------------
+// The uplink authenticates with a JWT signed by the node's OWN mesh identity —
+// no shared secret. The broker verifies the Ed25519 signature against the public
+// key carried in the token payload, so the thing that proves who we are on the
+// mesh also proves who we are to the broker. The custom-broker slot bypasses
+// that and uses plain username/password instead.
+//
+// The repeater identity is the one used: it is the role this node presents to
+// the mesh, so its key is the honest answer to "who is publishing this".
+static mesh::LocalIdentity g_mqtt_id;
+static MQTTUplink* g_mqtt = nullptr;
+static char g_mqtt_name[40] = {0};
+
+// Mirrors MQTTUplink's private broker bits (MQTTUplink.h) — they are not
+// exported, so the values are repeated here rather than reached into.
+static const struct { const char* key; uint8_t bit; } MQTT_BROKERS[] = {
+  {"eastmesh-au", 0x01}, {"letsmesh-eu", 0x02}, {"letsmesh-us", 0x04},
+  {"custom", 0x08}, {"meshmapper", 0x10}, {"waev", 0x20},
+};
+static const int MQTT_BROKER_COUNT = sizeof(MQTT_BROKERS) / sizeof(MQTT_BROKERS[0]);
+
+static uint8_t mqttBrokerBit(const char* key) {
+  for (int i = 0; i < MQTT_BROKER_COUNT; i++) {
+    if (strcasecmp(key, MQTT_BROKERS[i].key) == 0) return MQTT_BROKERS[i].bit;
+  }
+  return 0;
+}
+
+// Publish each frame the shared radio handles. The uplink wants mesh::Packet,
+// the arbiter only has raw bytes, so the frame is parsed here — a single static
+// Packet is safe because the hook only ever runs on the loop task, from pump()
+// and tryStartSend().
+//
+// Gated on the uplink's own packets setting, so turning it off actually stops
+// the work rather than just discarding the result.
+// Counters so the wiring is verifiable from the outside: "connected" says
+// nothing about whether frames are reaching the uplink, and the uplink's own
+// publish path is silent unless built with MQTT_DEBUG.
+static uint32_t g_mqtt_seen = 0, g_mqtt_parsed = 0, g_mqtt_pub = 0;
+
+static void mqttFrameHook(const uint8_t* f, int len, bool is_tx, float snr, float rssi) {
+  g_mqtt_seen++;
+  if (g_mqtt == nullptr || !g_mqtt->isPacketsEnabled()) return;
+  if (f == nullptr || len <= 0 || len > 255) return;      // readFrom takes a uint8_t length
+  static mesh::Packet pkt;
+  if (!pkt.readFrom(f, (uint8_t)len)) return;             // not a frame we can parse
+  g_mqtt_parsed++;
+  g_mqtt->publishPacket(pkt, is_tx, (int)rssi, snr, -1,
+                        g_core ? (int)g_core->real()->getEstAirtimeFor(len) : -1);
+  g_mqtt_pub++;
+}
+
+// Started from the LOOP, not setup(): it needs WiFi anyway, and anything that
+// faults before network.begin() costs remote access entirely (see botTick).
+static void mqttTick() {
+  static bool inited = false;
+  static uint32_t next_ms = 0;
+  if (!inited) {
+    inited = true;
+    if (!multiIdLoad("repeater", &fs_rep, g_mqtt_id)) {
+      Serial.println("[mqtt] no repeater identity — uplink not started");
+      return;
+    }
+    { char reply[80]; reply[0] = 0;
+      repeater_module.run_command("get name", reply, sizeof(reply));
+      const char* n = reply[0] == '>' ? reply + 1 : reply;
+      while (*n == ' ') n++;
+      StrHelper::strncpy(g_mqtt_name, n, sizeof(g_mqtt_name)); }
+    g_mqtt = new MQTTUplink(rtc_clock, g_mqtt_id);
+    g_mqtt->setNodeNameSource(g_mqtt_name);
+    g_mqtt->setNetworkStateProvider(&network);
+    // Prefs go to the SPIFFS ROOT, not the /fs/sys SubdirFS view. MQTTPrefsStore
+    // does exists()+remove() before writing, and through the subdirectory
+    // wrapper that sequence does not survive — the value applied in RAM and was
+    // silently lost on the next boot, with the setter reporting failure while
+    // the readback showed it set. One file at the root avoids the whole
+    // question.
+    g_mqtt->begin(&fs_shared);
+    if (g_core) g_core->setFrameHook(&mqttFrameHook);
+    Serial.printf("[mqtt] uplink %s (node %s)\n",
+                  g_mqtt->isActive() ? "enabled" : "idle (no broker selected)", g_mqtt_name);
+  }
+  if (g_mqtt == nullptr) return;
+  uint32_t now = millis();
+  if (now < next_ms) return;
+  next_ms = now + 1000;      // the uplink schedules its own work; once a second is plenty
+
+  MQTTStatusSnapshot st{};
+  st.battery_mv = (int)board.getBattMilliVolts();
+  st.uptime_secs = now / 1000;
+  st.noise_floor = g_core ? (int)g_core->real()->getNoiseFloor() : 0;
+  st.recv_errors = radio_driver.getPacketsRecvErrors();
+  st.packets_sent = radio_driver.getPacketsSent();
+  st.packets_received = radio_driver.getPacketsRecv();
+  st.radio_freq = g_radio.freq;
+  st.radio_bw = g_radio.bw;
+  st.radio_sf = g_radio.sf;
+  st.radio_cr = g_radio.cr;
+  st.repeat_enabled = true;
+  g_mqtt->loop(st);
+}
+#endif
+
+// Step the RTC toward where the measured rate says it should be. Runs from the
+// main loop; the predicted error moves by microseconds a second, so once a
+// minute is far more often than it can possibly matter.
+static void clockTrimTick() {
+  uint32_t now = millis();
+  if (now < g_trim_next_ms) return;
+  g_trim_next_ms = now + 60000;
+
+  if (!g_trim_enabled) return;
+  if (!AutoDiscoverRTCClock::hasHardwareRTC()) return;   // nothing independent to trim
+  if (g_clock_last_ms == 0) return;                      // never disciplined, no baseline
+  // Never step the clock while the phase sampler is hunting for a tick edge —
+  // it would land inside the measurement and be read back as drift.
+  if (g_rtcp_active || g_ntp_measuring) return;
+
+  int n = 0;
+  float ppm = driftPpmEstimate(&n);
+  if (n < 3) return;                        // one or two intervals is not a rate
+  if (ppm > -1.0f && ppm < 1.0f) return;    // inside the measurement noise; leave it alone
+
+  double elapsed_s = (double)(now - g_clock_last_ms) / 1000.0;
+  double predicted_ms = elapsed_s * (double)ppm / 1000.0;    // ppm x seconds = µs
+  double outstanding = predicted_ms - (double)g_trim_applied_ms;
+  if (outstanding > -1000.0 && outstanding < 1000.0) return;  // less than a step's worth
+
+  int32_t step = outstanding > 0 ? 1 : -1;   // positive ppm => RTC slow => add time
+  rtc_clock.setCurrentTime(rtc_clock.getCurrentTime() + step);
+  g_trim_applied_ms += step * 1000;
+  g_trim_steps++;
+  Serial.printf("[clock] trim %+ld s (rate %.2f ppm from %d samples, %.0f ms outstanding)\n",
+                (long)step, (double)ppm, n, outstanding);
 }
 
 static void gpsSyncStart() {
@@ -391,25 +842,29 @@ static void gpsSyncTick() {
     long ts = gps->getTimestamp();
     if (ts > 1700000000L) {                           // sane epoch (past 2023)
       // measure the RTC's error BEFORE correcting it — that difference, over
-      // the interval since the last sync, is the crystal's real drift rate
+      // the interval since the last sync, is the crystal's real drift rate.
+      // NMEA only carries whole seconds, so unlike the NTP path this one has no
+      // sub-second reference to phase-compare against and stays quantised.
       uint32_t before = rtc_clock.getCurrentTime();
-      int32_t offset = (int32_t)((uint32_t)ts - before);
+      int32_t offset_ms = (int32_t)((uint32_t)ts - before) * 1000 + g_trim_applied_ms;
       uint32_t elapsed = g_clock_last_epoch ? ((uint32_t)ts - g_clock_last_epoch) : 0;
-      driftRecord((uint32_t)ts, offset, elapsed);
+      driftRecord((uint32_t)ts, offset_ms, elapsed, 0, false);   // NMEA is whole seconds
 
       rtc_clock.setCurrentTime((uint32_t)ts);
+      g_trim_applied_ms = 0;
+      g_phase_residual_ms = 0;   // whole-second GPS write: phase now unknown
       g_gps_last_sync_epoch = (uint32_t)ts;
       g_clock_src = "GPS";
       g_clock_last_epoch = (uint32_t)ts;
       g_clock_last_ms = millis();
       g_gps_last_result = "synced from GPS";
       if (elapsed) {
-        Serial.printf("[gps] clock synced to %lu (RTC was %+ld s over %lu s = %.1f ppm)\n",
-                      (unsigned long)ts, (long)offset, (unsigned long)elapsed,
-                      (double)offset * 1000000.0 / (double)elapsed);
+        Serial.printf("[gps] clock synced to %lu (RTC was %+ld ms over %lu s = %.1f ppm)\n",
+                      (unsigned long)ts, (long)offset_ms, (unsigned long)elapsed,
+                      (double)offset_ms * 1000.0 / (double)elapsed);
       } else {
-        Serial.printf("[gps] clock synced to %lu (first sync, RTC was %+ld s out)\n",
-                      (unsigned long)ts, (long)offset);
+        Serial.printf("[gps] clock synced to %lu (first sync, RTC was %+ld ms out)\n",
+                      (unsigned long)ts, (long)offset_ms);
       }
       gpsPower(false);
       g_gps_deadline_ms = 0;
@@ -506,6 +961,82 @@ public:
                network.getWifiPowerSave());
       return;
     }
+    // ---- MQTT uplink ----
+#ifdef WITH_MQTT_UPLINK
+    if (strcmp(command, "mqtt") == 0) {
+      if (g_mqtt == nullptr) { snprintf(reply, reply_size, "mqtt: not started yet"); return; }
+      size_t o = 0;
+      g_mqtt->formatStatusReply(reply, reply_size);
+      o = strlen(reply);
+      o += snprintf(reply + o, reply_size - o, "\nbrokers:");
+      for (int i = 0; i < MQTT_BROKER_COUNT && o + 32 < reply_size; i++) {
+        o += snprintf(reply + o, reply_size - o, " %s=%s", MQTT_BROKERS[i].key,
+                      g_mqtt->isEndpointEnabled(MQTT_BROKERS[i].bit) ? "on" : "off");
+      }
+      o += snprintf(reply + o, reply_size - o,
+                    "\nframes: seen=%lu parsed=%lu published=%lu",
+                    (unsigned long)g_mqtt_seen, (unsigned long)g_mqtt_parsed,
+                    (unsigned long)g_mqtt_pub);
+      o += snprintf(reply + o, reply_size - o,
+                    "\ncustom: host=%s port=%u transport=%s user=%s pass=%s",
+                    g_mqtt->getCustomHost()[0] ? g_mqtt->getCustomHost() : "-",
+                    (unsigned)g_mqtt->getCustomPort(), g_mqtt->getCustomTransport(),
+                    g_mqtt->getCustomUsername()[0] ? g_mqtt->getCustomUsername() : "-",
+                    g_mqtt->hasCustomPassword() ? "set" : "-");
+      return;
+    }
+    if (strncmp(command, "set mqtt.", 9) == 0) {
+      if (g_mqtt == nullptr) { snprintf(reply, reply_size, "Error - mqtt not started yet"); return; }
+      const char* k = command + 9;
+      const char* v = strchr(k, ' ');
+      if (v == nullptr) { snprintf(reply, reply_size, "Error - usage: set mqtt.<key> <value>"); return; }
+      char key[16];
+      size_t klen = (size_t)(v - k);
+      if (klen >= sizeof(key)) klen = sizeof(key) - 1;
+      memcpy(key, k, klen); key[klen] = 0;
+      v++;
+      bool ok = false;
+      if      (strcmp(key, "host") == 0)      ok = g_mqtt->setCustomHost(v);
+      else if (strcmp(key, "port") == 0)      ok = g_mqtt->setCustomPort(v);
+      else if (strcmp(key, "user") == 0)      ok = g_mqtt->setCustomUsername(v);
+      else if (strcmp(key, "pass") == 0)      ok = g_mqtt->setCustomPassword(v);
+      else if (strcmp(key, "transport") == 0) {
+        // the API speaks "tcp"/"wss"; the panel's select and older habits use 0/1
+        const char* t = v;
+        if (strcmp(v, "0") == 0) t = "tcp";
+        else if (strcmp(v, "1") == 0) t = "wss";
+        ok = g_mqtt->setCustomTransport(t);
+        if (!ok && strcmp(t, "wss") == 0) {
+          // wss for a CUSTOM broker needs the mbedTLS certificate bundle, which
+          // this build does not ship (the curated brokers carry their own PEMs).
+          snprintf(reply, reply_size,
+                   "Error - wss needs the CA certificate bundle, not built in; use tcp");
+          return;
+        }
+      }
+      else if (strcmp(key, "iata") == 0)      ok = g_mqtt->setIata(v);
+      else if (strcmp(key, "owner") == 0)     ok = g_mqtt->setOwnerPublicKey(v);
+      else if (strcmp(key, "email") == 0)     ok = g_mqtt->setOwnerEmail(v);
+      else if (strcmp(key, "packets") == 0)   ok = g_mqtt->setPacketsEnabled(strcmp(v, "on") == 0);
+      else if (strcmp(key, "status") == 0)    ok = g_mqtt->setStatusEnabled(strcmp(v, "on") == 0);
+      else if (strcmp(key, "broker") == 0) {
+        // "set mqtt.broker <key> on|off"
+        char bk[20]; const char* sp = strchr(v, ' ');
+        if (sp == nullptr) { snprintf(reply, reply_size, "Error - usage: set mqtt.broker <name> on|off"); return; }
+        size_t bl = (size_t)(sp - v); if (bl >= sizeof(bk)) bl = sizeof(bk) - 1;
+        memcpy(bk, v, bl); bk[bl] = 0;
+        uint8_t bit = mqttBrokerBit(bk);
+        if (bit == 0) { snprintf(reply, reply_size, "Error - unknown broker '%s'", bk); return; }
+        ok = g_mqtt->setEndpointEnabled(bit, strcmp(sp + 1, "on") == 0);
+      } else { snprintf(reply, reply_size, "Error - unknown mqtt setting '%s'", key); return; }
+      // The password is deliberately not echoed back.
+      // The bool from these setters means "persisted", not "accepted" — saying
+      // "rejected" when the value is live but unsaved is worse than useless.
+      snprintf(reply, reply_size, ok ? "OK - mqtt.%s saved"
+                                     : "Error - mqtt.%s not saved (rejected, or the write failed)", key);
+      return;
+    }
+#endif
     // ---- clock / GPS time discipline ----
     if (strcmp(command, "time") == 0 || strcmp(command, "clock") == 0) {
       uint32_t now_epoch = rtc_clock.getCurrentTime();
@@ -514,18 +1045,26 @@ public:
       formatEpochUtc(now_epoch, now_s, sizeof(now_s));
       if (g_gps_last_sync_epoch) formatEpochUtc(g_gps_last_sync_epoch, sync_s, sizeof(sync_s));
       else strncpy(sync_s, "never", sizeof(sync_s));
-      float ppm = driftPpm();
+      int navg = 0;
+      float ppm = driftPpmEstimate(&navg);
       snprintf(reply, reply_size,
-               "epoch=%lu utc=%s source=%s last_gps_sync=%s gps=%s sats=%ld "
-               "next_sync_in=%lus every=%luh batt=%umV drift=%.1fppm(%.1fs/day) syncs=%lu skipped_low_batt=%lu",
+               "epoch=%lu utc=%s source=%s rtc=%s last_gps_sync=%s gps=%s sats=%ld "
+               "next_sync_in=%lus every=%luh batt=%umV drift=%.2fppm(%.2fs/day) median of %d usable "
+               "last=%.2fppm trim=%s(%lu steps) osc_stopped=%s syncs=%lu skipped_low_batt=%lu",
                (unsigned long)now_epoch, now_s,
-               g_gps_last_sync_epoch ? "gps" : "manual/unset", sync_s,
+               g_gps_last_sync_epoch ? "gps" : "manual/unset",
+               AutoDiscoverRTCClock::deviceName(), sync_s,
                g_gps_deadline_ms ? "on(acquiring)" : "off",
                gps ? gps->satellitesCount() : 0,
                (unsigned long)(g_gps_sync_hours == 0 ? 0 :
                  (g_gps_next_ms > millis() ? (g_gps_next_ms - millis()) / 1000 : 0)),
                (unsigned long)g_gps_sync_hours, (unsigned)board.getBattMilliVolts(),
-               (double)ppm, (double)ppm * 86400.0 / 1000000.0,
+               (double)ppm, (double)ppm * 86400.0 / 1000000.0, navg,
+               (double)driftPpm(),
+               !AutoDiscoverRTCClock::hasHardwareRTC() ? "n/a (no hardware RTC)"
+                 : (g_trim_enabled ? "on" : "off"),
+               (unsigned long)g_trim_steps,
+               g_rtc_osc_stopped < 0 ? "unknown" : (g_rtc_osc_stopped ? "YES" : "no"),
                (unsigned long)g_drift_count, (unsigned long)g_gps_skips_low_batt);
       return;
     }
@@ -537,20 +1076,70 @@ public:
       }
       size_t o = 0;
       uint32_t shown = g_drift_count < DRIFT_SLOTS ? g_drift_count : DRIFT_SLOTS;
-      uint32_t start = g_drift_count - shown;
-      o += snprintf(reply + o, reply_size - o, "utc                  rtc_error  interval   rate\n");
-      for (uint32_t i = start; i < g_drift_count && o + 64 < reply_size; i++) {
+      uint32_t oldest = g_drift_count - shown;
+
+      // Print the NEWEST rows that fit, not the oldest. The loop used to start
+      // at the beginning and run out of buffer, silently dropping the most
+      // recent samples — the only ones anybody reads this for. Row widths vary
+      // (an "(excluded)" note nearly doubles one), so rather than assume a
+      // width, measure each row with snprintf(NULL, 0, ...) and walk backwards
+      // from the newest until the budget is spent.
+      const size_t footer = 96;      // the trailing "mean ..." line
+      size_t budget = reply_size - footer - 56 /* header */;
+      uint32_t start = g_drift_count;
+      while (start > oldest) {
+        const ClockDriftSample& s = g_drift[(start - 1) % DRIFT_SLOTS];
+        char ts[24];
+        formatEpochUtc(s.epoch, ts, sizeof(ts));
+        int need;
+        if (s.elapsed_s) {
+          float ppm = driftSamplePpm(s);
+          char why[48]; why[0] = 0;
+          if (s.elapsed_s < DRIFT_MIN_INTERVAL_S) strcpy(why, "  (skip: baseline)");
+          else if (!s.subsec) strcpy(why, "  (skip: whole-second)");
+          else if (s.gap_ms > DRIFT_MAX_GAP_MS) snprintf(why, sizeof(why), "  (skip: %ums stall)", s.gap_ms);
+          else if (ppm > DRIFT_OUTLIER_PPM || ppm < -DRIFT_OUTLIER_PPM) strcpy(why, "  (skip: outlier)");
+          need = snprintf(nullptr, 0, "%s %+9ldms %6lumin %4ums %+.2f ppm%s\n",
+                          ts, (long)s.offset_ms, (unsigned long)(s.elapsed_s / 60),
+                          s.gap_ms, (double)ppm, why);
+        } else {
+          need = snprintf(nullptr, 0, "%s %+9ldms       -   (first)\n", ts, (long)s.offset_ms);
+        }
+        if (need < 0 || (size_t)need > budget) break;
+        budget -= (size_t)need;
+        start--;
+      }
+      if (start > oldest) {
+        o += snprintf(reply + o, reply_size - o, "(newest %lu of %lu)\n",
+                      (unsigned long)(g_drift_count - start), (unsigned long)g_drift_count);
+      }
+      o += snprintf(reply + o, reply_size - o, "utc                    rtc_error  interval  gap    rate\n");
+      for (uint32_t i = start; i < g_drift_count; i++) {
         const ClockDriftSample& s = g_drift[i % DRIFT_SLOTS];
         char ts[24];
         formatEpochUtc(s.epoch, ts, sizeof(ts));
         if (s.elapsed_s) {
-          o += snprintf(reply + o, reply_size - o, "%s %+7lds %7luh  %+.1f ppm\n",
-                        ts, (long)s.offset_s, (unsigned long)(s.elapsed_s / 3600),
-                        (double)s.offset_s * 1000000.0 / (double)s.elapsed_s);
+          float ppm = driftSamplePpm(s);
+          char why[48]; why[0] = 0;
+          if (s.elapsed_s < DRIFT_MIN_INTERVAL_S) strcpy(why, "  (skip: baseline)");
+          else if (!s.subsec) strcpy(why, "  (skip: whole-second)");
+          else if (s.gap_ms > DRIFT_MAX_GAP_MS) snprintf(why, sizeof(why), "  (skip: %ums stall)", s.gap_ms);
+          else if (ppm > DRIFT_OUTLIER_PPM || ppm < -DRIFT_OUTLIER_PPM) strcpy(why, "  (skip: outlier)");
+          o += snprintf(reply + o, reply_size - o, "%s %+9ldms %6lumin %4ums %+.2f ppm%s\n",
+                        ts, (long)s.offset_ms, (unsigned long)(s.elapsed_s / 60),
+                        s.gap_ms, (double)ppm, why);
         } else {
-          o += snprintf(reply + o, reply_size - o, "%s %+7lds       -   (first)\n",
-                        ts, (long)s.offset_s);
+          o += snprintf(reply + o, reply_size - o, "%s %+9ldms       -   (first)\n",
+                        ts, (long)s.offset_ms);
         }
+      }
+      int navg = 0;
+      float avg = driftPpmEstimate(&navg);
+      if (o + 96 < reply_size) {
+        o += snprintf(reply + o, reply_size - o,
+                      "median %+.2f ppm (%.2f s/day) of %d usable samples · rtc=%s\n",
+                      (double)avg, (double)avg * 0.0864, navg,
+                      AutoDiscoverRTCClock::deviceName());
       }
       return;
     }
@@ -592,6 +1181,77 @@ public:
       g_wifi_nvs.end();
       g_ntp_started = false;            // restart the client against the new host
       snprintf(reply, reply_size, "OK - ntp server=%s (re-querying now)", g_ntp_server);
+      return;
+    }
+    // Force a measurement now rather than waiting for the schedule. Two of
+    // these an hour apart give a real drift sample without sitting through a
+    // six-hour interval — the sub-second phase measurement no longer needs a
+    // long baseline to beat its own quantisation.
+    if (strcmp(command, "clock sync") == 0) {
+      if (WiFi.status() != WL_CONNECTED) {
+        snprintf(reply, reply_size, "no wifi - cannot reach an NTP server");
+        return;
+      }
+      g_ntp_next_ms = millis();
+      snprintf(reply, reply_size, "OK - measuring against %s now (last result: %s)",
+               g_ntp_server, g_ntp_last_result);
+      return;
+    }
+    if (strncmp(command, "set ntp.interval ", 17) == 0) {
+      uint32_t h = (uint32_t)atoi(command + 17);
+      if (h < 1 || h > 168) {
+        snprintf(reply, reply_size, "ERR - interval must be 1..168 hours");
+        return;
+      }
+      g_ntp_interval_h = h;
+      g_wifi_nvs.begin("multiwifi", false);
+      g_wifi_nvs.putUInt("ntpiv", g_ntp_interval_h);
+      g_wifi_nvs.end();
+      g_ntp_next_ms = millis();      // re-measure now, so the new cadence starts clean
+      snprintf(reply, reply_size,
+               "OK - ntp interval=%luh (at ~%.0f ppm that is %.2f s of drift between syncs)",
+               (unsigned long)g_ntp_interval_h, (double)driftPpmEstimate(),
+               (double)driftPpmEstimate() * g_ntp_interval_h * 3600.0 / 1e6);
+      return;
+    }
+    if (strncmp(command, "set bot.webhook ", 16) == 0) {
+      const char* url = command + 16;
+      if (strcmp(url, "off") == 0 || strcmp(url, "none") == 0) url = "";
+      botWebhookSet(url);
+      snprintf(reply, reply_size, "OK - bot webhook %s%s", url[0] ? "= " : "disabled", url);
+      return;
+    }
+    if (strcmp(command, "bot test") == 0) {
+      snprintf(reply, reply_size, botWebhookTest()
+               ? "OK - synthetic message queued to the webhook"
+               : "Error - no webhook configured (or the queue is full)");
+      return;
+    }
+    if (strcmp(command, "bot") == 0) {
+      char url[128]; botWebhookGet(url, sizeof(url));
+      uint32_t sent, failed, dropped; botWebhookStats(&sent, &failed, &dropped);
+      char ents[400]; botEntitiesJson(ents, sizeof(ents));
+      snprintf(reply, reply_size, "webhook=%s sent=%lu failed=%lu dropped=%lu\n%s",
+               url[0] ? url : "(disabled)", (unsigned long)sent, (unsigned long)failed,
+               (unsigned long)dropped, ents);
+      return;
+    }
+    if (strncmp(command, "set clock.trim ", 15) == 0) {
+      g_trim_enabled = (strncmp(command + 15, "on", 2) == 0);
+      g_wifi_nvs.begin("multiwifi", false);
+      g_wifi_nvs.putBool("clktrim", g_trim_enabled);
+      g_wifi_nvs.end();
+      int navg = 0;
+      float ppm = driftPpmEstimate(&navg);
+      if (!AutoDiscoverRTCClock::hasHardwareRTC()) {
+        snprintf(reply, reply_size, "OK - clock.trim=%s, but no hardware RTC was found "
+                 "(%s): the clock read here is the one NTP already disciplines, so trimming "
+                 "it corrects nothing", g_trim_enabled ? "on" : "off",
+                 AutoDiscoverRTCClock::deviceName());
+      } else {
+        snprintf(reply, reply_size, "OK - clock.trim=%s (rate %.2f ppm from %d samples; "
+                 "needs 3 to act)", g_trim_enabled ? "on" : "off", (double)ppm, navg);
+      }
       return;
     }
     if (strncmp(command, "set diag ", 9) == 0) {
@@ -658,7 +1318,38 @@ public:
       }
       return;
     }
-    // optional chat identity slots: "set slot.chat2 on|off", "slots"
+    // Typed identity slots. "set slot.2 type room" is the general form;
+    // "set slot.chat2 on|off" is kept as the legacy spelling so anything
+    // scripted against the old command keeps working.
+    if (strncmp(command, "set slot.", 9) == 0 && strncmp(command + 9, "chat", 4) != 0) {
+      int idx = atoi(command + 9) - 1;
+      const char* arg = strstr(command + 9, " type ");
+      SlotType t;
+      if (idx < 0 || idx >= MULTI_MAX_CHAT_SLOTS || arg == nullptr ||
+          !slotTypeParse(arg + 6, &t)) {
+        snprintf(reply, reply_size, "Error - usage: set slot.<1-%d> type off|chat|room",
+                 MULTI_MAX_CHAT_SLOTS);
+        return;
+      }
+      SlotType was = slotTypeGet(idx);
+      slotTypeSet(idx, t);
+      if (was == t) {
+        snprintf(reply, reply_size, "OK - slot %d already type=%s", idx + 1, slotTypeName(t));
+        return;
+      }
+      // A live slot cannot change class in place: its mesh object is the wrong
+      // class and the stock meshes are not destructible (see the hot-start
+      // notes). Turning it off is immediate; coming back as the new type needs
+      // the port re-bound at boot.
+      g_slot_request[idx] = 2;                      // stop now, from loop()
+      snprintf(reply, reply_size,
+               "OK - slot %d type %s -> %s. Identity (%s) and storage are UNCHANGED. "
+               "%s",
+               idx + 1, slotTypeName(was), slotTypeName(t), slotNames()[idx],
+               t == SLOT_OFF ? "Stopped."
+                             : "Stopped; reboot to start it in the new role.");
+      return;
+    }
     if (strncmp(command, "set slot.chat", 13) == 0) {
       int idx = atoi(command + 13) - 1;
       const char* arg = strchr(command + 13, ' ');
@@ -667,21 +1358,42 @@ public:
         return;
       }
       bool on = strcmp(arg + 1, "on") == 0 || strcmp(arg + 1, "1") == 0;
-      multiChatSlotSetEnabled(idx, on);
+      slotTypeSet(idx, on ? SLOT_CHAT : SLOT_OFF);
       g_slot_request[idx] = on ? 1 : 2;   // applied from loop(), no reboot needed
-      snprintf(reply, reply_size, "OK - chat slot %d %s (app port %d)%s",
-               idx + 1, on ? "starting" : "stopping", multiChatSlotPort(idx),
-               on && !g_slot_started[idx] ? "" : "");
+      snprintf(reply, reply_size, "OK - chat slot %d %s (app port %d)",
+               idx + 1, on ? "starting" : "stopping", multiChatSlotPort(idx));
+      return;
+    }
+    // "slot 2 password hunter2" — run a command against a slot's own identity.
+    // Rooms already implement password / set name / advert in their stock CLI,
+    // so an extra room is managed exactly like the fixed one.
+    if (strncmp(command, "slot ", 5) == 0) {
+      int idx = atoi(command + 5) - 1;
+      const char* sub = strchr(command + 5, ' ');
+      if (idx < 0 || idx >= MULTI_MAX_CHAT_SLOTS || sub == nullptr || sub[1] == 0) {
+        snprintf(reply, reply_size, "Error - usage: slot <1-%d> <command>", MULTI_MAX_CHAT_SLOTS);
+        return;
+      }
+      IdentityModule* m = slotModule(idx);
+      if (m == nullptr) {
+        snprintf(reply, reply_size, "Error - slot %d is off", idx + 1);
+        return;
+      }
+      if (!g_slot_started[idx]) {
+        snprintf(reply, reply_size, "Error - slot %d (%s) is not running yet",
+                 idx + 1, slotTypeName(slotTypeGet(idx)));
+        return;
+      }
+      m->run_command(sub + 1, reply, reply_size);
       return;
     }
     if (strcmp(command, "slots") == 0) {
       size_t o = 0;
-      o += snprintf(reply + o, reply_size - o, "fixed: repeater, room, companion (app port %d)\n", 5000);
-      for (int i = 0; i < MULTI_MAX_CHAT_SLOTS && o + 60 < reply_size; i++) {
-        o += snprintf(reply + o, reply_size - o, "chat%d: %s%s (app port %d)\n", i + 1,
-                      multiChatSlotEnabled(i) ? "enabled" : "disabled",
-                      multiChatSlotRunning(i) ? " (running)" : "",
-                      multiChatSlotPort(i));
+      o += snprintf(reply + o, reply_size - o,
+                    "fixed: repeater, room, companion (app port %d)\n", 5000);
+      for (int i = 0; i < MULTI_MAX_CHAT_SLOTS && o + 80 < reply_size; i++) {
+        o += slotDescribe(i, reply + o, reply_size - o);
+        o += snprintf(reply + o, reply_size - o, "\n");
       }
       return;
     }
@@ -840,13 +1552,17 @@ int multiGpsStatusJson(char* out, size_t cap) {
                     : (g_gps_next_ms > now ? (g_gps_next_ms - now) / 1000 : 0);
   driftInit();
   float ppm = driftPpm();
+  int drift_n = 0;
+  float ppm_avg = driftPpmEstimate(&drift_n);
 
   int n = snprintf(out, cap,
     "{\"enabled\":%s,\"powered\":%s,\"lock\":%s,\"sats\":%ld,\"switch_on\":%s,\"rx_bytes\":%lu,"
     "\"every_h\":%lu,\"next_s\":%lu,\"last_sync\":%lu,\"syncs\":%lu,"
     "\"skips_low_batt\":%lu,\"drift_ppm\":%.2f,\"searching_s\":%lu,\"state\":\"%s\","
     "\"clock_source\":\"%s\",\"epoch\":%lu,"
-    "\"synced_ago_s\":%lu,\"ntp_server\":\"%s\",\"ntp_syncs\":%lu,\"ntp_state\":\"%s\"",
+    "\"synced_ago_s\":%lu,\"ntp_server\":\"%s\",\"ntp_syncs\":%lu,\"ntp_state\":\"%s\","
+    "\"rtc\":\"%s\",\"rtc_hw\":%s,\"drift_ppm_est\":%.2f,\"drift_samples\":%d,"
+    "\"trim\":%s,\"trim_steps\":%lu,\"trim_pending_ms\":%ld,\"subsec\":%s,\"drift_gap_ms\":%u,\"osc_stopped\":%d",
     g_gps_sync_hours > 0 ? "true" : "false",
     powered ? "true" : "false",
     valid ? "true" : "false",
@@ -861,7 +1577,13 @@ int multiGpsStatusJson(char* out, size_t cap) {
     g_clock_src,
     (unsigned long)rtc_clock.getCurrentTime(),
     (unsigned long)multiClockSyncedAgo(), g_ntp_server,
-    (unsigned long)g_ntp_syncs, g_ntp_last_result);
+    (unsigned long)g_ntp_syncs, g_ntp_last_result,
+    AutoDiscoverRTCClock::deviceName(),
+    AutoDiscoverRTCClock::hasHardwareRTC() ? "true" : "false",
+    (double)ppm_avg, drift_n,
+    g_trim_enabled ? "true" : "false", (unsigned long)g_trim_steps,
+    (long)g_trim_applied_ms, g_rtcp_done ? "true" : "false",
+    (unsigned)g_rtcp_gap_ms, g_rtc_osc_stopped);
 
   if (valid && n > 0 && (size_t)n < cap) {
     n += snprintf(out + n, cap - n, ",\"lat\":%.6f,\"lon\":%.6f,\"alt\":%ld",
@@ -1041,10 +1763,13 @@ static void applySlotRequests() {
     uint8_t req = g_slot_request[i];
     if (req == 0) continue;
     g_slot_request[i] = 0;
-    IdentityModule* m = multiChatSlotModule(i);
+    // Resolve by TYPE, not by assuming chat: a slot configured as a room must
+    // start its room instance, not a companion on the same port.
+    IdentityModule* m = slotModule(i);
+    if (m == nullptr) { g_core->setPortActive(g_slot_port_idx[i], false); continue; }
     if (req == 1) {
       if (!g_slot_started[i]) {
-        fs_chat[i].begin(multiChatSlotFsDir(i));
+        fs_chat[i].begin(slotFsDir(i));
         m->setup(&fs_chat[i], &port_chat[i]);
         g_slot_started[i] = true;
         bool listed = false;
@@ -1166,6 +1891,11 @@ void setup() {
 
   g_core = new SharedRadioCore(radio_driver);
   g_core->setTxPowerControl(&g_txpwr);
+  // Give the observer our time source so it can difference peers' advert
+  // timestamps against it. Ours is the disciplined one here — NTP every 6h
+  // while WiFi is up, GPS as the fallback — so the delta it records is
+  // essentially the other node's error, not a difference of two unknowns.
+  g_core->observer().setClock(&rtc_clock);
   // Put a wedged transceiver back together: full chip init, re-attach the
   // DIO1 ISR, then restore the shared radio parameters (radio_init() leaves
   // the compiled-in defaults, which are not what this node runs).
@@ -1179,6 +1909,13 @@ void setup() {
                             []() -> int16_t { return radio_driver.getLastRecvError(); },
                             []() -> const uint8_t* { return radio_driver.getLastRecvErrorPayload(); },
                             []() -> uint8_t { return radio_driver.getLastRecvErrorLen(); });
+  // per-packet coding rate for the trace: the sender's, out of the LoRa header
+  // of the frame the modem has just decoded
+  g_core->setRxCodingRateFn([]() -> uint8_t { return radio_driver.getLastRxCodingRate(); });
+  g_core->setRxAirtimeFn([](int len, uint8_t cr) -> uint32_t {
+    return radio_driver.getEstAirtimeForCR(len, cr);
+  });
+  g_core->setCodingRate(g_radio.cr);
   g_core->setPortName(g_core->addPort(port_rep),  "repeater");
   g_core->setPortName(g_core->addPort(port_room), "room");
   g_core->setPortName(g_core->addPort(port_comp), "companion");
@@ -1187,12 +1924,17 @@ void setup() {
   // inactive unless enabled — so port indices never move and a slot can be
   // switched on or off later without a reboot.
   multiChatSlotsInit();
+  roomInstancesInit(slotNames());   // room instances 1..N back typed slots
   for (int i = 0; i < MULTI_MAX_CHAT_SLOTS; i++) {
-    IdentityModule* m = multiChatSlotModule(i);
-    g_slot_port_idx[i] = g_core->addPort(port_chat[i], multiChatSlotEnabled(i));
-    g_core->setPortName(g_slot_port_idx[i], m->name);
-    if (multiChatSlotEnabled(i)) {
-      fs_chat[i].begin(multiChatSlotFsDir(i));
+    IdentityModule* m = slotModule(i);
+    g_slot_port_idx[i] = g_core->addPort(port_chat[i], m != nullptr);
+    // Name the port from the slot's IDENTITY name, not from the module: an
+    // off slot has no module, and this line used to be safe only because the
+    // old lookup returned one unconditionally. A port keeps its name whatever
+    // the slot is (or is not) running, which is what the trace wants anyway.
+    g_core->setPortName(g_slot_port_idx[i], slotNames()[i]);
+    if (m != nullptr) {
+      fs_chat[i].begin(slotFsDir(i));
       g_modules[NUM_MODULES++] = m;
     }
   }
@@ -1204,7 +1946,8 @@ void setup() {
   room_module.setup(&fs_room, &port_room);
   companion_module.setup(&fs_comp, &port_comp);
   for (int i = 0; i < MULTI_MAX_CHAT_SLOTS; i++) {
-    if (multiChatSlotEnabled(i)) { multiChatSlotModule(i)->setup(&fs_chat[i], &port_chat[i]); g_slot_started[i] = true; }
+    { IdentityModule* m = slotModule(i);
+      if (m) { m->setup(&fs_chat[i], &port_chat[i]); g_slot_started[i] = true; } }
   }
 
   // tell the arbiter each identity's key so it can spot our own hash coming
@@ -1214,8 +1957,9 @@ void setup() {
     room_module.get_pubkey(pk);      g_core->setPortIdentity(1, pk);
     companion_module.get_pubkey(pk); g_core->setPortIdentity(2, pk);
     for (int i = 0; i < MULTI_MAX_CHAT_SLOTS; i++) {
-      if (!multiChatSlotEnabled(i)) continue;
-      multiChatSlotModule(i)->get_pubkey(pk);
+      IdentityModule* m = slotModule(i);
+      if (m == nullptr) continue;
+      m->get_pubkey(pk);
       g_core->setPortIdentity(g_slot_port_idx[i], pk);
     }
   }
@@ -1233,8 +1977,22 @@ void setup() {
   { String n = g_wifi_nvs.getString("ntp", "");
     if (n.length() > 0) { strncpy(g_ntp_server, n.c_str(), sizeof(g_ntp_server) - 1);
                           g_ntp_server[sizeof(g_ntp_server) - 1] = 0; } }
+  g_trim_enabled = g_wifi_nvs.getBool("clktrim", true);
+  g_ntp_interval_h = g_wifi_nvs.getUInt("ntpiv", 6);
   g_wifi_nvs.end();
   driftInit();
+
+  // Sample the oscillator-stop flag ONCE, here, before the first NTP sync gets
+  // a chance to write the chip and clear it. This is the standing question
+  // about this node: every OTA it comes back tens of minutes out (25 and 28
+  // minutes on the last two), which is far more than a 24 ppm crystal can
+  // explain and has to mean the timekeeping was interrupted rather than drifted.
+  // If this reads "stopped" after a reflash, that is the answer.
+  g_rtc_osc_stopped = AutoDiscoverRTCClock::oscillatorStopped();
+  Serial.printf("[clock] rtc=%s oscillator-stopped-since-last-set=%s\n",
+                AutoDiscoverRTCClock::deviceName(),
+                g_rtc_osc_stopped < 0 ? "unknown (chip cannot report)"
+                                      : (g_rtc_osc_stopped ? "YES" : "no"));
 
   // composition owns WiFi + the single HTTPS web panel; credentials come from
   // our dedicated NVS store (authoritative), not NetworkService persistence.
@@ -1323,6 +2081,11 @@ void loop() {
   applySlotRequests();            // hot enable/disable of chat identities
   gpsSyncTick();                  // scheduled GPS clock discipline (fallback)
   ntpSyncTick();                  // ...and NTP, which is primary when wifi is up
+  clockTrimTick();                // ...and hold the RTC steady between the two
+  botTick();                      // push newly-arrived messages to the webhook
+#ifdef WITH_MQTT_UPLINK
+  mqttTick();                     // MQTT uplink (JWT-signed by our own identity)
+#endif
   multiWebTick();                 // stats history sampler (unified panel)
   serviceSerial();
 
