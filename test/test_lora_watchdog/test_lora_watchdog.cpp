@@ -1,7 +1,7 @@
-// LoraWatchdog: the node-scoped staged escalation that tells a dead radio apart
-// from a quiet band. Every stage is driven here by moving a fake clock and a
-// fake airtime counter, because on hardware the only way to observe it is to
-// wait fifteen minutes and then have the board reboot.
+// LoraWatchdog runs a staged escalation for the whole node. The escalation
+// tells a dead radio apart from a quiet band. These tests drive every stage
+// with a fake clock and a fake airtime counter. On hardware you can watch it
+// only if you wait fifteen minutes and then let the board reboot.
 
 #include <gtest/gtest.h>
 #include <limits.h>
@@ -15,9 +15,9 @@ namespace {
 
 const uint32_t IDLE_MS = 900000;   // the RAK3401 setting: 15 minutes
 
-// Records what the watchdog did to the world, in order.
+// This structure records the actions of the watchdog, in order.
 struct Node {
-  uint32_t airtime = 1000;   // never zero: a fresh counter is not "no radio"
+  uint32_t airtime = 1000;   // never zero: a new counter does not mean "no radio"
   int probes = 0, reinits = 0, reboots = 0;
   bool reinit_restores_airtime = true;
 
@@ -27,7 +27,7 @@ struct Node {
     Node* n = (Node*)c;
     n->reinits++;
     if (!n->reinit_restores_airtime) return;
-    n->airtime += 50;   // a radio that came back: the probe reaches the air
+    n->airtime += 50;   // the radio came back, so the probe reaches the air
   }
   static void reboot(void* c) { ((Node*)c)->reboots++; }
 };
@@ -38,11 +38,11 @@ struct Fixture {
   Fixture(uint32_t idle_ms = IDLE_MS, unsigned long start_ms = 10000) {
     g_fake_millis = start_ms;
     wd.begin(idle_ms, &node, Node::air, Node::probe, Node::reinit, Node::reboot);
-    wd.loop();   // first observation seeds the activity stamp
+    wd.loop();   // the first check sets the activity time stamp
   }
-  // One check window: exactly what the watchdog paces itself to.
+  // One check window. This is the interval that the watchdog uses.
   void step() { g_fake_millis += LoraWatchdog::CHECK_EVERY_MS; wd.loop(); }
-  // Advance the clock and give the watchdog every check it is due.
+  // Move the clock forward. Give the watchdog every check that it is due.
   void advance(unsigned long ms) {
     unsigned long target = g_fake_millis + ms;
     while ((long)(g_fake_millis - target) < 0) {
@@ -79,8 +79,8 @@ TEST(LoraWatchdog, WithNoAirtimeSourceItDoesNothing) {
 
 TEST(LoraWatchdog, ChecksAreSpacedNotRunEveryLoop) {
   Fixture f;
-  // A million calls inside one check window must not advance anything: an
-  // unpaced retry loop is the failure mode this pacing exists for.
+  // A million calls inside one check window must change nothing. A retry loop
+  // with no interval is the fault that this interval prevents.
   for (int i = 0; i < 1000; i++) f.wd.loop();
   g_fake_millis += LoraWatchdog::CHECK_EVERY_MS - 1;
   for (int i = 0; i < 1000; i++) f.wd.loop();
@@ -94,7 +94,7 @@ TEST(LoraWatchdog, ChecksAreSpacedNotRunEveryLoop) {
 
 TEST(LoraWatchdog, TrafficKeepsItSilentIndefinitely) {
   Fixture f;
-  for (int i = 0; i < 200; i++) {   // ~100 minutes of a working radio
+  for (int i = 0; i < 200; i++) {   // about 100 minutes of a working radio
     f.node.airtime += 7;
     f.advance(LoraWatchdog::CHECK_EVERY_MS);
   }
@@ -147,7 +147,7 @@ TEST(LoraWatchdog, AProbeWithNoAirtimeReinitialisesTheRadio) {
 }
 
 TEST(LoraWatchdog, AReinitThatWorksAbortsBeforeTheReboot) {
-  Fixture f;                       // reinit_restores_airtime defaults true
+  Fixture f;                       // reinit_restores_airtime is true by default
   f.advance(IDLE_MS);
   f.step();
   ASSERT_EQ(1, f.node.reinits);
@@ -171,8 +171,8 @@ TEST(LoraWatchdog, StillSilentAfterAReinitRebootsExactlyOnce) {
 }
 
 TEST(LoraWatchdog, TheRebootIsReachedOnlyThroughEveryStage) {
-  // Order matters: reboot is the last resort, and a node that reboots without
-  // first having tried a reinit has thrown away its only cheap recovery.
+  // The order is important. The reboot is the last step. A node that reboots
+  // before it tries a reinit loses its only cheap recovery.
   Fixture f;
   f.node.reinit_restores_airtime = false;
   int probes_at_reinit = -1;
@@ -227,12 +227,12 @@ TEST(LoraWatchdog, AfterARecoveryTheWholeEscalationIsAvailableAgain) {
 
 // --------------------------------------------------------- millis() wrap
 
-// Every elapsed test in the watchdog is (long)(now - then) < 0, not now < then.
-// Start just below the wrap so the whole escalation straddles it: with an
-// unsigned comparison the idle test would be satisfied instantly on the far
-// side and the node would reboot itself for no reason. (The host's unsigned
-// long is 64-bit and the device's is 32; the form of the comparison is what is
-// under test, not the width.)
+// Every elapsed-time test in the watchdog is (long)(now - then) < 0. It is not
+// now < then. This test starts just below the wrap, so the whole escalation
+// crosses it. With an unsigned comparison the idle test passes at once on the
+// far side, and the node then reboots for no reason. The unsigned long of the
+// host has 64 bits and the one of the device has 32 bits. This test covers the
+// form of the comparison, not the width.
 TEST(LoraWatchdog, TheEscalationSurvivesAMillisWrap) {
   const unsigned long start = ULONG_MAX - 60000;
   Fixture f(IDLE_MS, start);
@@ -259,9 +259,9 @@ TEST(LoraWatchdog, PacingSurvivesAMillisWrap) {
 
 // -------------------------------------------- the shared radio as the source
 
-// Hydra feeds the watchdog SharedRadioCore::airtimeMs() rather than one
-// Dispatcher's, because a single identity behind a shared radio only ever sees
-// its own share of transmit.
+// Hydra gives the watchdog SharedRadioCore::airtimeMs(). It does not give the
+// value from one Dispatcher. One identity behind a shared radio sees only its
+// own part of the transmit time.
 class StubRadio : public mesh::Radio {
 public:
   std::vector<uint8_t> pending_rx;
@@ -312,7 +312,7 @@ TEST(LoraWatchdog, DrivenFromTheArbiterItRebootsOnlyWhenTheRadioIsReallyDead) {
   g_fake_millis = 10000;
   wd.begin(IDLE_MS, &ctx,
            [](void* c) { return ((Ctx*)c)->core->airtimeMs(); },
-           [](void*) {},   // probe: nothing reaches the air, the radio is dead
+           [](void*) {},   // the probe: nothing reaches the air, because the radio is dead
            [](void*) {},
            [](void* c) { ((Ctx*)c)->reboots++; });
 
@@ -331,8 +331,8 @@ TEST(LoraWatchdog, DrivenFromTheArbiterItRebootsOnlyWhenTheRadioIsReallyDead) {
     wd.loop();
     checks++;
   }
-  // board.reboot() does not return on hardware, so "once" is about how many
-  // watchdogs the node has, not about latching.
+  // On hardware board.reboot() does not return. Thus "once" tells you how many
+  // watchdogs the node has. It does not tell you that the watchdog locks itself.
   EXPECT_EQ(1, ctx.reboots);
   EXPECT_GT(checks * (int)LoraWatchdog::CHECK_EVERY_MS, (int)IDLE_MS)
       << "it waited out the full idle interval before doing anything drastic";

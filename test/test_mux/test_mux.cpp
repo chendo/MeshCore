@@ -1,9 +1,11 @@
-// MuxSerialInterface: lets a local client ("the web" below) drive a chat
-// identity's app protocol while the MeshCore phone app is connected to the same
-// identity over TCP. The routing rules are subtle and were arrived at from real
-// failures, so they are pinned here: responses go back to whoever asked, async
-// pushes always go to the phone, and every message/push is mirrored for the web
-// to read WITHOUT consuming the device's offline queue.
+// MuxSerialInterface lets a local client use the app protocol of a chat
+// identity. The comments below call this client "the web". At the same time the
+// MeshCore phone app can connect to the same identity over TCP. The routing
+// rules are not obvious, and they come from real failures. These tests hold
+// them in place. A response goes back to the client that asked. An asynchronous
+// push always goes to the phone. The code copies every message and every push
+// for the web to read. The web reads the copy and does NOT empty the offline
+// queue of the device.
 
 #include <gtest/gtest.h>
 #include <vector>
@@ -14,7 +16,7 @@ FakeSerial Serial;
 
 namespace {
 
-// app-protocol codes used below (see docs/companion_protocol.md)
+// the app-protocol codes that the tests below use. See docs/companion_protocol.md.
 constexpr uint8_t CMD_SEND_LOGIN        = 26;
 constexpr uint8_t RESP_CODE_SENT        = 6;
 constexpr uint8_t RESP_CODE_CONTACT     = 3;
@@ -27,7 +29,8 @@ struct Mux {
   MuxSerialInterface m;
   Mux() { m.init(8 * 1024); }
 
-  // stand in for the mesh loop: hand the next queued frame to the "mesh"
+  // This function replaces the mesh loop. It gives the next queued frame to the
+  // mesh.
   size_t pump(uint8_t* dest) { return m.checkRecvFrame(dest); }
 };
 
@@ -69,7 +72,7 @@ TEST(Mux, ResponseToATcpCommandGoesToTheAppNotTheWeb) {
   mux.m.tcp.inbound.push_back({CMD_SEND_LOGIN, 0x01});
 
   uint8_t got[MAX_FRAME_SIZE];
-  ASSERT_EQ(2u, mux.pump(got));            // consumed from TCP -> app owns replies
+  ASSERT_EQ(2u, mux.pump(got));            // the frame came from TCP, so the app gets the replies
 
   uint8_t resp[] = {RESP_CODE_SENT, 0};
   mux.m.writeFrame(resp, sizeof(resp));
@@ -118,14 +121,14 @@ TEST(Mux, AsyncPushesAlwaysGoToTheAppEvenDuringAWebExchange) {
 }
 
 TEST(Mux, PushesAreMirroredSoTheWebCanObserveThemWithNoAppConnected) {
-  Mux mux;                                  // no TCP client at all
+  Mux mux;                                  // there is no TCP client at all
   uint8_t push[] = {PUSH_LOGIN_SUCCESS, 1, 2, 3};
   mux.m.writeFrame(push, sizeof(push));
 
   uint8_t out[512];
   int n = mux.m.archiveCopy(0, out, sizeof(out));
   ASSERT_GT(n, 0) << "otherwise a web-initiated login looks like silence";
-  // archive entries are [u32 seq][u16 len][frame]
+  // an archive entry is [u32 seq][u16 len][frame]
   uint16_t len = out[4] | (out[5] << 8);
   EXPECT_EQ(PUSH_LOGIN_SUCCESS, out[6]);
   EXPECT_EQ(4, len);
@@ -177,23 +180,24 @@ TEST(MuxArchive, PlainResponsesAreNotMirrored) {
 
 // -------------------------------------------------- simulated room join flow
 
-// A web-initiated room join end to end: send CMD_SEND_LOGIN, get RESP_CODE_SENT
-// synchronously, then observe the room's answer arriving later as an async push.
+// A complete room join that the web starts. The web sends CMD_SEND_LOGIN. It
+// gets RESP_CODE_SENT at once. The answer of the room comes later as an
+// asynchronous push.
 TEST(MuxRoomJoin, SuccessfulJoinIsAcknowledgedThenConfirmedViaTheMirror) {
   Mux mux;
   uint32_t before = mux.m.archiveSeq();
 
   uint8_t login[1 + 32 + 8];
   login[0] = CMD_SEND_LOGIN;
-  memset(login + 1, 0x6D, 32);                 // room pubkey
-  memcpy(login + 33, "hunter22", 8);           // join password
+  memset(login + 1, 0x6D, 32);                 // the public key of the room
+  memcpy(login + 33, "hunter22", 8);           // the password for the join
   ASSERT_TRUE(mux.m.webStart(login, sizeof(login)));
 
   uint8_t got[MAX_FRAME_SIZE];
   ASSERT_EQ(sizeof(login), mux.pump(got));
   EXPECT_EQ(CMD_SEND_LOGIN, got[0]);
 
-  uint8_t sent[10] = {RESP_CODE_SENT, 0};      // "login request transmitted"
+  uint8_t sent[10] = {RESP_CODE_SENT, 0};      // "the login request went out"
   mux.m.writeFrame(sent, sizeof(sent));
 
   uint8_t out[512];
@@ -202,7 +206,7 @@ TEST(MuxRoomJoin, SuccessfulJoinIsAcknowledgedThenConfirmedViaTheMirror) {
   ASSERT_EQ(1u, frames.size());
   ASSERT_EQ(RESP_CODE_SENT, frames[0][0]);
 
-  // ...seconds later the room answers over the air
+  // Seconds later the room answers over the air.
   uint8_t success[] = {PUSH_LOGIN_SUCCESS, 0x01};
   mux.m.writeFrame(success, sizeof(success));
 
@@ -238,7 +242,7 @@ TEST(MuxRoomJoin, AppAndWebCanUseTheIdentityConcurrentlyWithoutCrosstalk) {
   Mux mux;
   mux.m.tcp.connected = true;
 
-  // phone app syncs contacts
+  // the phone app synchronises its contacts
   mux.m.tcp.inbound.push_back({4});
   uint8_t got[MAX_FRAME_SIZE];
   ASSERT_EQ(1u, mux.pump(got));
@@ -246,7 +250,7 @@ TEST(MuxRoomJoin, AppAndWebCanUseTheIdentityConcurrentlyWithoutCrosstalk) {
   mux.m.writeFrame(contact, sizeof(contact));
   ASSERT_EQ(1u, mux.m.tcp.written.size());
 
-  // web joins a room in the same session
+  // the web joins a room in the same session
   uint8_t login[] = {CMD_SEND_LOGIN, 0x01};
   ASSERT_TRUE(mux.m.webStart(login, sizeof(login)));
   ASSERT_EQ(2u, mux.pump(got));
@@ -271,12 +275,12 @@ TEST(MuxConnected, ReportsConnectedWhileTheWebIsActiveSoAsyncResultsArentDropped
   EXPECT_TRUE(mux.m.isConnected())
       << "stock code gates trace/login results on isConnected()";
 
-  g_fake_millis += 61000;            // web went away
+  g_fake_millis += 61000;            // the web has gone away
   EXPECT_FALSE(mux.m.isConnected()) << "the web claim should lapse";
 }
 
 TEST(MuxConnected, IsNotConnectedRightAfterBootWithNothingAttached) {
-  g_fake_millis = 0;                 // millis() near zero at startup
+  g_fake_millis = 0;                 // millis() is near zero at start-up
   Mux mux;
   EXPECT_FALSE(mux.m.isConnected());
 }

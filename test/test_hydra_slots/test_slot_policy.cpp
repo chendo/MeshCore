@@ -1,6 +1,7 @@
-// The parts of the hydra slot CLI that have logic worth pinning down: the
-// name-before-enable rule, the RAM reserve floor, safe-mode decoding of a
-// stored slot record, and the node/slot namespace split.
+// These tests cover the parts of the hydra slot CLI that hold real logic: the
+// rule that a name comes before enable, the RAM reserve floor, how safe mode
+// decodes a stored slot record, and the split between the node namespace and
+// the slot namespace.
 
 #include <gtest/gtest.h>
 #include <SlotPolicy.h>
@@ -41,8 +42,8 @@ TEST(SlotEnable, RefusesAnUnnamedSlot) {
 }
 
 TEST(SlotEnable, RefusesANameItWouldNotHaveAccepted) {
-  // The gate is the same predicate as `set name`, so a record that got a bad
-  // name past an older build still cannot bring an identity up.
+  // This check uses the same test as `set name`. An older build could accept a
+  // bad name. Such a record still cannot start an identity.
   EXPECT_EQ(SLOT_ENABLE_NO_NAME, slotEnableCheck(1, 3, SLOT_CHAT, "no:colons"));
 }
 
@@ -66,8 +67,8 @@ TEST(SlotEnable, OffAndRepeaterAreNotThingsASlotCanBeTurnedInto) {
 }
 
 TEST(SlotEnable, EveryRefusalSaysWhy) {
-  // The whole point of the rule is that the operator is told, so no result may
-  // fall through to a bare "ERR".
+  // The rule exists to tell the operator the cause. Thus no result may give only
+  // "ERR".
   const SlotEnableResult all[] = {
     SLOT_ENABLE_RANGE, SLOT_ENABLE_SLOT0, SLOT_ENABLE_NO_NAME,
     SLOT_ENABLE_BAD_TYPE, SLOT_ENABLE_NO_RAM, SLOT_ENABLE_FAILED,
@@ -95,7 +96,7 @@ TEST(SlotRecord, ANamelessStoredSlotComesUpOff) {
 }
 
 TEST(SlotRecord, GarbageDecodesToOffNotToARunningIdentity) {
-  // A record of 0xFF bytes is what a short read or an erased sector looks like.
+  // A short read or an erased sector gives a record of 0xFF bytes.
   char junk[SLOT_NAME_MAX];
   memset(junk, 0xFF, sizeof(junk));
   junk[SLOT_NAME_MAX - 1] = 0;
@@ -105,8 +106,8 @@ TEST(SlotRecord, GarbageDecodesToOffNotToARunningIdentity) {
 // ------------------------------------------------------------ the RAM reserve
 
 namespace {
-// A heap with a hard budget and a largest-block ceiling, so the refusal path
-// can be exercised without needing a real one to be nearly full.
+// This heap has a fixed budget and a limit on the largest block. Thus the tests
+// can use the refusal path. A real heap that is nearly full is not necessary.
 struct FakeHeap {
   static size_t budget;
   static size_t max_block;
@@ -148,13 +149,13 @@ TEST(RamFloor, RefusesWhenTheHeapIsAlreadyBelowTheFloor) {
 }
 
 TEST(RamFloor, ASlotThatWouldEatIntoTheReserveCannotAllocate) {
-  // The whole gate: the reserve is pinned FIRST, so the slot's own allocation
-  // is made against what is left over rather than against the whole heap.
+  // This is the full rule. The code holds the reserve FIRST. Thus the slot takes
+  // its own memory from what remains, not from the whole heap.
   const size_t slot_need = 8 * 1024;
   FakeHeap::reset(HYDRA_RAM_RESERVE + slot_need / 2, 64 * 1024);
   RamFloor floor(HYDRA_RAM_RESERVE, FakeHeap::alloc, FakeHeap::release);
   ASSERT_TRUE(floor.held());
-  EXPECT_EQ(nullptr, FakeHeap::alloc(slot_need));   // refused: this is the failure we want
+  EXPECT_EQ(nullptr, FakeHeap::alloc(slot_need));   // the heap must refuse: that is the point
 }
 
 TEST(RamFloor, ASlotThatFitsAboveTheReserveStillAllocates) {
@@ -174,7 +175,7 @@ TEST(RamFloor, ReleasingHandsTheReserveBack) {
     ASSERT_TRUE(floor.held());
     floor.release();
     EXPECT_EQ(0, FakeHeap::live);
-    floor.release();   // idempotent: the destructor must not double-free
+    floor.release();   // a second release does nothing: the destructor must not free it twice
   }
   EXPECT_EQ(0, FakeHeap::live);
   EXPECT_EQ(64u * 1024u, FakeHeap::budget);
@@ -212,7 +213,7 @@ TEST(HeadroomProbe, ReportsZeroOnAnExhaustedHeap) {
 // -------------------------------------------------- node vs slot namespace
 
 TEST(CliNamespace, SlotLevelRefusesRadioParameters) {
-  // Decision 8: there is one transceiver, and slot 3 must not retune it.
+  // Decision 8: the board has one transceiver, and slot 3 must not tune it.
   for (const char* v : { "freq", "bw", "sf", "cr", "tx", "radio", "cad",
                          "int.thresh", "dutycycle", "af", "extra.sf" }) {
     EXPECT_TRUE(slotVerbIsNodeLevel(v)) << v;
@@ -243,7 +244,8 @@ TEST(CliNamespace, SlotLevelOwnsIdentityNameAclAndAdvertSettings) {
 }
 
 TEST(CliNamespace, MatchesWholeTokensNotPrefixes) {
-  // "tx" is node-level; "txt" and "tx.foo" style near-misses must not be.
+  // "tx" is at node level. Names that are almost the same, such as "txt" and
+  // "tx.foo", are not at node level.
   EXPECT_TRUE(slotVerbIsNodeLevel("tx 20"));
   EXPECT_FALSE(slotVerbIsNodeLevel("txname"));
   EXPECT_FALSE(slotVerbIsNodeLevel("radioactive"));

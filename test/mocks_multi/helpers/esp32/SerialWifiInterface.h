@@ -1,13 +1,13 @@
 #pragma once
-// Stand-in for the phone app's TCP transport: tests drive inbound frames and
-// inspect what the mux wrote back to the "socket".
+// This class replaces the TCP transport of the phone app. The tests supply the
+// inbound frames. The tests then examine what the mux wrote back to the socket.
 #include <helpers/BaseSerialInterface.h>
 #include <vector>
 class SerialWifiInterface : public BaseSerialInterface {
 public:
   bool connected = false;
-  std::vector<std::vector<uint8_t>> written;    // frames sent to the app
-  std::vector<std::vector<uint8_t>> inbound;    // frames the app sent us
+  std::vector<std::vector<uint8_t>> written;    // the frames that the mux sent to the app
+  std::vector<std::vector<uint8_t>> inbound;    // the frames that the app sent to us
   int port = 0;
 
   void begin(int p) { port = p; }

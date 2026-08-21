@@ -1,5 +1,6 @@
 #pragma once
-// Mock of the mesh::Radio interface that SharedRadio funnels through.
+// A mock of the mesh::Radio interface. SharedRadio sends all of its radio
+// operations through this interface.
 #include <Arduino.h>
 #include <MeshCore.h>
 

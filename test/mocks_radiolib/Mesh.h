@@ -1,7 +1,8 @@
 #pragma once
 
-// RadioLibWrappers.h includes <Mesh.h> only to reach mesh::Radio and
-// mesh::MainBoard, which are declared one layer down. Pull in the real headers
-// rather than restating the interfaces here, so a signature change upstream
-// breaks the build instead of silently drifting from what is being tested.
+// RadioLibWrappers.h includes <Mesh.h> only to get mesh::Radio and
+// mesh::MainBoard. Headers one level lower declare both of them. This mock
+// includes the real headers. It does not write the interfaces again. Thus a
+// change to a signature upstream stops the build. The test cannot move away
+// from the real code without a warning.
 #include <Dispatcher.h>

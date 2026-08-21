@@ -1,8 +1,8 @@
-// The arbiter built the way it ships: PKT_TRACE_ENTRIES undefined, so the
-// packet trace is compiled out. Everything the node actually runs on — the
-// counters, the node-wide airtime the LoRa watchdog reads, the duty pool — must
-// be unaffected, and everything that reads the trace must report "nothing"
-// rather than stale rows or a build failure.
+// This suite builds the arbiter as the product ships it. PKT_TRACE_ENTRIES is
+// not defined, so the compiler removes the packet trace. The parts that the
+// node runs on must not change: the counters, the node-wide airtime that the
+// LoRa watchdog reads, and the duty pool. Every reader of the trace must report
+// "nothing". It must not report old rows, and the build must not fail.
 
 #include <gtest/gtest.h>
 #include "helpers/SharedRadio.h"
@@ -47,9 +47,9 @@ struct Fixture {
 TEST(TraceDisabled, TheRingIsGoneNotMerelyEmpty) {
   EXPECT_EQ(0, (int)SharedRadioCore::PKT_LOG_SIZE);
   EXPECT_FALSE(SharedRadioCore::pktTraceEnabled());
-  // A zero-length array would still occupy its alignment and still link the
-  // code that writes it. Nothing of the ring may survive: the whole arbiter has
-  // to be smaller than the buffer alone would have been at the full depth.
+  // An array of zero length still uses its alignment bytes. It also still links
+  // the code that writes to it. No part of the ring may stay. The whole arbiter
+  // must be smaller than the buffer alone at the full depth.
   EXPECT_LT(sizeof(SharedRadioCore), (size_t)48 * sizeof(PktLogEntry));
 }
 
@@ -61,15 +61,15 @@ TEST(TraceDisabled, ReadersGetNothingRatherThanGarbage) {
   f.a.onSendFinished();
 
   PktLogEntry entries[8];
-  memset(entries, 0xAA, sizeof(entries));   // poison: a reader must not see this back
+  memset(entries, 0xAA, sizeof(entries));   // a poison value: a reader must not get it back
   EXPECT_EQ(0, f.core.pktLogCopy(entries, 8, 0));
   EXPECT_EQ(0u, f.core.pktLogSeq());
   EXPECT_EQ(0xAA, entries[0].raw[0]) << "the buffer was never written to";
 }
 
 TEST(TraceDisabled, ACursorFromAPreviousBuildIsHarmless) {
-  // stats readers keep a seq cursor across calls; one carried over from a build
-  // that had the trace must not walk a ring that no longer exists.
+  // The readers of the statistics keep a seq cursor between calls. A cursor
+  // from a build that had the trace must not walk a ring that no longer exists.
   Fixture f;
   f.deliver({0x11, 0x22, 0x33});
   PktLogEntry entries[4];
@@ -100,8 +100,8 @@ TEST(TraceDisabled, ContentionAndFailureCountersStillWork) {
 }
 
 TEST(TraceDisabled, TheNodeWideAirtimeIsUnaffected) {
-  // This is the LoRa watchdog's only input. It was computed inside the trace
-  // writer, so it is exactly the thing a careless gating would have removed.
+  // This is the only input of the LoRa watchdog. The trace writer calculated
+  // it. Thus a careless #if could remove it.
   Fixture f;
   EXPECT_EQ(0u, f.core.airtimeMs());
   f.deliver({0x11, 0x22, 0x33, 0x44});
@@ -121,8 +121,9 @@ TEST(TraceDisabled, RxErrorsAreStillNoticedEvenThoughTheyAreNotRecorded) {
   f.core.setRxErrorCounter([]() { return s_radio->recv_errors; });
   f.radio.recv_errors = 3;
   f.core.pump();
-  // Nothing to assert on the trace; what matters is that pump() neither
-  // crashed nor spun on the error counter it can no longer log.
+  // There is nothing to check in the trace. What matters is that pump() did not
+  // crash. It also did not loop on the error counter that it can no longer
+  // record.
   PktLogEntry e[4];
   EXPECT_EQ(0, f.core.pktLogCopy(e, 4, 0));
   f.core.pump();
