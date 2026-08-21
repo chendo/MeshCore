@@ -29,10 +29,15 @@ public:
   RadioPort& port() override { return _port; }
   SlotType type() const override { return SLOT_REPEATER; }
   const mesh::LocalIdentity& identity() const override { return _mesh.self_id; }
+  // Slot 0's name lives in prefs.json, owned by CommonCLI, not in the hydra
+  // slot config: it is the stock repeater identity and `set name` still works
+  // on it unqualified. ADVERT_NAME means it is never unnamed.
+  const char* name() const override { return const_cast<MyMesh&>(_mesh).getNodePrefs()->node_name; }
   bool hasPendingWork() const override { return _begun && _mesh.hasPendingWork(); }
   MyMesh& mesh() { return _mesh; }
 
-  bool begin(FILESYSTEM* fs, IdentityStore& store, const char* id_name) override {
+  bool begin(FILESYSTEM* fs, IdentityStore& store, const char* id_name,
+             const char* display_name, SlotType type) override {
     if (!store.load(id_name, _mesh.self_id)) {
       _mesh.self_id = radio_new_identity();
       // 0x00 and 0xFF are reserved id-hash prefixes
@@ -48,9 +53,10 @@ public:
 
   void loop() override { if (_begun) _mesh.loop(); }
 
-  void handleCommand(char* command, char* reply, size_t reply_sz) override {
+  void handleCommand(uint32_t sender_timestamp, char* command,
+                     char* reply, size_t reply_sz) override {
     // reply must be >= 160 bytes: MyMesh's CLI writes into it unbounded.
-    if (_begun) _mesh.handleCommand(0, command, reply);   // no sender_timestamp over serial
+    if (_begun) _mesh.handleCommand(sender_timestamp, command, reply);
   }
 
   NodePrefs* prefs() { return _mesh.getNodePrefs(); }

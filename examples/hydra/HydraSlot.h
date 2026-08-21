@@ -1,25 +1,19 @@
 #pragma once
 
 // A hydra node runs several mesh identities over one LoRa radio. Each identity
-// lives in a SLOT: its own keypair, its own mesh::Mesh, its own packet pool and
-// dedup table, and its own RadioPort out of the shared radio arbiter.
+// lives in a SLOT: its own keypair, its own name, its own mesh::Mesh, its own
+// packet pool and dedup table, and its own RadioPort out of the shared radio
+// arbiter. A room slot also has its own ACL.
 //
 // Slot 0 is the repeater and is not disableable — it is the reason the node is
 // sited where it is. Slots 1..N are optional and may be off.
 
+#include "SlotPolicy.h"
 #include <Mesh.h>
+#include <new>
 #include <helpers/IdentityStore.h>
 #include <helpers/SharedRadio.h>
 #include <helpers/StaticPoolPacketManager.h>
-
-enum SlotType : uint8_t {
-  SLOT_OFF      = 0,
-  SLOT_REPEATER = 1,
-  SLOT_CHAT     = 2,
-  // SLOT_ROOM = 3 — room server. Deliberately not implemented; the hook is a
-  // RoomSlot alongside ChatSlot plus cases in HydraNode::typeName() and the
-  // `slot N <type>` CLI.
-};
 
 class HydraSlot {
 public:
@@ -30,15 +24,24 @@ public:
   // the TX-owner bookkeeping reference ports by index.
   virtual RadioPort& port() = 0;
 
-  virtual bool begin(FILESYSTEM* fs, IdentityStore& store, const char* id_name) = 0;
+  // `id_name` is the STORAGE key and is derived from the slot index alone —
+  // never from the type or the display name (decision 7). `display_name` is
+  // what goes in the advert and must be non-empty by the time we get here.
+  virtual bool begin(FILESYSTEM* fs, IdentityStore& store, const char* id_name,
+                     const char* display_name, SlotType type) = 0;
   virtual void loop() = 0;
 
   virtual SlotType type() const = 0;
   virtual const mesh::LocalIdentity& identity() const = 0;
+  virtual const char* name() const = 0;
+  virtual void setName(const char* n) {}
   virtual bool hasPendingWork() const = 0;   // gates the node's powersave sleep
+  virtual void flushPendingWrites() {}       // lazy ACL writes, before a reboot
 
-  // `slot N <cmd>`
-  virtual void handleCommand(char* command, char* reply, size_t reply_sz) = 0;
+  // `slot N <cmd>`. sender_timestamp 0 means the serial console, matching
+  // upstream's convention for "this caller is physically present".
+  virtual void handleCommand(uint32_t sender_timestamp, char* command,
+                             char* reply, size_t reply_sz) = 0;
 };
 
 // The packet pool is heap-allocated at construction (StaticPoolPacketManager
@@ -52,7 +55,12 @@ class DeferredPacketManager : public mesh::PacketManager {
   int _pool_size;
 public:
   explicit DeferredPacketManager(int pool_size) : _p(nullptr), _pool_size(pool_size) {}
-  void allocatePool() { if (_p == nullptr) _p = new StaticPoolPacketManager(_pool_size); }
+  // False means the heap refused, which is the node RAM reserve floor doing
+  // its job — the caller turns that into a refusal to enable the slot.
+  bool allocatePool() {
+    if (_p == nullptr) _p = new (std::nothrow) StaticPoolPacketManager(_pool_size);
+    return _p != nullptr;
+  }
 
   mesh::Packet* allocNew() override { return _p ? _p->allocNew() : NULL; }
   void free(mesh::Packet* packet) override { if (_p) _p->free(packet); }
