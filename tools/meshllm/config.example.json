@@ -1,0 +1,49 @@
+{
+  "node": {
+    "host": "192.168.1.50",
+    "port": 443,
+    "password": "password",
+    "verify_tls": false
+  },
+
+  "room": {
+    "enabled": true,
+    "source": "both",
+    "password": "",
+    "reply": "post",
+    "relogin_minutes": 60
+  },
+
+  "dm": { "enabled": true },
+
+  "trigger": "@",
+  "bot_name": "",
+
+  "reply_limit": 140,
+  "max_chunks": 1,
+  "chunk_gap_seconds": 5,
+  "poll_seconds": 4,
+  "contacts_refresh_minutes": 15,
+  "state_file": "~/.meshllm/state.json",
+
+  "llm": {
+    "url": "http://localhost:50080/v1/chat/completions",
+    "model": "Qwen3.6-35B-A3B-Q8_0",
+    "api_key": "",
+    "max_tokens": 96,
+    "temperature": 0.3,
+    "timeout_seconds": 60,
+    "thinking": false,
+    "history_turns": 6,
+    "history_idle_minutes": 30,
+    "system_prompt": null
+  },
+
+  "limits": {
+    "per_sender_seconds": 20,
+    "per_sender_hourly": 20,
+    "global_hourly": 60,
+    "queue_depth": 2,
+    "prompt_chars": 400
+  }
+}
