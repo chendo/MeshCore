@@ -245,6 +245,33 @@ at zero hops gives a direct reading of that node's clock against ours.
 It is compiled into the hydra image and fed, but barely surfaced yet: `stats-shared`
 reports a peer count and nothing walks the table.
 
+### BLE bridge
+
+`src/helpers/nrf52/Ble{Stack,Discovery,Link}.{h,cpp}` and
+`src/helpers/bridges/BLEBridge.{h,cpp}`. Joins two nRF52840 repeaters over a BLE
+connection, so a packet heard on one LoRa band is retransmitted on the other. The nRF52
+counterpart to the ESP-NOW bridge, for boards with no WiFi.
+
+Connection-oriented, not broadcast. An earlier experiment carried datagrams over BLE 5
+extended advertising and could not be made reliable: a single advert lands about half the
+time, and three to five copies move the loss from 49% to 3.4% and never to zero, because
+nothing acknowledges anything. A connection acknowledges every packet and retransmits it,
+carries a full 256-byte frame, and makes fragmentation routine instead of fatal. That
+experiment stays on `origin/ble-clean`; only the link is merged.
+
+Discovery is a legacy beacon carrying a two-byte group marker derived from
+`bridge.secret`, so a node does not dial every MeshCore device in range. The marker is
+public, so it filters and does not authenticate: the group HMAC on the first frame over
+the link is the proof, and a link that fails it is dropped and its address denied for five
+minutes. There are only three central slots, so that deny list is what stops slot
+exhaustion.
+
+Frames are plaintext with a truncated HMAC-SHA256 — see
+[docs/ble_bridge.md](docs/ble_bridge.md) for the wire format, the settings and the
+threat model.
+
+`RAK_3401_repeater_bridge_ble` only; every other env is unaffected.
+
 ## Build status
 
 Verified on this tree at commit `1d0f0859`. Host is aarch64 Linux with the
@@ -289,10 +316,12 @@ PlatformIO. The two added envs and one upstream env:
 ```bash
 pio run -e RAK_3401_repeater      # stock repeater + watchdogs + status LED
 pio run -e RAK_3401_hydra         # multi-identity node, 3 slots
+pio run -e RAK_3401_repeater_bridge_ble   # repeater that bridges over a BLE link
 pio run -e ThinkNode_M5_Repeater  # unmodified upstream target
 ```
 
-Envs added by this fork: `RAK_3401_hydra`, and `native_multi` for the host tests. Every
+Envs added by this fork: `RAK_3401_hydra`, `RAK_3401_repeater_bridge_ble`, and
+`native_multi` and `native_ble` for the host tests. Every
 other firmware env is upstream's, unchanged. `RAK_3401_repeater` is the one existing env
 whose build flags changed — it gains `LOOP_WATCHDOG_MS`, `LORA_WATCHDOG_MS` and
 `WITH_STATUS_LED`, which is trivially revertible.
@@ -319,7 +348,8 @@ and breaks the build. ESP32 envs need no override.
 ## Tests
 
 ```bash
-pio test -e native_multi -e native_multi_notrace -e native -e native_kiss_modem
+pio test -e native_multi -e native_multi_notrace -e native -e native_kiss_modem \
+         -e native_radio -e native_ble
 ```
 
 174 cases, all passing. 126 of them are new here — `test_shared_radio` 86, `test_mux` 14,
@@ -329,6 +359,11 @@ binary is the only way to exercise a compile-time flag's off state. All run agai
 
 This is the fork's only real safety net, and it is worth being plain about what it covers:
 the arbiter's logic, not its behaviour on hardware.
+
+`test_ble_bridge` adds 18 cases on its own env, `native_ble`, which supplies a real
+SHA-256 in place of the deliberately fake one the other host tests share. It covers the
+BLE bridge frame and its HMAC tag, the beacon record and the group marker, the deny list,
+and the oversize guard. The BLE code itself needs a SoftDevice and cannot run on a host.
 
 ## Relationship to upstream
 
