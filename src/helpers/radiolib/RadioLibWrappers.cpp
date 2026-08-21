@@ -132,9 +132,9 @@ void RadioLibWrapper::recordRecvError(int16_t err, const uint8_t* bytes, int len
     default:                                n_err_other++;   break;
   }
 #if RX_ERR_PAYLOAD_BYTES > 0
-  // Only the two cases where RadioLib has actually read the frame out of the
-  // radio before failing it. A timeout returns before that, so the buffer would
-  // still hold whatever was in it last.
+  // Keep the payload only for the two cases where RadioLib read the frame out
+  // of the radio before it failed the frame. A timeout returns before that
+  // read, so the buffer would still hold the previous contents.
   if (err == RADIOLIB_ERR_CRC_MISMATCH || err == RADIOLIB_ERR_LORA_HEADER_DAMAGED) {
     int cap = (int)sizeof(last_err_payload);
     last_err_len = (uint8_t)(len > cap ? cap : (len < 0 ? 0 : len));
@@ -193,13 +193,13 @@ uint32_t RadioLibWrapper::estAirtimeAtCR(int len_bytes, uint8_t cr, uint8_t sf, 
   DataRate_t dr = {};
   dr.lora.spreadingFactor = sf;
   dr.lora.bandwidth       = bw_khz;
-  dr.lora.codingRate      = cr;   // RadioLib wants the denominator here
+  dr.lora.codingRate      = cr;   // RadioLib needs the denominator here
   PacketConfig_t pc = {};
   pc.lora.preambleLength  = preamble_syms;
   pc.lora.implicitHeader  = implicit_header;
   pc.lora.crcEnabled      = crc;
-  // LDRO follows from symbol duration, not from the coding rate, so it stays as
-  // configured even though the rest of the frame is being repriced.
+  // LDRO comes from the symbol duration, not from the coding rate. Therefore
+  // it keeps its configured value while the code prices the frame again.
   pc.lora.ldrOptimize     = ldro;
   return _radio->calculateTimeOnAir(RADIOLIB_MODEM_LORA, dr, pc, (size_t)len_bytes) / 1000;
 }
