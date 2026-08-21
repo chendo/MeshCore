@@ -6,6 +6,19 @@
   #include <helpers/StatusLed.h>
   static StatusLed status_led;
 #endif
+#ifdef NRF52_PLATFORM
+  #include <helpers/nrf52/I2CBusRecovery.h>
+#endif
+#ifdef LOOP_WATCHDOG_MS
+  #include <helpers/nrf52/LoopWatchdog.h>
+  /* setup() is watched far more loosely than the running loop: a LittleFS
+     format, identity generation or the SoftDevice role ladder are all
+     legitimately slow, and resetting partway through one would boot-loop. */
+  #define BOOT_WATCHDOG_MS 120000
+  #define WDOG_FEED() LoopWatchdog::feed()
+#else
+  #define WDOG_FEED() do {} while (0)
+#endif
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
@@ -23,6 +36,16 @@ SimpleMeshTables tables;
 MyMesh the_mesh(board, radio_driver, *new ArduinoMillis(), fast_rng, rtc_clock, tables);
 
 void halt() {
+  /* Was a bare while(1). This is reached when radio_init() fails, before BLE or
+     the CLI exist, so a sited repeater becomes a silent brick with no way in
+     short of pressing reset. Radio init failures are usually transient (a
+     sagging rail on a weak battery), so a clean reboot is far more likely to
+     recover than staying wedged. */
+  Serial.println("HALT: radio init failed, rebooting");
+  Serial.flush();
+  delay(2000);              // let the message out, and rate-limit a boot loop
+  board.reboot();           // portable virtual, not NVIC_SystemReset -- this file
+                            // also builds for ESP32 and RP2040
   while (1) ;
 }
 
@@ -43,7 +66,27 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
+#ifdef LOOP_WATCHDOG_MS
+  /* Armed before anything that can wedge. Previously armed inside
+     the_mesh.begin(), which left the I2C busy-spins behind display.begin() and
+     the RTC probe, radio_init(), and the filesystem mount unwatched -- each of
+     those hangs the node with no BLE, no LoRa and no CLI. The watchdog task
+     runs at TASK_PRIO_NORMAL and setup() runs in the loop task at LOW, so it
+     preempts any of them. */
+  LoopWatchdog::begin(BOOT_WATCHDOG_MS);
+#endif
+
   board.begin();
+  WDOG_FEED();
+
+#if defined(NRF52_PLATFORM) && defined(PIN_WIRE_SDA) && defined(PIN_WIRE_SCL)
+  /* A reset partway through a read leaves the slave holding SDA low, and the
+     core's TWIM driver then spins forever on EVENTS_STOPPED with no timeout --
+     see I2CBusRecovery.h. Costs microseconds when the bus is already idle. */
+  if (!I2CBusRecovery::recover(PIN_WIRE_SDA, PIN_WIRE_SCL)) {
+    Serial.println("I2C: bus stuck, recovery failed");
+  }
+#endif
 
 #ifdef HAS_EXTERNAL_WATCHDOG
   external_watchdog.begin();
@@ -62,12 +105,14 @@ void setup() {
     display.print("Please wait...");
     display.endFrame();
   }
+  WDOG_FEED();
 #endif
 
   if (!radio_init()) {
     MESH_DEBUG_PRINTLN("Radio init failed!");
     halt();
   }
+  WDOG_FEED();
 
   fast_rng.begin(radio_driver.getRngSeed());
 
@@ -97,6 +142,7 @@ void setup() {
     }
     store.save("_main", the_mesh.self_id);
   }
+  WDOG_FEED();
 
   Serial.print("Repeater ID: ");
   mesh::Utils::printHex(Serial, the_mesh.self_id.pub_key, PUB_KEY_SIZE); Serial.println();
@@ -107,6 +153,7 @@ void setup() {
 #endif
 
   sensors.begin();
+  WDOG_FEED();
 
   the_mesh.begin(fs);
 #if WITH_STATUS_LED
@@ -115,6 +162,7 @@ void setup() {
   // heartbeat. The RAK3401 has only these two LEDs and no red.
   status_led.begin(LED_BLUE, LED_GREEN, LED_STATE_ON);
 #endif
+  WDOG_FEED();
 
 #ifdef DISPLAY_CLASS
   ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);
@@ -192,6 +240,17 @@ void loop() {
     }
   } else {
     userBtnDownAt = 0;
+  }
+#endif
+
+#ifdef LOOP_WATCHDOG_MS
+  LoopWatchdog::feed();
+  /* The tight runtime limit is only safe once the loop has proved it runs;
+     until here the boot limit covers setup(). */
+  static bool wdog_tightened = false;
+  if (!wdog_tightened) {
+    wdog_tightened = true;
+    LoopWatchdog::setLimit(LOOP_WATCHDOG_MS);
   }
 #endif
 
