@@ -115,7 +115,6 @@ public:
 
   uint8_t getTypeCode() const override { return 0x03; }
   const char *getTypeName() const override { return "espnow"; }
-  bool usesSharedSecret() const override { return true; }
 
   /**
    * Initializes the ESP-NOW bridge
