@@ -174,10 +174,12 @@ public:
   void begin(FILESYSTEM* fs);
   void sendNodeDiscoverReq();
 
-  /* Push the one write this node defers -- the ACL -- before something outside
-     this class reboots the board. Public because the LoRa watchdog that decides
-     to do that is node-scoped (helpers/LoraWatchdog.h): on a multi-identity node
-     there is one of it, not one per identity. */
+  /* This node defers one write: the ACL. This function performs that write
+     now. Call it before code outside this class reboots the board. The
+     function is public because the LoRa watchdog decides to reboot the board.
+     That watchdog belongs to the node, not to one identity
+     (helpers/LoraWatchdog.h). A node with several identities still has one
+     watchdog only. */
   void flushPendingWrites();
   const char* getFirmwareVer() override { return FIRMWARE_VERSION; }
   const char* getBuildDate() override { return FIRMWARE_BUILD_DATE; }

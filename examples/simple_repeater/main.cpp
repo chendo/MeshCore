@@ -11,9 +11,10 @@
 #endif
 #ifdef LOOP_WATCHDOG_MS
   #include <helpers/nrf52/LoopWatchdog.h>
-  /* setup() is watched far more loosely than the running loop: a LittleFS
-     format, identity generation or the SoftDevice role ladder are all
-     legitimately slow, and resetting partway through one would boot-loop. */
+  /* The limit for setup() is much longer than the limit for the running loop.
+     A LittleFS format is slow. The node also needs time to make a new
+     identity, and to climb the SoftDevice role ladder. These delays are
+     correct. A reset in the middle of one of them starts a boot loop. */
   #define BOOT_WATCHDOG_MS 120000
   #define WDOG_FEED() LoopWatchdog::feed()
 #else
@@ -37,21 +38,23 @@ MyMesh the_mesh(board, radio_driver, *new ArduinoMillis(), fast_rng, rtc_clock, 
 
 #ifdef LORA_WATCHDOG_MS
 #include <helpers/LoraWatchdog.h>
-/* Node-scoped: one watchdog per board, whatever identities run on it. The
-   staged escalation lives in helpers/LoraWatchdog.h; these are the three things
-   it needs to do to this particular node. */
+/* The watchdog belongs to the board. One board has one watchdog, whatever
+   identities run on it. The file helpers/LoraWatchdog.h holds the stages that
+   the watchdog steps through. The functions below are the three actions that
+   the watchdog performs on this node. */
 static LoraWatchdog lora_watchdog;
 
 static uint32_t lora_wd_airtime(void*) {
   return (uint32_t)(the_mesh.getTotalAirTime() + the_mesh.getReceiveAirTime());
 }
 static void lora_wd_probe(void*) {
-  the_mesh.sendSelfAdvertisement(500, false);   // zero-hop, cheap, no flood
+  the_mesh.sendSelfAdvertisement(500, false);   // A zero-hop advert. It is cheap and it does not flood.
 }
 static void lora_wd_reinit(void*) {
-  /* Restores every parameter begin() applies. A bare radio_init() leaves the
-     driver on its default frequency -- silently off-band is worse than the
-     fault being repaired. */
+  /* This function applies every parameter that begin() applies. A call to
+     radio_init() alone leaves the driver on its default frequency. The node
+     then transmits off-band and gives no warning. That result is worse than
+     the fault that this function repairs. */
   NodePrefs* p = the_mesh.getNodePrefs();
   radio_init();
   radio_driver.setParams(p->freq, p->bw, p->sf, p->cr);
@@ -67,16 +70,17 @@ static void lora_wd_reboot(void*) {
 #endif
 
 void halt() {
-  /* Was a bare while(1). This is reached when radio_init() fails, before BLE or
-     the CLI exist, so a sited repeater becomes a silent brick with no way in
-     short of pressing reset. Radio init failures are usually transient (a
-     sagging rail on a weak battery), so a clean reboot is far more likely to
-     recover than staying wedged. */
+  /* This function held a bare while(1) before. The code reaches it when
+     radio_init() fails. At that point BLE and the CLI do not yet exist. An
+     installed repeater therefore hangs and stays silent. Nobody can reach it.
+     Only a person at the site can press the reset button. A radio init failure
+     is usually temporary. A weak battery that drops the supply voltage is one
+     cause. A clean reboot recovers the node much more often than a hang. */
   Serial.println("HALT: radio init failed, rebooting");
   Serial.flush();
-  delay(2000);              // let the message out, and rate-limit a boot loop
-  board.reboot();           // portable virtual, not NVIC_SystemReset -- this file
-                            // also builds for ESP32 and RP2040
+  delay(2000);              // Give the message time to go out. Also slow a boot loop.
+  board.reboot();           // A portable virtual call, not NVIC_SystemReset. This
+                            // file also builds for ESP32 and RP2040.
   while (1) ;
 }
 
@@ -98,12 +102,13 @@ void setup() {
   delay(1000);
 
 #ifdef LOOP_WATCHDOG_MS
-  /* Armed before anything that can wedge. Previously armed inside
-     the_mesh.begin(), which left the I2C busy-spins behind display.begin() and
-     the RTC probe, radio_init(), and the filesystem mount unwatched -- each of
-     those hangs the node with no BLE, no LoRa and no CLI. The watchdog task
-     runs at TASK_PRIO_NORMAL and setup() runs in the loop task at LOW, so it
-     preempts any of them. */
+  /* The watchdog starts before any step that can hang. Before this change, the
+     code started the watchdog inside the_mesh.begin(). Several steps were then
+     unwatched: the I2C busy-spins behind display.begin() and behind the RTC
+     probe, radio_init(), and the filesystem mount. Each of these steps hangs
+     the node. The node then has no BLE, no LoRa and no CLI. The watchdog task
+     runs at TASK_PRIO_NORMAL. setup() runs in the loop task at LOW priority.
+     The watchdog task therefore preempts any of these steps. */
   LoopWatchdog::begin(BOOT_WATCHDOG_MS);
 #endif
 
@@ -111,9 +116,10 @@ void setup() {
   WDOG_FEED();
 
 #if defined(NRF52_PLATFORM) && defined(PIN_WIRE_SDA) && defined(PIN_WIRE_SCL)
-  /* A reset partway through a read leaves the slave holding SDA low, and the
-     core's TWIM driver then spins forever on EVENTS_STOPPED with no timeout --
-     see I2CBusRecovery.h. Costs microseconds when the bus is already idle. */
+  /* A reset in the middle of a read leaves the slave with SDA held low. The
+     TWIM driver in the core then spins for ever on EVENTS_STOPPED. That driver
+     has no timeout. See I2CBusRecovery.h. This check costs only microseconds
+     when the bus is already idle. */
   if (!I2CBusRecovery::recover(PIN_WIRE_SDA, PIN_WIRE_SCL)) {
     Serial.println("I2C: bus stuck, recovery failed");
   }
@@ -192,9 +198,10 @@ void setup() {
                       lora_wd_reinit, lora_wd_reboot);
 #endif
 #if WITH_STATUS_LED
-  // Colour is the radio, brightness is the direction: green = LoRa, blue = BLE
-  // bridge, dim = receive, bright = transmit. Both dim together every 5s is the
-  // heartbeat. The RAK3401 has only these two LEDs and no red.
+  // The colour shows the radio. The brightness shows the direction. Green is
+  // LoRa. Blue is the BLE bridge. Dim is receive. Bright is transmit. Both LEDs
+  // go dim together every 5s for the heartbeat. The RAK3401 has only these two
+  // LEDs. It has no red LED.
   status_led.begin(LED_BLUE, LED_GREEN, LED_STATE_ON);
 #endif
   WDOG_FEED();
@@ -280,8 +287,8 @@ void loop() {
 
 #ifdef LOOP_WATCHDOG_MS
   LoopWatchdog::feed();
-  /* The tight runtime limit is only safe once the loop has proved it runs;
-     until here the boot limit covers setup(). */
+  /* The short limit for the running loop is safe only after the loop runs one
+     time. Until this point the boot limit covers setup(). */
   static bool wdog_tightened = false;
   if (!wdog_tightened) {
     wdog_tightened = true;
@@ -291,7 +298,7 @@ void loop() {
 
   the_mesh.loop();
 #ifdef LORA_WATCHDOG_MS
-  lora_watchdog.loop();   // paces itself, see LoraWatchdog::CHECK_EVERY_MS
+  lora_watchdog.loop();   // The watchdog sets its own rate. See LoraWatchdog::CHECK_EVERY_MS.
 #endif
 #if WITH_STATUS_LED
   status_led.loop();
