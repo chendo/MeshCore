@@ -55,9 +55,4 @@ public:
    * @brief The transport's name, as reported by the `bridge.type` CLI query.
    */
   virtual const char* getTypeName() const = 0;
-
-  /**
-   * @brief Whether the transport isolates networks with a shared secret.
-   */
-  virtual bool usesSharedSecret() const { return false; }
 };

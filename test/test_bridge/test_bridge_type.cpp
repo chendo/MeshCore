@@ -21,7 +21,6 @@ class FakeEspNowBridge : public FakeUartBridge {
 public:
   uint8_t getTypeCode() const override { return 0x03; }
   const char* getTypeName() const override { return "espnow"; }
-  bool usesSharedSecret() const override { return true; }
 };
 
 static uint8_t featureByte(AbstractBridge* bridge, bool disabled) {
@@ -46,14 +45,6 @@ TEST(BridgeType, dispatchesThroughTheBaseClass) {
   b = &espnow;
   EXPECT_EQ(b->getTypeCode(), 0x03);
   EXPECT_STREQ(b->getTypeName(), "espnow");
-}
-
-TEST(BridgeType, sharedSecretIsOptOut) {
-  FakeUartBridge uart;
-  FakeEspNowBridge espnow;
-
-  EXPECT_FALSE(uart.usesSharedSecret());
-  EXPECT_TRUE(espnow.usesSharedSecret());
 }
 
 // A build with no bridge answers `bridge.type` from a null pointer, the way
