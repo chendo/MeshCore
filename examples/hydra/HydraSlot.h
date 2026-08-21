@@ -35,6 +35,7 @@ public:
 
   virtual SlotType type() const = 0;
   virtual const mesh::LocalIdentity& identity() const = 0;
+  virtual bool hasPendingWork() const = 0;   // gates the node's powersave sleep
 
   // `slot N <cmd>`
   virtual void handleCommand(char* command, char* reply, size_t reply_sz) = 0;

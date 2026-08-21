@@ -68,6 +68,7 @@ public:
 
   const char* nodeName() const { return _name; }
   void setNodeName(const char* n) { StrHelper::strncpy(_name, n, sizeof(_name)); }
+  bool hasPendingWork() const { return _mgr->getOutboundTotal() > 0; }
 
   void advertise(uint32_t delay_millis, bool flood) {
     mesh::Packet* pkt = createSelfAdvert(_name);
@@ -103,6 +104,7 @@ public:
   RadioPort& port() override { return _port; }
   SlotType type() const override { return _type; }
   const mesh::LocalIdentity& identity() const override { return _mesh.self_id; }
+  bool hasPendingWork() const override { return _begun && _mesh.hasPendingWork(); }
   ChatMesh& mesh() { return _mesh; }   // hook for the companion facade / diag bot
 
   bool begin(FILESYSTEM* fs, IdentityStore& store, const char* id_name) override {

@@ -48,12 +48,15 @@ public:
   void begin(FILESYSTEM* fs);
   void loop();
 
-  // Node CLI: `slots`, `stats-shared`, `slot N on|off`, `slot N <cmd>`.
-  // Anything else falls through to slot 0, so the familiar repeater CLI still
-  // works unqualified on a hydra node.
+  // Node CLI: `slots`, `stats-shared`, `stats-txwait`, `slot N on|off`,
+  // `slot N <cmd>`. Anything else falls through to slot 0, so the familiar
+  // repeater CLI still works unqualified on a hydra node.
   void handleCommand(char* command, char* reply, size_t reply_sz);
 
+  bool hasPendingWork() const;
+
   RepeaterSlot& repeater() { return _slot0; }
+  SharedRadioCore& radio() { return _core; }
 
 private:
   bool startSlot(int idx);

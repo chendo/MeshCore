@@ -133,4 +133,15 @@ void loop() {
 #endif
   sensors.loop();
   rtc_clock.tick();
+
+  // Powersaving is a node decision, so the queue check has to span every slot —
+  // sleeping on slot 0's idleness alone would stall the chat slots' sends for
+  // as long as the repeater had nothing to say.
+  if (hydra.repeater().prefs()->powersaving_enabled && !hydra.hasPendingWork()) {
+#if defined(NRF52_PLATFORM)
+    board.sleep(0);   // nRF ignores the seconds param; wakes on LoRa or timer
+#else
+    board.sleep(30);
+#endif
+  }
 }
