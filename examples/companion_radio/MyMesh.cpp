@@ -380,11 +380,16 @@ void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path
       }
     }
 
+    // This may be an eviction rather than an update, in which case the packet count
+    // belongs to whoever used to occupy the slot.
+    if (memcmp(p->pubkey_prefix, contact.id.pub_key, sizeof(p->pubkey_prefix)) != 0) p->pkts = 0;
+
     memcpy(p->pubkey_prefix, contact.id.pub_key, sizeof(p->pubkey_prefix));
     strcpy(p->name, contact.name);
     p->recv_timestamp = getRTCClock()->getCurrentTime();
     p->path_len = mesh::Packet::copyPath(p->path, path, path_len);
     p->snr = last_rx_snr;  // logRx() saw this very packet, on this same call chain
+    if (p->pkts < 0xFFFF) p->pkts++;   // the advert is itself a packet heard from them
   }
 
   if (!is_new) dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY); // only schedule lazy write for contacts that are in contacts[]
@@ -393,14 +398,83 @@ void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path
 void MyMesh::rollStatBuckets() {
   if (next_stat_roll == 0) {   // first call; start the clock rather than back-fill from boot
     next_stat_roll = futureMillis(MESH_STAT_BUCKET_MS);
+    next_pkt_window_reset = futureMillis(MESH_STAT_WINDOW_MS);
+    last_radio_errs = radio_driver.getPacketsRecvErrors();
     return;
   }
-  // Bounded: after a long gap every bucket is stale anyway, so clearing the ring once
-  // is the same answer as spinning through it and much cheaper.
+
+  // Bounded: after a long gap every bucket is stale anyway, so walking the ring once
+  // reaches the same answer as spinning through it and costs a great deal less.
   for (int i = 0; i < MESH_STAT_BUCKETS && millisHasNowPassed(next_stat_roll); i++) {
+    // Bank the CRC failures from the bucket being closed. These never reach logRx() --
+    // a packet that fails CRC is discarded by the driver with nothing recoverable in it
+    // -- so the driver's own counter is the only place they exist.
+    uint32_t errs_now = radio_driver.getPacketsRecvErrors();
+    uint32_t delta = errs_now - last_radio_errs;   // unsigned, so a wrap still subtracts correctly
+    stat_buckets[stat_head].crc_fail = delta > 0xFFFF ? 0xFFFF : (uint16_t) delta;
+    last_radio_errs = errs_now;
+
     stat_head = (stat_head + 1) % MESH_STAT_BUCKETS;
-    stat_buckets[stat_head].rx = stat_buckets[stat_head].relayed = 0;
+    MeshStatBucket* b = &stat_buckets[stat_head];
+    b->rx = b->crc_fail = b->snr_n = 0;
+    b->snr_sum = 0;
+    b->snr_min = b->snr_max = 0;
     next_stat_roll = futureMillis(MESH_STAT_BUCKET_MS);
+  }
+
+  // Per-neighbour counts tumble rather than ring: 16 neighbours x 30 buckets of history
+  // is not worth the RAM for a column that only answers "busy or quiet".
+  if (millisHasNowPassed(next_pkt_window_reset)) {
+    for (int i = 0; i < ADVERT_PATH_TABLE_SIZE; i++) advert_paths[i].pkts = 0;
+    next_pkt_window_reset = futureMillis(MESH_STAT_WINDOW_MS);
+  }
+}
+
+void MyMesh::getStatWindow(uint8_t num_buckets, MeshStatWindow& out) const {
+  if (num_buckets > MESH_STAT_BUCKETS) num_buckets = MESH_STAT_BUCKETS;
+  out.rx = out.crc_fail = 0;
+  out.snr_min = out.snr_avg = out.snr_max = 0;
+  out.has_snr = false;
+
+  int32_t sum = 0;
+  uint32_t n = 0;
+  int8_t lo = 127, hi = -128;
+  for (uint8_t i = 0; i < num_buckets; i++) {
+    const MeshStatBucket* b = &stat_buckets[(stat_head + MESH_STAT_BUCKETS - i) % MESH_STAT_BUCKETS];
+    out.rx += b->rx;
+    out.crc_fail += b->crc_fail;
+    if (b->snr_n == 0) continue;
+    sum += b->snr_sum;
+    n += b->snr_n;
+    if (b->snr_min < lo) lo = b->snr_min;
+    if (b->snr_max > hi) hi = b->snr_max;
+  }
+  if (n > 0) {
+    out.has_snr = true;
+    out.snr_min = lo / 4.0f;
+    out.snr_max = hi / 4.0f;
+    out.snr_avg = (sum / (float) n) / 4.0f;
+  }
+}
+
+// Credit a decoded packet to the neighbour that sent it, where that is knowable at all.
+// MeshCore identifies a node by the first byte of its public key, and only some payload
+// types carry a source hash, so this UNDERCOUNTS by design -- which is why the UI labels
+// the column "heard from" rather than implying it is a total.
+void MyMesh::creditPacket(const mesh::Packet* packet) {
+  if (packet->getPathHashCount() != 0) return;   // relayed, so the sender is not our neighbour
+
+  uint8_t type = packet->getPayloadType();
+  if (type != PAYLOAD_TYPE_TXT_MSG && type != PAYLOAD_TYPE_REQ
+      && type != PAYLOAD_TYPE_RESPONSE && type != PAYLOAD_TYPE_PATH) return;
+  if (packet->payload_len < 2) return;
+
+  uint8_t src_hash = packet->payload[1];   // [0] is dest, [1] is src
+  for (int i = 0; i < ADVERT_PATH_TABLE_SIZE; i++) {
+    if (advert_paths[i].name[0] == 0) continue;
+    if (advert_paths[i].pubkey_prefix[0] != src_hash) continue;
+    if (advert_paths[i].pkts < 0xFFFF) advert_paths[i].pkts++;
+    break;
   }
 }
 
@@ -419,12 +493,20 @@ void MyMesh::logRx(mesh::Packet* packet, int len, float score) {
 
   rollStatBuckets();
   MeshStatBucket* b = &stat_buckets[stat_head];
-  if (b->rx < 255) b->rx++;
+  if (b->rx < 0xFFFF) b->rx++;
 
-  int idx = ((int)packet->getSNR() + 20) / 4;   // -20dB..+12dB
-  if (idx < 0) idx = 0;
-  if (idx >= MESH_SNR_BUCKETS) idx = MESH_SNR_BUCKETS - 1;
-  if (snr_hist[idx] < 0xFFFF) snr_hist[idx]++;
+  if (b->snr_n == 0) {
+    b->snr_min = b->snr_max = packet->_snr;
+  } else {
+    if (packet->_snr < b->snr_min) b->snr_min = packet->_snr;
+    if (packet->_snr > b->snr_max) b->snr_max = packet->_snr;
+  }
+  if (b->snr_n < 0xFFFF) {
+    b->snr_sum += packet->_snr;
+    b->snr_n++;
+  }
+
+  creditPacket(packet);
 
   // Did somebody just rebroadcast one of ours? The hash ignores the path, so the copy
   // coming back matches the one we sent even though a hop has been appended to it.
@@ -436,7 +518,6 @@ void MyMesh::logRx(mesh::Packet* packet, int len, float score) {
     if (memcmp(tx_hashes[i], hash, 4) != 0) continue;
 
     n_flood_relayed++;
-    if (b->relayed < 255) b->relayed++;
 
     uint8_t count = packet->getPathHashCount();
     if (count > 0) {   // last hop appended is the node that relayed it to us
@@ -452,6 +533,12 @@ void MyMesh::logRx(mesh::Packet* packet, int len, float score) {
 
 static int sort_by_recent(const void *a, const void *b) {
   return ((AdvertPath *) b)->recv_timestamp - ((AdvertPath *) a)->recv_timestamp;
+}
+
+const AdvertPath* MyMesh::getSortedRecentlyHeard(int& num) {
+  qsort(advert_paths, ADVERT_PATH_TABLE_SIZE, sizeof(advert_paths[0]), sort_by_recent);
+  num = ADVERT_PATH_TABLE_SIZE;
+  return advert_paths;
 }
 
 int MyMesh::getRecentlyHeard(AdvertPath dest[], int max_num) {
@@ -938,8 +1025,9 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   memset(send_scope.key, 0, sizeof(send_scope.key));
   send_unscoped = false;
   memset(stat_buckets, 0, sizeof(stat_buckets));
-  memset(snr_hist, 0, sizeof(snr_hist));
   memset(tx_hashes, 0, sizeof(tx_hashes));
+  last_radio_errs = 0;
+  next_pkt_window_reset = 0;
   memset(last_relay_by, 0, sizeof(last_relay_by));
   stat_head = tx_hash_head = 0;
   next_stat_roll = 0;

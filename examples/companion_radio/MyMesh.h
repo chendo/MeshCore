@@ -83,22 +83,33 @@ struct AdvertPath {
   uint32_t recv_timestamp;
   uint8_t path[MAX_PATH_SIZE];
   int8_t  snr;    // quarter-dB, as Packet stores it; 0 in slots heard before boot
+  uint16_t pkts;  // attributed to this node in the current window; see MyMesh::creditPacket
 };
 
 // Traffic history for the UI, fed from logRx()/logTx(). Those are the only hooks that
 // see every packet the radio completed: logRx() runs ahead of the dedup and dispatch
 // decisions, which is what makes a rebroadcast of our OWN packet visible at all.
-// 10 x 30s = 5 minutes. Sized to what the panel can actually show: GxEPDDisplay maps
-// this 128px-tall logical canvas onto 200px with a 10px offset, so only ~121 logical
-// rows are visible and the newest tick would otherwise be drawn into the clipped edge.
-#define MESH_STAT_BUCKETS      10
+//
+// 30 x 30s = 15 minutes, the longest window the UI reports. The 30s granularity is what
+// keeps the 1m/5m/15m figures exact -- with 1-minute buckets the "1m" number would be a
+// partly-elapsed bucket that climbs as it fills and then resets.
+#define MESH_STAT_BUCKETS      30
 #define MESH_STAT_BUCKET_MS    30000
-#define MESH_SNR_BUCKETS       8        // -20dB..+12dB in 4dB steps
+#define MESH_STAT_WINDOW_MS    (MESH_STAT_BUCKETS * MESH_STAT_BUCKET_MS)
 #define MESH_TX_HASH_RING      8
 
 struct MeshStatBucket {
-  uint8_t rx;        // packets heard in this interval
-  uint8_t relayed;   // our own packets heard being rebroadcast in this interval
+  uint16_t rx;         // packets decoded in this interval
+  uint16_t crc_fail;   // receptions the radio discarded; no sender survives a bad CRC
+  int32_t  snr_sum;    // quarter-dB, for the window mean
+  uint16_t snr_n;
+  int8_t   snr_min, snr_max;   // quarter-dB
+};
+
+struct MeshStatWindow {
+  uint32_t rx, crc_fail;
+  float snr_min, snr_avg, snr_max;   // dB
+  bool has_snr;                      // false when nothing decoded in the window
 };
 
 class MyMesh : public BaseChatMesh, public DataStoreHost {
@@ -119,9 +130,12 @@ public:
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
 
-  // Waterfall history. Walk oldest-first as (head_idx + 1 + i) % MESH_STAT_BUCKETS.
-  const MeshStatBucket* getStatBuckets(uint8_t& head_idx) const { head_idx = stat_head; return stat_buckets; }
-  const uint16_t* getSNRHistogram() const { return snr_hist; }
+  // Same ordering, without the copy: a screen wanting more than a handful of rows would
+  // otherwise put the whole table on the stack. Valid until the next advert arrives.
+  const AdvertPath* getSortedRecentlyHeard(int& num);
+
+  // Aggregate the most recent 'num_buckets' 30s intervals; clamped to the ring.
+  void getStatWindow(uint8_t num_buckets, MeshStatWindow& out) const;
   // 'by' is the pubkey prefix of whoever last relayed us, all-zero until someone has.
   void getRelayStats(uint32_t& sent, uint32_t& relayed, const uint8_t*& by) const {
     sent = n_flood_sent; relayed = n_flood_relayed; by = last_relay_by;
@@ -293,7 +307,11 @@ private:
   MeshStatBucket stat_buckets[MESH_STAT_BUCKETS];
   uint8_t stat_head;
   unsigned long next_stat_roll;
-  uint16_t snr_hist[MESH_SNR_BUCKETS];
+  // CRC failures never reach logRx() -- a packet that fails CRC is discarded by the
+  // radio with its buffer zeroed -- so they have to be read as deltas off the driver's
+  // own counters at each roll.
+  uint32_t last_radio_errs;
+  unsigned long next_pkt_window_reset;
   // First 4 bytes of the hash of each recent flood we sent. calculatePacketHash()
   // covers payload type and payload but never the path, so a relayed copy of one of
   // ours hashes identically to what we transmitted -- that identity is the whole trick.
@@ -304,6 +322,7 @@ private:
   int8_t last_rx_snr;    // of the packet logRx() just saw, for onDiscoveredContact()
 
   void rollStatBuckets();
+  void creditPacket(const mesh::Packet* packet);
 };
 
 extern MyMesh the_mesh;
