@@ -35,46 +35,102 @@ namespace roomspy {
 #include <target.h>
 #include <helpers/ArduinoHelpers.h>
 
-static RoomMesh*        g_room = nullptr;
-static StdRNG           room_rng;
-static SimpleMeshTables room_tables;
+// Instance 0 is the fixed "room" role; 1..MULTI_MAX_CHAT_SLOTS back optional
+// slots configured as rooms. Everything here is per-object — the stock example
+// declares no file-scope state at all, only MyMesh:: members — so N instances
+// need nothing but N sets of collaborators. They are heap-allocated at setup,
+// so an unused instance costs one null pointer.
+#define ROOM_INSTANCES (1 + MULTI_MAX_CHAT_SLOTS)
 
+struct RoomInst {
+  RoomMesh*         mesh;
+  StdRNG            rng;
+  SimpleMeshTables  tables;
+  char              name[8];    // "room" | "chat2" ... — the IDENTITY name, see slot_types.h
+};
+static RoomInst s_rooms[ROOM_INSTANCES];
+// Instance 0 keeps its own named global: main.cpp takes its address in a static
+// initialiser, so it needs a stable symbol, not an array slot handed out later.
+IdentityModule room_module;
+static IdentityModule s_slot_room_modules[ROOM_INSTANCES - 1];
+static IdentityModule* roomModuleSlot(int i) {
+  return (i == 0) ? &room_module : &s_slot_room_modules[i - 1];
+}
+
+template <int I>
 static void room_setup(MultiFS* fs, mesh::Radio* port) {
-  room_rng.begin(radio_driver.getRngSeed());
-  g_room = new RoomMesh(board, *port, *new ArduinoMillis(), room_rng, rtc_clock, room_tables);
+  RoomInst& r = s_rooms[I];
+  r.rng.begin(radio_driver.getRngSeed());
+  r.mesh = new RoomMesh(board, *port, *new ArduinoMillis(), r.rng, rtc_clock, r.tables);
 
-  if (!multiIdLoad("room", fs, g_room->self_id)) {   // FS copy, else NVS mirror
-    g_room->self_id = radio_new_identity();
+  if (!multiIdLoad(r.name, fs, r.mesh->self_id)) {   // FS copy, else NVS mirror
+    r.mesh->self_id = radio_new_identity();
     IdentityStore store(*fs, "/identity");
     store.begin();
-    store.save("_main", g_room->self_id);
-    multiIdImportSaveMirror("room", g_room->self_id);
-    Serial.println("[room] NEW identity created (no saved copy found)");
+    store.save("_main", r.mesh->self_id);
+    multiIdImportSaveMirror(r.name, r.mesh->self_id);
+    Serial.printf("[%s] NEW room identity created (no saved copy found)\n", r.name);
   }
-  Serial.print("[room] ID: ");
-  mesh::Utils::printHex(Serial, g_room->self_id.pub_key, PUB_KEY_SIZE); Serial.println();
+  Serial.printf("[%s] room ID: ", r.name);
+  mesh::Utils::printHex(Serial, r.mesh->self_id.pub_key, PUB_KEY_SIZE); Serial.println();
 
-  g_room->begin(fs);
+  r.mesh->begin(fs);
 }
 
-static void room_loop() { if (g_room) g_room->loop(); }
+template <int I>
+static void room_loop() { if (s_rooms[I].mesh) s_rooms[I].mesh->loop(); }
 
+// Routes straight into the stock room CLI, which is where `password`,
+// `set name`, advert intervals and the rest already live — so managing an
+// extra room needs no new command surface, only a way to address it.
+template <int I>
 static void room_cmd(const char* c, char* r, size_t n) {
-  if (!g_room) { if (n) r[0] = 0; return; }
+  if (!s_rooms[I].mesh) { if (n) r[0] = 0; return; }
   char buf[160];
   strncpy(buf, c, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
-  g_room->handleCommand(0, buf, r);
+  s_rooms[I].mesh->handleCommand(0, buf, r);
 }
 
-static void room_pk(uint8_t out[32]) { if (g_room) memcpy(out, g_room->self_id.pub_key, PUB_KEY_SIZE); }
+template <int I>
+static void room_pk(uint8_t out[32]) {
+  if (s_rooms[I].mesh) memcpy(out, s_rooms[I].mesh->self_id.pub_key, PUB_KEY_SIZE);
+}
 
-static uint32_t room_pool_full() { return g_room ? g_room->getNumRxPoolFull() : 0; }
+template <int I>
+static uint32_t room_pool_full() {
+  return s_rooms[I].mesh ? s_rooms[I].mesh->getNumRxPoolFull() : 0;
+}
 
-IdentityModule room_module = { "room", room_setup, room_loop, room_cmd, room_pk, room_pool_full };
+void roomInstancesInit(const char* const* slot_names) {
+  strncpy(s_rooms[0].name, "room", sizeof(s_rooms[0].name) - 1);
+  for (int i = 1; i < ROOM_INSTANCES; i++) {
+    strncpy(s_rooms[i].name, slot_names[i - 1], sizeof(s_rooms[i].name) - 1);
+    s_rooms[i].name[sizeof(s_rooms[i].name) - 1] = 0;
+  }
+  for (int i = 0; i < ROOM_INSTANCES; i++) {
+    s_rooms[i].mesh = nullptr;
+    roomModuleSlot(i)->name = s_rooms[i].name;
+  }
+  #define WIRE_ROOM(N) { IdentityModule* m = roomModuleSlot(N); \
+    m->setup = &room_setup<N>; m->loop = &room_loop<N>; \
+    m->run_command = &room_cmd<N>; m->get_pubkey = &room_pk<N>; \
+    m->rx_pool_full = &room_pool_full<N>; }
+  WIRE_ROOM(0) WIRE_ROOM(1) WIRE_ROOM(2) WIRE_ROOM(3) WIRE_ROOM(4) WIRE_ROOM(5)
+  #undef WIRE_ROOM
+}
+
+// instance 0 = the fixed role; slot k (0-based) uses instance k+1
+IdentityModule* roomInstanceModule(int i) {
+  return (i >= 0 && i < ROOM_INSTANCES) ? roomModuleSlot(i) : nullptr;
+}
+bool roomInstanceRunning(int i) {
+  return i >= 0 && i < ROOM_INSTANCES && s_rooms[i].mesh != nullptr;
+}
 
 // Stored posts (newest last), as JSON for the web panel. Reads the room's
 // cyclic RAM queue directly (see the access-override note above the include).
-static int roomFillPostsJson(char* out, size_t cap) {
+static int roomFillPostsJson(int inst, char* out, size_t cap) {
+  RoomMesh* g_room = (inst >= 0 && inst < ROOM_INSTANCES) ? s_rooms[inst].mesh : nullptr;
   if (g_room == nullptr || out == nullptr || cap < 3) { if (out && cap) out[0] = 0; return 0; }
   size_t o = 0;
   out[o++] = '[';
@@ -115,20 +171,20 @@ static int roomFillPostsJson(char* out, size_t cap) {
 // task is too slow to answer it will still run the read afterwards. On that
 // path the block is deliberately leaked rather than freed underneath it.
 namespace {
-  struct PostsReq { size_t cap; int len; char buf[1]; };
+  struct PostsReq { int inst; size_t cap; int len; char buf[1]; };
   void roomPostsOnLoop(void* p) {
     PostsReq* r = (PostsReq*)p;
-    r->len = roomFillPostsJson(r->buf, r->cap);
+    r->len = roomFillPostsJson(r->inst, r->buf, r->cap);
   }
 }
 
-int roomGetPostsJson(char* out, size_t cap) {
+int roomGetPostsJson(int inst, char* out, size_t cap) {
   if (out == nullptr || cap < 3) return 0;
-  if (multiOnLoopTask()) return roomFillPostsJson(out, cap);
+  if (multiOnLoopTask()) return roomFillPostsJson(inst, out, cap);
 
   PostsReq* r = (PostsReq*)malloc(sizeof(PostsReq) + cap);
   if (r == nullptr) { snprintf(out, cap, "[]"); return 2; }
-  r->cap = cap; r->len = 0; r->buf[0] = 0;
+  r->inst = inst; r->cap = cap; r->len = 0; r->buf[0] = 0;
 
   if (!multiRunInLoop(roomPostsOnLoop, r, 4000)) {
     snprintf(out, cap, "[]");     // r is intentionally NOT freed — still queued

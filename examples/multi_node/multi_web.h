@@ -56,7 +56,13 @@ int  multiChatSlotArchiveCopy(int i, uint32_t after, uint8_t* out, size_t cap);
 
 // ---- provided by wrap_room.cpp ----
 // stored room posts as a JSON array [{t,a,x}...]; returns bytes written
-int roomGetPostsJson(char* out, size_t cap);
+int roomGetPostsJson(int inst, char* out, size_t cap);
+// N room instances live in wrap_room.cpp: 0 is the fixed role, 1..N back
+// optional slots configured as rooms (see slot_types.h).
+void roomInstancesInit(const char* const* slot_names);
+IdentityModule* roomInstanceModule(int i);
+bool roomInstanceRunning(int i);
+const char* const* slotNames();
 
 // ---- provided by wrap_companion.cpp ----
 // Inject one app-protocol frame into the companion mesh and collect its
