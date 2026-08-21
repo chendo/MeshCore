@@ -1,11 +1,11 @@
 #pragma once
 
-// SimpleMeshTables fixes its dedup table at 160 hashes (1,280 B) via a #define,
-// which is one table size for the whole firmware. A repeater needs that — it
-// sees and forwards every flood on the band — but a chat identity only has to
-// recognise repeats of the handful of packets addressed to it, so the same
-// table there is ~1 KB of RAM per slot bought for nothing. Same logic, size as
-// a template parameter.
+// SimpleMeshTables sets its dedup table to 160 hashes (1,280 B) with a #define.
+// That gives one table size for the whole firmware. A repeater needs that size,
+// because it sees and forwards every flood on the band. But a chat identity
+// only has to recognise repeats of the few packets that are addressed to it.
+// The same table there costs about 1 KB of RAM per slot for no gain. This class
+// has the same logic, but the size is a template parameter.
 
 #include <Mesh.h>
 #include <string.h>

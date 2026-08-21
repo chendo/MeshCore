@@ -1,13 +1,14 @@
 #pragma once
 
-// Slot 0: the stock simple_repeater identity, unmodified.
+// Slot 0 is the standard simple_repeater identity. It has no changes.
 //
-// MyMesh already takes a mesh::Radio& — it has no idea whether that is the
-// board's transceiver or one port of a shared one. So reuse here is literally
-// just handing it a RadioPort instead of radio_driver; no fork of the repeater,
-// no #define rename of its class, no edits in examples/simple_repeater.
-// The build pulls in that directory's MyMesh.cpp and nothing else (its main.cpp
-// carries its own setup()/loop() and is excluded).
+// MyMesh already takes a mesh::Radio&. It does not know whether that is the
+// transceiver of the board or one port of a shared transceiver. To reuse it, we
+// only give it a RadioPort in place of radio_driver. There is no fork of the
+// repeater. There is no #define that renames its class. There are no changes in
+// examples/simple_repeater. The build uses MyMesh.cpp from that directory and
+// nothing else. Its main.cpp has its own setup() and loop(), so the build
+// excludes that file.
 
 #include "HydraSlot.h"
 #include <MyMesh.h>          // examples/simple_repeater, on the include path
@@ -18,7 +19,7 @@ class RepeaterSlot : public HydraSlot {
   RadioPort        _port;
   ArduinoMillis    _ms;
   StdRNG           _rng;
-  SimpleMeshTables _tables;   // full 160-hash dedup table; the repeater sees everything
+  SimpleMeshTables _tables;   // the full 160-hash dedup table: the repeater sees all
   MyMesh           _mesh;
   bool             _begun;
 
@@ -29,9 +30,10 @@ public:
   RadioPort& port() override { return _port; }
   SlotType type() const override { return SLOT_REPEATER; }
   const mesh::LocalIdentity& identity() const override { return _mesh.self_id; }
-  // Slot 0's name lives in prefs.json, owned by CommonCLI, not in the hydra
-  // slot config: it is the stock repeater identity and `set name` still works
-  // on it unqualified. ADVERT_NAME means it is never unnamed.
+  // The name of slot 0 is in prefs.json, which CommonCLI owns. It is not in the
+  // hydra slot config. Slot 0 is the standard repeater identity, and `set name`
+  // still works on it without a slot prefix. ADVERT_NAME makes sure that slot 0
+  // always has a name.
   const char* name() const override { return const_cast<MyMesh&>(_mesh).getNodePrefs()->node_name; }
   bool hasPendingWork() const override { return _begun && _mesh.hasPendingWork(); }
   MyMesh& mesh() { return _mesh; }
@@ -40,13 +42,13 @@ public:
              const char* display_name, SlotType type) override {
     if (!store.load(id_name, _mesh.self_id)) {
       _mesh.self_id = radio_new_identity();
-      // 0x00 and 0xFF are reserved id-hash prefixes
+      // the id-hash prefixes 0x00 and 0xFF are reserved
       for (int i = 0; i < 10 && (_mesh.self_id.pub_key[0] == 0x00 || _mesh.self_id.pub_key[0] == 0xFF); i++) {
         _mesh.self_id = radio_new_identity();
       }
       store.save(id_name, _mesh.self_id);
     }
-    _mesh.begin(fs);   // also pushes freq/bw/sf/cr/power onto the real radio
+    _mesh.begin(fs);   // this also sends freq, bw, sf, cr and power to the real radio
     _begun = true;
     return true;
   }
@@ -55,7 +57,7 @@ public:
 
   void handleCommand(uint32_t sender_timestamp, char* command,
                      char* reply, size_t reply_sz) override {
-    // reply must be >= 160 bytes: MyMesh's CLI writes into it unbounded.
+    // reply must be >= 160 bytes. The CLI of MyMesh writes into it with no limit.
     if (_begun) _mesh.handleCommand(sender_timestamp, command, reply);
   }
 

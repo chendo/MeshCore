@@ -1,8 +1,9 @@
 #pragma once
 
-// The rules a slot has to satisfy before it may be enabled, and the node/slot
-// CLI namespace split — separated from the firmware so both can be tested on a
-// host. Nothing here includes Arduino, Mesh or target headers.
+// This file has the rules that a slot must satisfy before you can enable it.
+// It also has the split between the node CLI namespace and the slot CLI
+// namespace. The file is separate from the firmware, so you can test both on a
+// host. No part of this file includes an Arduino, Mesh or target header.
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -12,24 +13,26 @@ enum SlotType : uint8_t {
   SLOT_OFF      = 0,
   SLOT_REPEATER = 1,
   SLOT_CHAT     = 2,
-  SLOT_ROOM     = 3,   // room server: own identity, own ACL, own post buffer
+  SLOT_ROOM     = 3,   // a room server: its own identity, ACL and post buffer
 };
 
-// Matches NodePrefs::node_name, so slot 0 and slots 1..N have the same ceiling.
+// This is the same as NodePrefs::node_name. Slot 0 and slots 1..N thus have the
+// same limit.
 #define SLOT_NAME_MAX  32
 
-// Decision G's node-level RAM reserve floor. Enabling a slot must leave at
-// least this much heap for BLE connections, LittleFS and packet churn.
+// This is the node-level RAM reserve floor of decision G. When you enable a
+// slot, it must leave at least this much heap. The heap is for BLE connections,
+// for LittleFS and for the constant allocation and release of packets.
 #ifndef HYDRA_RAM_RESERVE
   #define HYDRA_RAM_RESERVE  24576
 #endif
 
 // ---------------------------------------------------------------- slot naming
 
-// Same character rules as CommonCLI's isValidName(): these break the advert
-// listing formats used by the apps.
+// These are the same character rules as isValidName() in CommonCLI. These
+// characters break the advert listing formats that the apps use.
 inline bool slotNameValid(const char* n) {
-  if (n == nullptr || n[0] == 0) return false;          // unnamed is not a name
+  if (n == nullptr || n[0] == 0) return false;          // an empty name is not a name
   if (strlen(n) >= SLOT_NAME_MAX) return false;
   for (; *n; n++) {
     if (*n == '[' || *n == ']' || *n == '\\' || *n == ':' ||
@@ -42,12 +45,12 @@ inline bool slotNameValid(const char* n) {
 
 enum SlotEnableResult : uint8_t {
   SLOT_ENABLE_OK = 0,
-  SLOT_ENABLE_RANGE,      // no such slot
-  SLOT_ENABLE_SLOT0,      // slot 0 is the repeater and is never toggled
-  SLOT_ENABLE_NO_NAME,    // decision H: a nameless identity must not exist
+  SLOT_ENABLE_RANGE,      // there is no such slot
+  SLOT_ENABLE_SLOT0,      // slot 0 is the repeater, and you never toggle it
+  SLOT_ENABLE_NO_NAME,    // decision H: an identity with no name must not exist
   SLOT_ENABLE_BAD_TYPE,
-  SLOT_ENABLE_NO_RAM,     // would breach the reserve floor
-  SLOT_ENABLE_FAILED,     // begin() refused for its own reasons
+  SLOT_ENABLE_NO_RAM,     // the slot would go below the reserve floor
+  SLOT_ENABLE_FAILED,     // begin() refused, for its own reasons
 };
 
 inline const char* slotEnableError(SlotEnableResult r) {
@@ -63,9 +66,9 @@ inline const char* slotEnableError(SlotEnableResult r) {
   return "ERR";
 }
 
-// Everything that can be decided without touching the heap or the radio. The
-// RAM floor is checked separately, by RamFloor below, because the only honest
-// answer to "is there room" is to try.
+// This function decides everything that does not need the heap or the radio.
+// RamFloor below checks the RAM floor separately. The only true answer to the
+// question "is there room" is to try to allocate the memory.
 inline SlotEnableResult slotEnableCheck(int idx, int num_slots, SlotType t, const char* name) {
   if (idx <= 0 || idx >= num_slots) {
     return (idx == 0) ? SLOT_ENABLE_SLOT0 : SLOT_ENABLE_RANGE;
@@ -75,19 +78,21 @@ inline SlotEnableResult slotEnableCheck(int idx, int num_slots, SlotType t, cons
   return SLOT_ENABLE_OK;
 }
 
-// ------------------------------------------------- decoding a stored record
+// ---------------------------------------------- how to decode a stored record
 //
-// Safe mode (decision D): every unreadable or unexpected value has to land on
-// "slot off", never on a different slot type and never on a running identity
-// the config did not actually describe.
+// Safe mode (decision D). Every value that the node cannot read, and every
+// unexpected value, must give "slot off". It must never give a different slot
+// type. It must never start an identity that the config did not describe.
 
-// A type byte this build does not implement must not be reinterpreted.
+// This build must not give a new meaning to a type byte that it does not
+// implement.
 inline SlotType slotTypeFromByte(uint8_t b) {
   return (b == SLOT_CHAT || b == SLOT_ROOM) ? (SlotType)b : SLOT_OFF;
 }
 
-// A persisted record only enables a slot if it would also pass the CLI's gate,
-// so the no-nameless-identity rule survives a reboot and a corrupt file.
+// A stored record enables a slot only if the record also passes the gate of the
+// CLI. The rule that no identity has an empty name thus stays true after a
+// reboot and after a corrupt file.
 inline SlotType slotTypeFromRecord(uint8_t type_byte, const char* name) {
   SlotType t = slotTypeFromByte(type_byte);
   return slotNameValid(name) ? t : SLOT_OFF;
@@ -95,11 +100,13 @@ inline SlotType slotTypeFromRecord(uint8_t type_byte, const char* name) {
 
 // ------------------------------------------------------------ the RAM reserve
 //
-// Decision G forbids sizing anything from measured free heap: free-at-boot is
-// not free-at-peak and the failure modes are silent. This does not measure.
-// It PINS the reserve out of reach and then lets the slot allocate against
-// what is left, so a slot that starts has provably left the floor intact —
-// and one that cannot is refused now rather than dropping packets at 3am.
+// Decision G does not let the code set any size from a measurement of the free
+// heap. The free heap at boot is not the free heap at peak load, and the
+// failures are silent. This class does not measure the heap. It PINS the
+// reserve so that nothing else can take it. The slot then allocates from what
+// is left. A slot that starts has thus kept the floor intact. The node refuses
+// a slot that cannot keep the floor. It refuses that slot now, and does not
+// drop packets at 3am.
 
 class RamFloor {
 public:
@@ -112,8 +119,8 @@ public:
   }
   ~RamFloor() { release(); }
 
-  // False means the floor could not even be pinned: the heap is already at or
-  // below the reserve and no slot should be started.
+  // False means that the code could not pin the floor. The heap is already at
+  // the reserve or below it. Do not start a slot.
   bool held() const { return _wanted == 0 || _p != nullptr; }
   void release() { if (_p) { _free_fn(_p); _p = nullptr; } }
 
@@ -125,8 +132,9 @@ private:
   size_t _wanted;
 };
 
-// Largest single block the heap will still hand out, for the `slots` headroom
-// column. Reporting only — nothing sizes itself from this.
+// This is the largest single block that the heap still gives out. It fills the
+// headroom column of the `slots` command. It is a report only. Nothing sets its
+// own size from this value.
 inline size_t probeLargestBlock(size_t ceiling,
                                 RamFloor::AllocFn a = ::malloc,
                                 RamFloor::FreeFn f = ::free) {
@@ -141,9 +149,10 @@ inline size_t probeLargestBlock(size_t ceiling,
 
 // ------------------------------------------------------- CLI namespace split
 //
-// Decision 8: node-level owns anything backed by one piece of hardware — the
-// transceiver, the board, the flash. A slot asking for those is refused rather
-// than quietly retuning the antenna under every other slot.
+// Decision 8. The node level owns everything that one piece of hardware
+// supplies. That is the transceiver, the board and the flash. The node refuses
+// a slot that asks for one of these. If it did not refuse, the slot would
+// retune the antenna under every other slot without a warning.
 
 inline bool slotVerbIsNodeLevel(const char* verb) {
   static const char* const kNodeOnly[] = {
@@ -152,7 +161,7 @@ inline bool slotVerbIsNodeLevel(const char* verb) {
     "agc.reset.interval", "dutycycle", "af",
     // the one board
     "adc.multiplier", "reboot", "erase", "start", "powersave", "bridge",
-    // node-wide state
+    // the state of the whole node
     "time", "clock", "log", "password", "ver", "neighbors",
     "discover.neighbors",
   };
@@ -162,7 +171,7 @@ inline bool slotVerbIsNodeLevel(const char* verb) {
   for (size_t i = 0; i < sizeof(kNodeOnly) / sizeof(kNodeOnly[0]); i++) {
     size_t klen = strlen(kNodeOnly[i]);
     if (vlen < klen || memcmp(verb, kNodeOnly[i], klen) != 0) continue;
-    // exact token, or a dotted child of one ("radio.rxgain" under "radio")
+    // an exact token, or a child of one after a dot ("radio.rxgain" under "radio")
     if (vlen == klen || verb[klen] == '.') return true;
   }
   return false;

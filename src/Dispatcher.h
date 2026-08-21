@@ -80,25 +80,28 @@ public:
   virtual float getLastSNR() const { return 0; }
 
   /**
-   * \returns  the coding rate of the last frame decoded, as the 4/x denominator
-   *           (5..8), or 0 where the radio cannot report it.
+   * \returns  the coding rate of the last frame that the radio decoded, as the
+   *           4/x denominator (5..8). The value is 0 if the radio cannot report
+   *           it.
    *
-   * In explicit-header mode the coding rate travels with every frame, so this is
-   * the SENDER's choice and need not match our own. It is latched by the modem
-   * and overwritten by the next frame decoded.
+   * In explicit-header mode every frame carries the coding rate. Thus this value
+   * is the choice of the SENDER. It does not have to agree with our own coding
+   * rate. The modem latches the value. The next frame that the modem decodes
+   * replaces it.
    */
   virtual uint8_t getLastRxCodingRate() const { return 0; }
 
   /**
-   * \brief  estimated air-time for 'len_bytes' had it been sent at coding rate
-   *        'cr' (the 4/x denominator, 5..8), in milliseconds.
-   * \param  cr  0 where the sender's coding rate is unknown
+   * \brief  the estimated air-time in milliseconds for 'len_bytes' at the
+   *        coding rate 'cr' (the 4/x denominator, 5..8).
+   * \param  cr  0 if the coding rate of the sender is unknown
    *
-   * A frame occupies the channel for as long as ITS sender's coding rate made
-   * it, which in explicit-header mode need not be ours: 4/8 spends 60% longer
-   * than 4/5 on the same bytes. Radios that cannot reprice fall back to our own
-   * figure, which is also what an unknown 'cr' must cost -- a guess would be
-   * worse than the number we already have.
+   * A frame holds the channel for the time that the coding rate of ITS sender
+   * gives it. In explicit-header mode that rate does not have to be ours. The
+   * rate 4/8 holds the channel 60% longer than 4/5 for the same bytes. A radio
+   * that cannot calculate a new price returns our own figure. An unknown 'cr'
+   * also costs our own figure, because a guess is worse than the number that we
+   * already have.
   */
   virtual uint32_t getEstAirtimeForCR(int len_bytes, uint8_t cr) {
     return getEstAirtimeFor(len_bytes);
