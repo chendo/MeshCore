@@ -115,8 +115,9 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
     }
 
     client = acl.putClient(sender, 0);  // add to contacts (if not already known)
-    /* Captured BEFORE the fields below are overwritten, so we can tell an
-       actual change from a routine re-login. See the write gate at the end. */
+    /* Read these two values BEFORE the code below writes over the fields.
+       They show if a real change occurs, or only a repeat login. The write
+       gate at the end of this block uses them. */
     const bool was_known = (client->last_timestamp != 0);
     const uint8_t prev_perms = client->permissions;
     if (sender_timestamp <= client->last_timestamp) {
@@ -131,22 +132,27 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
     client->permissions |= perms;
     memcpy(client->shared_secret, secret, PUB_KEY_SIZE);
 
-    /* Write only when something worth persisting actually changed: a client we
-       have never seen, or a permission grant that differs from what is stored.
-       A repeat login by a known admin changes only last_timestamp and
-       last_activity, and paying a flash write for those is a bad trade -- the
-       write blocks the main loop for about 1.6s while the SoftDevice arbitrates
-       for the flash, and every login supplying a password reaches here, because
-       `client` is only non-NULL on the blank-password ACL check above. That was
-       the real source of the ~2s worst-case loop gap on both repeaters: not
-       mesh traffic, but me logging in to look at them.
+    /* Write to flash only when a value that the node must keep changes. Two
+       cases do this. The first case is a client that the node never saw
+       before. The second case is a permission grant that differs from the
+       grant in flash.
 
-       The cost is that last_timestamp is no longer pushed to flash on every
-       login, so its replay protection can rewind to the last persisted value
-       across a reboot. That guarantee was already soft -- the write is lazy, so
-       a reboot inside LAZY_CONTACTS_WRITE_DELAY lost it anyway, and these
-       boards come up with no clock at all. Permission grants, which are the
-       part that matters, are still persisted the moment they change. */
+       A repeat login by a known admin changes only last_timestamp and
+       last_activity. A flash write for those two fields is a bad trade. The
+       write blocks the main loop for about 1.6s while the SoftDevice controls
+       access to the flash. Every login that supplies a password reaches this
+       point, because `client` is non-NULL only after the blank-password ACL
+       check above. This was the true cause of the ~2s worst-case gap in the
+       main loop on both repeaters. Mesh traffic was not the cause. The cause
+       was an operator who logs in to look at the repeaters.
+
+       The cost is that the node no longer writes last_timestamp to flash at
+       every login. Its replay protection can therefore rewind to the last
+       value in flash across a reboot. That guarantee was already weak. The
+       write is lazy, so a reboot inside LAZY_CONTACTS_WRITE_DELAY lost the
+       value in any case. Also, these boards start with no clock at all. The
+       node still writes permission grants to flash the moment they change,
+       and permission grants are the part that matters. */
     if (perms != PERM_ACL_GUEST && (!was_known || client->permissions != prev_perms)) {
       dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
     }
