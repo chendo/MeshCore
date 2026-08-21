@@ -157,4 +157,15 @@ void loop() {
 #ifdef HAS_EXTERNAL_WATCHDOG
   external_watchdog.loop();
 #endif
+
+  // Without this the CPU spins at 64 MHz forever for no gain. Opt-in via 'powersaving on',
+  // so an unattended server can be put back to spinning without a reflash.
+  // nRF52 only: MyMesh has no hasPendingWork(), but sleep(0) is just a WFE that the 1 kHz
+  // RTOS tick already bounds, so a queued packet waits at most a tick. A timed sleep on
+  // other platforms would need that guard, so don't offer one here.
+#if defined(NRF52_PLATFORM)
+  if (the_mesh.getNodePrefs()->powersaving_enabled) {
+    board.sleep(0); // nrf ignores seconds param, sleeps whenever possible
+  }
+#endif
 }
