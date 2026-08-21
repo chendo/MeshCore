@@ -1127,15 +1127,87 @@ region save
 
 ---
 
-#### Set the ESP-Now secret
+#### Set the shared bridge secret (ESP-NOW and BLE)
 **Usage:** 
 - `get bridge.secret`
 - `set bridge.secret <secret>`
 
 **Parameters:**
-- `secret`: ESP-NOW bridge secret, up to 15 characters
+- `secret`: shared bridge secret, up to 15 characters
 
 **Default:** Varies by board
+
+On ESP-NOW builds this is an XOR key. On BLE builds it is hashed into an
+HMAC key that authenticates every frame -- see the BLE bridge notes below.
+
+---
+
+#### BLE bridge (nRF52 only)
+
+`WITH_BLE_BRIDGE` mirrors mesh packets over BLE 5 extended advertising instead
+of ESP-NOW, for nRF52 boards that have no WiFi. Every node in BLE range running
+the build with the same `bridge.secret` hears every bridged packet, so
+co-located repeaters can share traffic without spending a LoRa hop. `get
+bridge.type` reports `ble`; there is no `bridge.channel`, which is ESP-NOW only.
+
+The frame is deliberately **plaintext**, so the format can be implemented
+independently:
+
+```text
+[1]     version
+[4]     timestamp, little-endian, sender's clock
+[<=238] the mesh packet, unencrypted
+[8]     HMAC-SHA256 tag over everything above, truncated
+```
+
+Anyone in BLE range can therefore read bridged traffic. Message contents remain
+protected by MeshCore's own end-to-end encryption exactly as they are over LoRa.
+`bridge.secret` is a credential rather than a cipher: it keys the HMAC that stops
+anyone in range injecting packets into the mesh, so anyone holding it can forge
+frames. Prefer a random string, since its entropy caps the key's.
+
+There is deliberately no freshness check on the timestamp. A replay is already
+caught by the bridge's own dedup table, by the mesh's dedup table, and by
+MeshCore's login/admin/advert timestamp checks, none of which the bridge can
+weaken -- while rejecting frames older than the last one from a sender cost real
+availability on boards with no hardware RTC, where every reboot moves a node's
+clock backwards. The timestamp is still carried, still covered by the HMAC, and
+is reported as clock skew by `bridge peers`.
+
+#### Bridge telemetry
+**Usage:**
+- `bridge` -- transport state and frame accounting
+- `bridge peers` -- which nodes we are bridging with
+
+```text
+> bridge
+ble bridge up: tx 24 drop 0 | rx seen 102 ok 12 dup 8 bad 0 other 82 | peers 1
+> bridge peers
+1 bridge peer(s): EFD096/-33dB/17pkt/33s/skew+4076s
+```
+
+Every advert carrying the bridge's company ID counts as `seen`, and then lands in
+exactly one of `ok`, `dup`, `bad` or `other`, so the split says *why* frames were
+not used rather than only that they were dropped. Two are easy to misread:
+
+- **`dup`** is expected and healthy. Each datagram is deliberately broadcast over
+  several advertising events so a duty-cycled scanner cannot miss it, so the same
+  frame normally arrives two or three times and the repeats are discarded.
+- **`other`** is ambient noise, not a fault. `0xFFFF` is the Bluetooth SIG's
+  shared development company ID, so other people's beacons legitimately arrive
+  here too.
+
+A climbing **`bad`** means another bridge group is in range using a different
+`bridge.secret` -- the network isolation working, rather than a problem.
+
+`bridge peers` reports the BLE link quality to each peer, frames accepted from
+it, how long since the last one, and its clock skew relative to ours.
+
+The SoftDevice provides one advertising set, so on a build that also exposes a
+BLE serial interface the bridge and that interface take turns on it: at least
+300 ms of every 2 s is reserved for connectable advertising, so the device stays
+discoverable, though a BLE scanner may take longer to find it while the bridge is
+busy. Range is BLE range -- tens of metres. This is a same-site bridge.
 
 ---
 

@@ -1,3 +1,126 @@
+# BLE Bridging (nRF52)
+
+> This branch adds a **BLE bridge** for nRF52840 repeaters. It is the nRF52
+> counterpart to `WITH_ESPNOW_BRIDGE`: two or more co-located repeaters share
+> every packet they transmit, so traffic crosses between them without spending a
+> LoRa hop. Boards like the RAK3401 have no WiFi, so ESP-NOW is unavailable to
+> them and BLE is the only 2.4 GHz radio they have.
+>
+> **[docs/ble_bridge.md](docs/ble_bridge.md)** — quickstart, settings
+> reference, and how to read the diagnostics.
+
+## What it is for
+
+Run two repeaters at one site on **different radio configs** — say one on
+`Australia (Narrow)` and one on `Australia (Mid)` — and give them the same
+`bridge.secret`. Each one re-floods onto its own band whatever the other heard.
+The two bands become one mesh, without either repeater having to hear the other
+over LoRa at all.
+
+## How it works
+
+Each node broadcasts every packet it transmits as a **BLE 5 extended
+advertisement**, and scans continuously for its peers' broadcasts. There is no
+pairing, no connection and no peer state: every node in range hears every
+datagram, exactly like ESP-NOW.
+
+Extended advertising matters. A legacy advert carries 31 bytes, of which about 24
+would survive framing, so a full MeshCore packet would need eleven fragments with
+no acknowledgement anywhere — delivery decays as `(1-p)^11` and collapses the
+moment two nodes talk at once. An extended PDU carries 255, so a packet always
+fits one transmission and there is no reassembly to get wrong. That leaves **238
+bytes** for the packet, against ESP-NOW's 246.
+
+One advertisement carries one frame:
+
+```text
+[1]     version
+[4]     timestamp, little-endian, sender's clock
+[<=238] the mesh packet, IN PLAINTEXT
+[8]     HMAC-SHA256 tag over everything above, truncated
+```
+
+**The payload is deliberately plaintext.** ESP-NOW's bridge XORs its payload with
+the shared secret, which its own header admits is not encryption. Mesh traffic is
+already public over the air, so pretending otherwise buys nothing and makes the
+format harder to implement independently. Message *contents* stay protected by
+MeshCore's own end-to-end encryption, exactly as they are over LoRa.
+
+**Authentication replaces the checksum.** Because the format is open, anything in
+radio range could otherwise inject packets straight into your mesh. The truncated
+HMAC replaces both the Fletcher-16 checksum and the XOR: a frame keyed with a
+different secret fails the tag check, which is precisely the network-isolation
+role ESP-NOW's post-encryption checksum plays. Eight tag bytes put a blind
+forgery at 2⁻⁶⁴ per attempt, from inside radio range.
+
+Received frames are queued as if they had arrived over the air, so routing,
+dedup, and admin handling are unchanged. Loops are prevented because MeshCore's
+packet hash ignores the path: a packet that returns over the bridge with an extra
+hop hashes identically to the one already seen, and is dropped.
+
+## Quickstart
+
+**1. Build and flash** — the reference target is the RAK3401:
+
+```bash
+pio run -e RAK_3401_repeater_bridge_ble -t upload --upload-port /dev/ttyACM0
+```
+
+For another nRF52840 board, add `-D WITH_BLE_BRIDGE=1` to its env plus these to
+`build_src_filter`:
+
+```ini
+  +<helpers/nrf52/BleBroadcast.cpp>
+  +<helpers/bridges/BridgeBase.cpp>
+  +<helpers/bridges/BLEBridge.cpp>
+```
+
+**2. Set the same secret on every node in the group** — over the serial console:
+
+```text
+set bridge.secret YourRandomSecretHere
+```
+
+> ⚠️ **Change it.** The secret is not optional — every frame is tagged and every
+> frame is checked — but the factory default is published in this source, so a
+> node still carrying it will accept packets from anyone in radio range. `bridge`
+> flags this as `[DEFAULT SECRET - anyone can inject]` until you change it. It is
+> a credential, not a cipher: anyone holding it can forge frames, so prefer a
+> random string, and note the field holds 15 characters.
+
+**3. Check it is working:**
+
+```text
+> bridge
+ble bridge up: tx 24 drop 0 | rx seen 102 ok 12 dup 8 bad 0 other 82 | peers 1
+> bridge peers
+1 bridge peer(s): EFD096/-33dB/17pkt/33s/skew+4076s
+```
+
+`ok` climbing means frames are being accepted from a peer. Two counters are easy
+to misread: **`dup`** is healthy — each datagram is deliberately broadcast over
+several advertising events so a duty-cycled scanner cannot miss it — and
+**`other`** is ambient noise, because `0xFFFF` is the Bluetooth SIG's shared
+development company ID and other people's beacons land there too. A climbing
+**`bad`** means another group is in range on a different secret, which is the
+isolation working.
+
+## Limits worth knowing
+
+- **BLE range is tens of metres.** This is a same-site link, not a backhaul.
+- **nRF52 only.** ESP32 repeaters cannot join a BLE bridge group.
+- **The SoftDevice has one advertising set**, so the bridge time-shares it with
+  the BLE diagnostic/DFU port if the build has one. At least 300 ms of every 2 s
+  is reserved for connectable advertising, so that port stays discoverable, but
+  finding it can take longer while the bridge is busy.
+- **`set bridge.enabled off`** stops the bridge, including its continuous
+  scanner, which is the dominant power draw. Measured on a RAK3401 the whole BLE
+  stack costs roughly 10 mW against a ~110 mW idle baseline.
+
+See `docs/cli_commands.md` for the full command reference.
+
+---
+
 ## About MeshCore
 
 MeshCore is a lightweight, portable C++ library that enables multi-hop packet routing for embedded projects using LoRa and other packet radios. It is designed for developers who want to create resilient, decentralized communication networks that work without the internet.

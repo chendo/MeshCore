@@ -24,6 +24,11 @@
 #define WITH_BRIDGE
 #endif
 
+#ifdef WITH_BLE_BRIDGE
+#include "helpers/bridges/BLEBridge.h"
+#define WITH_BRIDGE
+#endif
+
 #include <helpers/AdvertDataHelpers.h>
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/ClientACL.h>
@@ -31,6 +36,7 @@
 #include <helpers/IdentityStore.h>
 #include <helpers/SimpleMeshTables.h>
 #include <helpers/StaticPoolPacketManager.h>
+#include <helpers/BatteryEstimator.h>
 #include <helpers/StatsFormatHelper.h>
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/RegionMap.h>
@@ -71,7 +77,12 @@ struct NeighbourInfo {
 };
 
 #ifndef FIRMWARE_BUILD_DATE
-  #define FIRMWARE_BUILD_DATE   "14 Aug 2026"
+  /* build.sh sets this; a plain `pio run` does not, and the literal that used to
+     sit here then reported a date the image was NOT built on. That is worse than
+     no date at all: it reads as confirmation while carrying no information, so a
+     freshly flashed node looks identical to one running a week-old image.
+     __DATE__ costs a rebuild of this translation unit and cannot go stale. */
+  #define FIRMWARE_BUILD_DATE   __DATE__
 #endif
 
 #ifndef FIRMWARE_VERSION
@@ -81,6 +92,18 @@ struct NeighbourInfo {
 #define FIRMWARE_ROLE "repeater"
 
 #define PACKET_LOG_FILE  "/packet_log"
+
+#ifdef LOOP_WATCHDOG_MS
+  #include <helpers/nrf52/LoopWatchdog.h>
+#endif
+#if WITH_MESH_OBSERVER
+  #include "helpers/MeshObserver.h"
+#endif
+#if WITH_BLE_CLI
+  #include <helpers/BaseSerialInterface.h>
+  #include <helpers/nrf52/BleStack.h>
+  #include <helpers/nrf52/SerialBLEInterface.h>
+#endif
 
 class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   FILESYSTEM* _fs;
@@ -118,6 +141,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   RS232Bridge bridge;
 #elif defined(WITH_ESPNOW_BRIDGE)
   ESPNowBridge bridge;
+#elif defined(WITH_BLE_BRIDGE)
+  BLEBridge bridge;
 #endif
 
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
@@ -130,6 +155,62 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 
   File openAppend(const char* fname);
   bool isLooped(const mesh::Packet* packet, const uint8_t max_counters[]);
+
+#if WITH_MESH_OBSERVER
+  // Passive metrics fed from the raw receive/transmit hooks. Costs a few KB of
+  // RAM and nothing on air; off unless the build asks for it.
+  MeshObserver _obs;
+
+  /* Clock convergence: steer our clock towards what the neighbourhood says the
+     time is. The observer supplies the estimate; the policy for acting on it
+     lives here -- see maybeConvergeClock(). Off until "clocks on". */
+  static const uint32_t CLOCK_CONVERGE_INTERVAL_MS = 5UL * 60UL * 1000UL;
+  static const int32_t  CLOCK_DEADBAND_S = 2;     // agreement to the second is enough
+  static const int32_t  CLOCK_SLEW_MAX_S = 2;     // per interval, either direction
+  static const int32_t  CLOCK_STEP_MIN_S = 30;    // below this, never worth a jump
+  static const uint8_t  CLOCK_STEP_MIN_AGREE = 80;
+  /* A survey of a real 407-node mesh put the false-fire rate of the step gate
+     at 0.2% of rounds with eight sources but 4.3% with four, so a step needs a
+     real quorum. */
+  static const uint8_t  CLOCK_STEP_MIN_SOURCES = 6;
+  /* And the survivors must actually agree with each other, not merely all
+     survive clipping. 15s is about twice the 7s MAD the survey mesh runs at,
+     which lets a genuinely-wrong node step within about three rounds while
+     still refusing a population split between two beliefs -- that case reports
+     100% agreement on a midpoint nobody holds, with a spread of 150s. */
+  static const int32_t  CLOCK_STEP_MAX_SPREAD_S = 15;
+  static const uint32_t CLOCK_HOLDOVER_MS = 6UL * 60UL * 60UL * 1000UL;
+  /* Slewing needs a quality gate of its own: on hardware a node computed +50s
+     from seven scattered multi-hop sources with a spread of 62s, and nothing
+     stopped the slew from walking a known-good clock 50s away two seconds at a
+     time. When sources disagree this much the median is not evidence. */
+  static const int32_t  CLOCK_MAX_SPREAD_TO_ACT_S = 30;
+
+  /* None of that caution applies when our clock was never set. These boards
+     have no hardware RTC, so every reboot lands them back on 15 May 2024 --
+     and until they leave it their adverts carry timestamps the rest of the mesh
+     rejects outright as replays, which makes the node not merely wrong but
+     invisible. Nothing to protect, so check often and take the first credible
+     consensus whole. */
+  static const uint32_t CLOCK_CONVERGE_FAST_MS = 30UL * 1000UL;
+  static const uint8_t  CLOCK_UNSET_MIN_SOURCES = 2;
+  /* Measured on hardware: at 600s this accepted a two-source consensus and
+     landed 113s off true UTC, and because the neighbourhood's ordinary spread
+     then sat at 398s the normal path refused to refine it -- so the node stayed
+     wrong. The escape only has to be close enough for ordinary steering to take
+     over, so it is worth waiting a little longer for a tighter sample. */
+  static const int32_t  CLOCK_UNSET_MAX_SPREAD_S = 120;
+
+  /* Mirrors _prefs.clock_converge, which is the persisted authority. */
+  uint32_t _next_clock_converge_ms = 0;
+  uint32_t _clock_extern_set_ms = 0;
+  bool     _clock_ever_set = false;
+  int32_t  _last_clock_adj_s = 0;
+  uint32_t _clock_steps = 0;
+  uint32_t _clock_slews = 0;
+  bool clockIsUnset() const;
+  void maybeConvergeClock();
+#endif
 
 protected:
   float getAirtimeBudgetFactor() const override {
@@ -192,7 +273,27 @@ public:
     return &_prefs;
   }
 
+  /* Deferred, not immediate. A prefs save is remove-then-rewrite of the whole
+     file, and under BLE load it stalls this loop for around 1.6 seconds --
+     measured, and dominated by SoftDevice flash arbitration rather than by
+     LittleFS, since erase and write can only proceed in radio-idle slots.
+     During that stall the bridge arbiter stops being driven and the connectable
+     advert can be left held.
+
+     There are 56 savePrefs() call sites in the CLI, one per setting, so
+     configuring a node runs that stall once per command. Coalescing here costs
+     one flag and turns a burst of settings into a single write. */
+  static const uint32_t PREFS_SETTLE_MS = 2000;
+  unsigned long _prefs_dirty_ms = 0;
+
   void savePrefs() override {
+    _prefs_dirty_ms = millis();
+  }
+  /** Write now if anything is pending -- before a reboot, poweroff or OTA,
+   *  where a deferred write would otherwise be lost. */
+  void flushPrefs() override {
+    if (_prefs_dirty_ms == 0) return;
+    _prefs_dirty_ms = 0;
     _cli.savePrefs(_fs);
   }
 
@@ -215,6 +316,13 @@ public:
   void setTxPower(int8_t power_dbm) override;
   void formatNeighborsReply(char *reply) override;
   void removeNeighbor(const uint8_t* pubkey, int key_len) override;
+#if defined(WITH_BLE_BRIDGE)
+  void formatBridgeReply(char *reply, const char* what) override;
+#if WITH_MESH_OBSERVER
+  void formatObserverReply(char *reply, const char* what) override;
+  void onClockSetExternally() override;
+#endif
+#endif
   void formatStatsReply(char *reply) override;
   void formatRadioStatsReply(char *reply) override;
   void formatPacketStatsReply(char *reply) override;
@@ -228,6 +336,74 @@ public:
   void clearStats() override;
 
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
+
+  /* Loop iterations, sampled per second. The Arduino task runs at
+     TASK_PRIO_LOW and every BLE report preempts it, so the rate is a
+     whole-system proxy for what the radio side is stealing -- and unlike
+     FreeRTOS run-time stats it costs one increment and needs no core patch. */
+  uint32_t _loop_iters = 0, _loop_rate = 0;
+  unsigned long _loop_rate_ms = 0;
+  /* Longest gap ever seen between two loop() entries. This is the number a
+     hardware watchdog timeout has to clear: the WDT on this part cannot be
+     stopped once started, so any legitimate blocking operation longer than the
+     timeout becomes a reset loop. Measuring the worst case beats auditing for
+     it -- filesystem writes, LoRa transmit and BLE work all block here. */
+  unsigned long _loop_gap_max_ms = 0, _loop_last_ms = 0;
+
+  /* Charge/discharge inference from voltage alone -- there is no current
+     sensing on this hardware. See BatteryEstimator.h. */
+  BatteryEstimator _batt;
+#ifdef LOOP_WATCHDOG_MS
+  /* Latches on the first loop pass, where the watchdog drops from the boot
+     limit to the runtime limit. See loop(). */
+  bool _wdog_tightened = false;
+#endif
+
+  /* LoRa watchdog. Both repeaters have been found with a completely dead radio
+     -- zero packets sent or received for over an hour, correct config, repeat
+     on -- and a reboot did not clear it, so nothing short of intervention got
+     them back on the air. Nothing noticed, because a silent band and a dead
+     radio look identical from the outside.
+
+     They are distinguishable if we make traffic ourselves: transmitting is
+     always possible, so after a long idle period the node sends one zero-hop
+     advert and watches whether its own transmit airtime moves. That separates
+     "nobody is talking" from "this radio is not working" without waiting for
+     someone else to speak, which on a quiet band may be never. */
+  static const uint32_t LORA_IDLE_MS = 15UL * 60UL * 1000UL;
+  static const uint32_t LORA_SELFTEST_GRACE_MS = 30000;
+  static const uint32_t LORA_CHECK_EVERY_MS = 30000;
+  enum LoraWd : uint8_t { LORA_WD_IDLE = 0, LORA_WD_TESTING, LORA_WD_REINITED };
+
+  unsigned long _lora_activity_ms = 0;   // when air time last moved
+  unsigned long _lora_last_air = 0;      // tx+rx air time at that moment
+  unsigned long _lora_next_check_ms = 0;
+  unsigned long _lora_test_started_ms = 0;
+  unsigned long _lora_test_air = 0;
+  uint8_t  _lora_wd_state = LORA_WD_IDLE;
+  uint32_t _lora_reinits = 0;
+  void loraWatchdog();
+
+#if WITH_BLE_CLI
+private:
+  // A local, high-bandwidth diagnostic port. Metrics over LoRa are capped at a
+  // ~160-byte reply and cost airtime on a congested band; over BLE they cost
+  // nothing. Reuses the companion's SerialBLEInterface unchanged, which also
+  // brings Adafruit's DFU service -- so this is the firmware-update path too,
+  // and on a node with no USB attached it is the ONLY way back in.
+  BaseSerialInterface* _ble = nullptr;
+  uint32_t _ble_pin = 0;
+  uint32_t _ble_seq = 0;      // monotonic, for the CLI's replay guard
+  void bleLoop();
+public:
+  // The PIN is generated per boot, so a stolen pairing cannot be replayed after
+  // a restart and there is no shipped default to look up.
+  void startBLE(SerialBLEInterface& ble, const char* name_prefix, char* name);
+  uint32_t blePin() const { return _ble_pin; }
+  void formatBleReply(char *reply) override;
+  // handleCommand above is public; restore that so loop() and friends below
+  // keep the access they had before this block was inserted.
+#endif
   void loop();
 
 #if defined(WITH_BRIDGE)

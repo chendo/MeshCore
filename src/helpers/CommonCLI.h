@@ -7,8 +7,14 @@
 #include <helpers/RegionMap.h>
 #include <helpers/ConfigSerializer.h>
 
-#if defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_BLE_BRIDGE)
 #define WITH_BRIDGE
+#endif
+
+// Bridges whose transport is a shared-secret broadcast, and so expose
+// bridge.secret. ESP-NOW uses it as an XOR key; BLE derives an HMAC key from it.
+#if defined(WITH_ESPNOW_BRIDGE) || defined(WITH_BLE_BRIDGE)
+#define WITH_BRIDGE_SECRET
 #endif
 
 #define ADVERT_LOC_NONE       0
@@ -50,7 +56,84 @@ public:
   // Bridge settings
   uint8_t bridge_enabled = 0; // boolean
   uint16_t bridge_delay = 0;  // milliseconds (default 500 ms)
-  uint8_t bridge_pkt_src = 0; // 0 = logTx, 1 = logRx (default logTx)
+  /* 0 = logTx, 1 = logRx, 2 = both. BOTH is the only setting that is actually
+     a bridge, and is the default; the other two exist for when one direction
+     is deliberately unwanted.
+       - RX alone: the far side hears our whole band, but this node's own
+         adverts and replies are transmissions, so they never cross and the
+         node cannot be reached from the other side at all.
+       - TX alone: the node is reachable, but only packets our routing policy
+         chose to relay ever cross. It drops duplicates and hop-exceeded
+         packets as old news on THIS band, while the far band may never have
+         heard them -- dedup is per-band, the bridge crosses bands.
+     Together they make the two bridge nodes behave as if they were sitting
+     next to each other, which is the whole point.
+     Loop-safe: the echo of a relayed packet returning to its origin is dropped
+     by BridgeBase::_seen_packets at the far end, which already marked it on
+     the way out. One wasted crossing, no loop. */
+  uint8_t bridge_pkt_src = 2;
+  /* How many advertising events each bridged datagram is repeated over. The
+     transport is unacknowledged, so this is the only redundancy there is.
+
+     Measured on a two-node link with sequence-gap accounting, each leg run to
+     convergence with a BLE central connected (which depresses scanning, so
+     these are the pessimistic end):
+
+         adv_rep    datagram loss    copies received per datagram
+            1           48.9%                 1.00
+            3            9.8%                 1.41
+            5            3.4%                 2.35
+
+     A single advert therefore lands about 51% of the time, and loss tracks
+     0.489^n closely enough across a 14x range to be predictive rather than
+     merely descriptive. Each extra copy roughly halves loss; the cost is
+     20ms of advertising per copy, against a ceiling of ~8 datagrams/s at 5
+     repeats -- far above what a repeater actually bridges.
+
+     Default stays at 3, which is what this was before it became tunable. Raise
+     it where the link matters more than the airtime; p is site-specific, so
+     measure with "bridge peers" rather than assuming these numbers. */
+  uint8_t bridge_adv_repeat = 3;
+  /* Milliseconds to hold a datagram before broadcasting it on BLE. The bridge
+     is fed from the LoRa receive hook, so without this the BLE burst starts in
+     the moment the LoRa radio has just been active -- and on a 1W node the two
+     radios share one supply. Staggering them trades a little latency for not
+     asking the regulator for both at once. 0 = send as soon as the arbiter
+     allows, which is the behaviour before this existed. */
+  uint16_t bridge_ble_hold = 0;
+  /* Percentage of each scan cycle spent listening. The rest is the blind gap
+     the SoftDevice needs to service our own advertising bursts and any
+     connection, so pushing this toward 100 buys listening time at the cost of
+     everything else the radio has to do -- including transmitting the adverts
+     our peer is trying to hear.
+
+     50%, because listening is nearly the whole BLE energy budget and it buys
+     much less than it appears to. At 100% duty the window equals the interval,
+     so there is NO blind time at all -- and measured delivery was still only
+     36.6% per heartbeat, which back-solves to ~14% per copy. Almost every lost
+     advert is lost to congestion (this node sees ~136 foreign adverts a second)
+     and to the scanner being paused on every report, NOT to the blind gap. So
+     duty trades roughly linearly against energy while barely moving delivery:
+     scanning costs ~4.6mA continuous, and halving it saves ~2.3mA -- about
+     55mAh a day, doubling scan-only battery life -- while still hearing a peer
+     within five minutes ~99% of the time.
+
+     Traffic does not depend on this: the P2P GATT link carries packets with
+     controller-level retries and costs ~55uA, about 1.5% of what scanning
+     costs. Broadcast is really a discovery channel, and discovery is not
+     latency-critical. */
+  uint8_t bridge_scan_duty = 50;
+  /* Filter scanning to known peers in the link layer. Off by default: a
+     whitelisted node is deaf to anyone it has not already authenticated, which
+     is the right trade on a fixed site and the wrong one while bringing a mesh
+     up. Discovery windows keep it joinable either way. */
+  uint8_t bridge_scan_filter = 0;
+  /* Steer the clock from what zero-hop neighbours say. On by default and
+     persisted: a node that loses its clock on every reboot -- which these do,
+     having no hardware RTC -- is exactly the node that needs this, and a
+     setting that resets to off on each firmware update is one nobody
+     remembers to turn back on. */
+  uint8_t clock_converge = 1;
   uint32_t bridge_baud = 0;   // 9600, 19200, 38400, 57600, 115200 (default 115200)
   uint8_t bridge_channel = 0; // 1-14 (ESP-NOW only)
   char bridge_secret[16]; // for XOR encryption of bridge packets (ESP-NOW only)
@@ -106,6 +189,11 @@ private:
       def("en", _parent->bridge_enabled); // boolean
       def("delay", _parent->bridge_delay);  // milliseconds (default 500 ms)
       def("src", _parent->bridge_pkt_src); // 0 = logTx, 1 = logRx (default logTx)
+      def("adv_rep", _parent->bridge_adv_repeat); // advertising events per datagram
+      def("ble_hold", _parent->bridge_ble_hold);  // ms to hold before a BLE burst
+      def("scan_duty", _parent->bridge_scan_duty); // % of each scan cycle listening
+      def("scan_filt", _parent->bridge_scan_filter); // link-layer filter to known peers
+      def("clk_conv", _parent->clock_converge);     // steer clock from neighbours
       def("baud", _parent->bridge_baud);   // 9600, 19200, 38400, 57600, 115200 (default 115200)
       def("ch", _parent->bridge_channel); // 1-14 (ESP-NOW only)
       def("secret", _parent->bridge_secret, sizeof(_parent->bridge_secret)); // for XOR encryption of bridge packets (ESP-NOW only)
@@ -197,6 +285,11 @@ public:
 class CommonCLICallbacks {
 public:
   virtual void savePrefs() = 0;
+  /* Force any deferred prefs write to disk. Called before anything that does
+     not return -- a setting made and then immediately rebooted away would
+     otherwise be silently lost. */
+  virtual void flushPrefs() {
+  }
   virtual const char* getFirmwareVer() = 0;
   virtual const char* getBuildDate() = 0;
   virtual const char* getRole() = 0;
@@ -215,6 +308,23 @@ public:
   virtual void formatStatsReply(char *reply) = 0;
   virtual void formatRadioStatsReply(char *reply) = 0;
   virtual void formatPacketStatsReply(char *reply) = 0;
+  // Bridge telemetry. Default-implemented so examples carrying no bridge, or a
+  // bridge with no stats of its own, are unaffected.
+  /* The clock was just set by something authoritative -- a person, or a client
+     app that knows the real time. Anything inferring the time from neighbours
+     should stand down for a while afterwards rather than drag a known-good
+     clock back towards a mesh that may be collectively wrong. */
+  virtual void onClockSetExternally() {
+  }
+  virtual void formatObserverReply(char *reply, const char* what) {
+    strcpy(reply, "no observer in this firmware");
+  }
+  virtual void formatBleReply(char *reply) {
+    strcpy(reply, "no BLE in this firmware");
+  }
+  virtual void formatBridgeReply(char *reply, const char* what) {
+    strcpy(reply, "no bridge telemetry in this firmware");
+  }
   virtual mesh::LocalIdentity& getSelfId() = 0;
   virtual void saveIdentity(const mesh::LocalIdentity& new_id) = 0;
   virtual void clearStats() = 0;

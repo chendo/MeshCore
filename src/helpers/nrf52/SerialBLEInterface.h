@@ -1,10 +1,35 @@
 #pragma once
 
+/* Connection slots the node reserves at stack init. One peripheral is the CLI
+   and DFU port; a bridge build overrides these to add inbound peer links and
+   outbound ones. Cannot be changed after the SoftDevice is enabled. */
+#ifndef BLE_PRPH_SLOTS
+  #define BLE_PRPH_SLOTS 1
+#endif
+#ifndef BLE_CENTRAL_SLOTS
+  #define BLE_CENTRAL_SLOTS 0
+#endif
+
 #include "../BaseSerialInterface.h"
 #include <bluefruit.h>
 
 #ifndef BLE_TX_POWER
-#define BLE_TX_POWER 4
+/* Maximum the nRF52840 supports. Was 4dBm, which is fine on a bench and not
+   fine on a sited repeater: the production node sits at -65dBm from its bridge
+   peer and repeatedly could not be FOUND from a laptop, while its p2p link was
+   carrying traffic perfectly the whole time. Discovery is the weakest link in
+   the chain, because an advert is a single unacknowledged packet -- if it is
+   missed there is no retry, whereas a connection retransmits until it lands.
+
+   +8dBm is 4dB over the old value, worth roughly 1.6x range. It costs nothing
+   that matters: advertising TX duty is a few hundred microseconds per 152ms
+   interval, about 0.2%, so even at 14.8mA while keyed the average is ~0.02mA
+   against the ~2.3mA the scanner already draws continuously.
+
+   BleBroadcast picks this up too -- it passes Bluefruit.getTxPower() to
+   sd_ble_gap_tx_power_set for its own advertising set -- so bridge datagrams
+   get the same gain. */
+#define BLE_TX_POWER 8
 #endif
 
 class SerialBLEInterface : public BaseSerialInterface {
@@ -39,8 +64,20 @@ class SerialBLEInterface : public BaseSerialInterface {
   static void onSecured(uint16_t connection_handle);
   static bool onPairingPasskey(uint16_t connection_handle, uint8_t const passkey[6], bool match_request);
   static void onPairingComplete(uint16_t connection_handle, uint8_t auth_status);
-  static void onBLEEvent(ble_evt_t* evt);
   static void onBleUartRX(uint16_t conn_handle);
+
+public:
+  /**
+   * Raw SoftDevice event handler, installed via Bluefruit.setEventCallback().
+   *
+   * Public only so another subsystem can chain to it: that callback is a single
+   * slot, so anything else needing raw events (BleBroadcast, for the bridge)
+   * has to take the slot and forward what it does not consume. Dropping these
+   * events is not an option -- CONN_PARAM_UPDATE_REQUEST goes unanswered and
+   * the connection eventually drops.
+   */
+  static void onBLEEvent(ble_evt_t* evt);
+private:
 
 public:
   SerialBLEInterface() {

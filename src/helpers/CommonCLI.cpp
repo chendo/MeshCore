@@ -121,7 +121,12 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {  // Legacy 
     // sanitise bad bridge pref values
     _prefs->bridge_enabled = constrain(_prefs->bridge_enabled, 0, 1);
     _prefs->bridge_delay = constrain(_prefs->bridge_delay, 0, 10000);
-    _prefs->bridge_pkt_src = constrain(_prefs->bridge_pkt_src, 0, 1);
+    _prefs->bridge_pkt_src = constrain(_prefs->bridge_pkt_src, 0, 2);   // 2 = both
+    _prefs->bridge_adv_repeat = constrain(_prefs->bridge_adv_repeat, 1, 10);
+    _prefs->bridge_ble_hold = constrain(_prefs->bridge_ble_hold, 0, 5000);
+    _prefs->bridge_scan_duty = constrain(_prefs->bridge_scan_duty, 25, 100);
+    _prefs->bridge_scan_filter = constrain(_prefs->bridge_scan_filter, 0, 1);
+    _prefs->clock_converge = constrain(_prefs->clock_converge, 0, 1);
     _prefs->bridge_baud = constrain(_prefs->bridge_baud, 9600, BRIDGE_MAX_BAUD);
     _prefs->bridge_channel = constrain(_prefs->bridge_channel, 0, 14);
 
@@ -181,12 +186,15 @@ uint8_t CommonCLI::buildAdvertData(uint8_t node_type, uint8_t* app_data) {
 
 void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* reply) {
     if (memcmp(command, "poweroff", 8) == 0 || memcmp(command, "shutdown", 8) == 0) {
+      _callbacks->flushPrefs();   // deferred writes would be lost below
       _board->powerOff();  // doesn't return
     } else if (memcmp(command, "reboot", 6) == 0) {
+      _callbacks->flushPrefs();
       _board->reboot();  // doesn't return
     } else if (memcmp(command, "clkreboot", 9) == 0) {
       // Reset clock
       getRTCClock()->setCurrentTime(1715770351);  // 15 May 2024, 8:50pm
+      _callbacks->flushPrefs();
       _board->reboot();  // doesn't return
      } else if (memcmp(command, "advert.zerohop", 14) == 0 && (command[14] == 0 || command[14] == ' ')) {
       // send zerohop advert
@@ -196,10 +204,24 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       // send flood advert
       _callbacks->sendSelfAdvertisement(1500, true);  // longer delay, give CLI response time to be sent first
       strcpy(reply, "OK - Advert sent");
+    } else if (memcmp(command, "ble", 3) == 0 && (command[3] == 0 || command[3] == ' ')) {
+      _callbacks->formatBleReply(reply);
+    } else if (memcmp(command, "clocks", 6) == 0 && (command[6] == 0 || command[6] == ' ')) {
+      // must precede the "clock" matches below, which would otherwise swallow it
+      _callbacks->formatObserverReply(reply, command);   // "clocks", "clocks on|off"
+    } else if (memcmp(command, "peers", 5) == 0 && (command[5] == 0 || command[5] == ' ')) {
+      _callbacks->formatObserverReply(reply, command);   // "peers", "peers <n>"
+    } else if (memcmp(command, "hops", 4) == 0 && (command[4] == 0 || command[4] == ' ')) {
+      _callbacks->formatObserverReply(reply, "hops");
+    } else if (memcmp(command, "types", 5) == 0 && (command[5] == 0 || command[5] == ' ')) {
+      _callbacks->formatObserverReply(reply, "types");
+    } else if (memcmp(command, "heard", 5) == 0 && (command[5] == 0 || command[5] == ' ')) {
+      _callbacks->formatObserverReply(reply, "heard");
     } else if (memcmp(command, "clock sync", 10) == 0) {
       uint32_t curr = getRTCClock()->getCurrentTime();
       if (sender_timestamp > curr) {
         getRTCClock()->setCurrentTime(sender_timestamp + 1);
+        _callbacks->onClockSetExternally();
         uint32_t now = getRTCClock()->getCurrentTime();
         DateTime dt = DateTime(now);
         sprintf(reply, "OK - clock set: %02d:%02d - %d/%d/%d UTC", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
@@ -213,12 +235,18 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     } else if (memcmp(command, "clock", 5) == 0) {
       uint32_t now = getRTCClock()->getCurrentTime();
       DateTime dt = DateTime(now);
-      sprintf(reply, "%02d:%02d - %d/%d/%d UTC", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
+      // Seconds and the raw epoch, so a host holding disciplined time can
+      // measure this node's error. To the minute, a node can be 59s out and
+      // still look correct, which is most of the range that matters here.
+      sprintf(reply, "%02d:%02d:%02d - %d/%d/%d UTC (epoch %lu)",
+              dt.hour(), dt.minute(), dt.second(), dt.day(), dt.month(), dt.year(),
+              (unsigned long)now);
     } else if (memcmp(command, "time ", 5) == 0) {  // set time (to epoch seconds)
       uint32_t secs = _atoi(&command[5]);
       uint32_t curr = getRTCClock()->getCurrentTime();
       if (secs > curr) {
         getRTCClock()->setCurrentTime(secs);
+        _callbacks->onClockSetExternally();
         uint32_t now = getRTCClock()->getCurrentTime();
         DateTime dt = DateTime(now);
         sprintf(reply, "OK - clock set: %02d:%02d - %d/%d/%d UTC", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
@@ -434,12 +462,21 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     } else if (sender_timestamp == 0 && memcmp(command, "log", 3) == 0) {
       _callbacks->dumpLogFile();
       strcpy(reply, "   EOF");
-    } else if (sender_timestamp == 0 && memcmp(command, "stats-packets", 13) == 0 && (command[13] == 0 || command[13] == ' ')) {
+    /* Read-only counters, unlike the erase/log/freq/prv.key commands that share
+       this serial-only gate. Withholding them costs the remote diagnostics that
+       are the whole reason a sited repeater has a CLI at all -- there is nothing
+       here an attacker in radio range could not already infer by listening. */
+    } else if (memcmp(command, "stats-packets", 13) == 0 && (command[13] == 0 || command[13] == ' ')) {
       _callbacks->formatPacketStatsReply(reply);
-    } else if (sender_timestamp == 0 && memcmp(command, "stats-radio", 11) == 0 && (command[11] == 0 || command[11] == ' ')) {
+    } else if (memcmp(command, "stats-radio", 11) == 0 && (command[11] == 0 || command[11] == ' ')) {
       _callbacks->formatRadioStatsReply(reply);
-    } else if (sender_timestamp == 0 && memcmp(command, "stats-core", 10) == 0 && (command[10] == 0 || command[10] == ' ')) {
+    } else if (memcmp(command, "stats-core", 10) == 0 && (command[10] == 0 || command[10] == ' ')) {
       _callbacks->formatStatsReply(reply);
+    } else if (memcmp(command, "power", 5) == 0 && (command[5] == 0 || command[5] == ' ')) {
+      /* Battery, not bridge -- reachable on any build with an estimator. */
+      _callbacks->formatBridgeReply(reply, "power");
+    } else if (memcmp(command, "bridge", 6) == 0 && (command[6] == 0 || command[6] == ' ')) {
+      _callbacks->formatBridgeReply(reply, (command[6] == ' ') ? &command[7] : "");
     } else {
       strcpy(reply, "Unknown command");
     }
@@ -729,8 +766,44 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       strcpy(reply, "Error: delay must be between 0-10000 ms");
     }
+  } else if (memcmp(config, "bridge.adv_rep ", 15) == 0) {
+    int n = _atoi(&config[15]);
+    if (n >= 1 && n <= 10) {
+      _prefs->bridge_adv_repeat = (uint8_t)n;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error: adv_rep must be between 1-10 events");
+    }
+  } else if (memcmp(config, "bridge.ble_hold ", 16) == 0) {
+    int ms = _atoi(&config[16]);
+    if (ms >= 0 && ms <= 5000) {
+      _prefs->bridge_ble_hold = (uint16_t)ms;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error: ble_hold must be between 0-5000 ms");
+    }
+  } else if (memcmp(config, "bridge.scan_duty ", 17) == 0) {
+    int pct = _atoi(&config[17]);
+    if (pct >= 25 && pct <= 100) {
+      _prefs->bridge_scan_duty = (uint8_t)pct;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error: scan_duty must be between 25-100 %");
+    }
+  } else if (memcmp(config, "bridge.scan_filter ", 19) == 0) {
+    _prefs->bridge_scan_filter = memcmp(&config[19], "on", 2) == 0 ? 1 : 0;
+    savePrefs();
+    strcpy(reply, "OK");
   } else if (memcmp(config, "bridge.source ", 14) == 0) {
-    _prefs->bridge_pkt_src = memcmp(&config[14], "rx", 2) == 0;
+    /* "both" is the correct setting for an actual bridge and is the default;
+       rx and tx remain for the cases where one direction is deliberately not
+       wanted. Anything unrecognised falls back to tx, the old behaviour. */
+    if (memcmp(&config[14], "both", 4) == 0)    _prefs->bridge_pkt_src = 2;
+    else if (memcmp(&config[14], "rx", 2) == 0) _prefs->bridge_pkt_src = 1;
+    else                                        _prefs->bridge_pkt_src = 0;
     savePrefs();
     strcpy(reply, "OK");
 #endif
@@ -757,6 +830,8 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       strcpy(reply, "Error: channel must be between 1-14");
     }
+#endif
+#ifdef WITH_BRIDGE_SECRET
   } else if (memcmp(config, "bridge.secret ", 14) == 0) {
     StrHelper::strncpy(_prefs->bridge_secret, &config[14], sizeof(_prefs->bridge_secret));
     _callbacks->restartBridge();
@@ -910,6 +985,8 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
             "rs232"
 #elif WITH_ESPNOW_BRIDGE
             "espnow"
+#elif WITH_BLE_BRIDGE
+            "ble"
 #else
             "none"
 #endif
@@ -919,8 +996,17 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", _prefs->bridge_enabled ? "on" : "off");
   } else if (memcmp(config, "bridge.delay", 12) == 0) {
     sprintf(reply, "> %d", (uint32_t)_prefs->bridge_delay);
+  } else if (memcmp(config, "bridge.adv_rep", 14) == 0) {
+    sprintf(reply, "> %d", (uint32_t)_prefs->bridge_adv_repeat);
+  } else if (memcmp(config, "bridge.ble_hold", 15) == 0) {
+    sprintf(reply, "> %d", (uint32_t)_prefs->bridge_ble_hold);
+  } else if (memcmp(config, "bridge.scan_duty", 16) == 0) {
+    sprintf(reply, "> %d", (uint32_t)_prefs->bridge_scan_duty);
+  } else if (memcmp(config, "bridge.scan_filter", 18) == 0) {
+    sprintf(reply, "> %s", _prefs->bridge_scan_filter ? "on" : "off");
   } else if (memcmp(config, "bridge.source", 13) == 0) {
-    sprintf(reply, "> %s", _prefs->bridge_pkt_src ? "logRx" : "logTx");
+    sprintf(reply, "> %s", _prefs->bridge_pkt_src == 2 ? "both"
+                         : _prefs->bridge_pkt_src == 1 ? "logRx" : "logTx");
 #endif
 #ifdef WITH_RS232_BRIDGE
   } else if (memcmp(config, "bridge.baud", 11) == 0) {
@@ -929,6 +1015,8 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
 #ifdef WITH_ESPNOW_BRIDGE
   } else if (memcmp(config, "bridge.channel", 14) == 0) {
     sprintf(reply, "> %d", (uint32_t)_prefs->bridge_channel);
+#endif
+#ifdef WITH_BRIDGE_SECRET
   } else if (memcmp(config, "bridge.secret", 13) == 0) {
     sprintf(reply, "> %s", _prefs->bridge_secret);
 #endif
