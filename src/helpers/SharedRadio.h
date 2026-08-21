@@ -47,7 +47,7 @@ class SharedRadioCore;
 
 class RadioPort : public mesh::Radio {
 public:
-  RadioPort() : _core(nullptr), _last_snr(0), _last_rssi(0), _tx_power_dbm(0) {}
+  RadioPort() : _core(nullptr), _last_snr(0), _last_rssi(0), _last_cr(0), _tx_power_dbm(0) {}
   void attach(SharedRadioCore* core) { _core = core; }
 
   // per-persona TX power applied by the core right before this port transmits
@@ -64,6 +64,7 @@ public:
   bool isReceiving() override;
 
   uint32_t getEstAirtimeFor(int len_bytes) override;
+  uint32_t getEstAirtimeForCR(int len_bytes, uint8_t cr) override;
   float packetScore(float snr, int packet_len) override;
   int getNoiseFloor() const override;
   void triggerNoiseFloorCalibrate(int threshold) override;
@@ -73,9 +74,15 @@ public:
 
   float getLastRSSI() const override { return _last_rssi; }
   float getLastSNR() const override { return _last_snr; }
+  // The modem's CR register belongs to whatever frame it decoded most recently,
+  // which behind a queue is rarely the one this identity is holding, so the
+  // value is carried with the frame instead of read on demand.
+  uint8_t getLastRxCodingRate() const override { return _last_cr; }
 
   // called by the core when delivering a buffered frame to this port
-  void setLastMetadata(float snr, float rssi) { _last_snr = snr; _last_rssi = rssi; }
+  void setLastMetadata(float snr, float rssi, uint8_t cr) {
+    _last_snr = snr; _last_rssi = rssi; _last_cr = cr;
+  }
 
   // what this identity's prefs asked for; the core decides what the shared
   // radio actually does (see applyRadioPolicy)
@@ -85,6 +92,7 @@ public:
 private:
   SharedRadioCore* _core;
   float _last_snr, _last_rssi;
+  uint8_t _last_cr;
   int8_t _tx_power_dbm;
   bool _cad_want = false;
   int  _thresh_want = 0;
@@ -436,13 +444,15 @@ private:
   struct RxFrame {
     uint8_t  buf[MAX_TRANS_UNIT];
     uint8_t  len;
+    uint8_t  cr;             // 4/x denominator from this frame's header, 0 unknown
     float    snr, rssi;
     uint32_t consumed;       // bit i set once port i has taken this frame
   };
   RxFrame  _rx[RX_SLOTS];
   uint8_t  _rx_head = 0, _rx_count = 0;
   volatile uint32_t _rx_dropped = 0;   // queue was full — the oldest was discarded
-  bool enqueueRx(const uint8_t* bytes, int len, float snr, float rssi, uint32_t consumed_init);
+  bool enqueueRx(const uint8_t* bytes, int len, float snr, float rssi, uint8_t cr,
+                 uint32_t consumed_init);
   void retireConsumedFrames();
 
   int8_t   _cad_applied = -1;      // -1 = never applied

@@ -25,6 +25,14 @@ inline long random(long lo, long hi) { return lo + (hi - lo) / 2; }
 
 typedef uint32_t RadioLibTime_t;
 
+enum ModemType_t { RADIOLIB_MODEM_FSK = 0, RADIOLIB_MODEM_LORA, RADIOLIB_MODEM_LRFHSS };
+
+struct LoRaRate_t { uint8_t spreadingFactor; float bandwidth; uint8_t codingRate; };
+union DataRate_t { LoRaRate_t lora; };
+
+struct LoRaPacketConfig_t { uint16_t preambleLength; bool implicitHeader, crcEnabled, ldrOptimize; };
+union PacketConfig_t { LoRaPacketConfig_t lora; };
+
 class PhysicalLayer {
 public:
   virtual ~PhysicalLayer() = default;
@@ -36,7 +44,14 @@ public:
   uint8_t packet_bytes[256] = {0};                // what readData() delivers
   float   rssi = -100.0f, snr = 5.0f;
   int16_t scan_result = RADIOLIB_CHANNEL_FREE;
-  RadioLibTime_t time_on_air = 100000;
+
+  // The modem settings getTimeOnAir() answers for. Defaults are MeshCore's own
+  // preset: SF8, 62.5 kHz, 4/5, 32-symbol preamble, explicit header, CRC on.
+  uint8_t  cfg_sf = 8;
+  float    cfg_bw_khz = 62.5f;
+  uint8_t  cfg_cr = 5;               // 4/x denominator
+  uint16_t cfg_preamble = 32;
+  bool     cfg_implicit_header = false, cfg_crc = true, cfg_ldro = false;
 
   // Stand in for the DIO interrupt: RadioLibWrapper installs its own ISR in
   // begin(), and its receive path only runs once that ISR has fired.
@@ -63,7 +78,33 @@ public:
     memcpy(data, packet_bytes, len);
     return read_data_result;
   }
-  virtual RadioLibTime_t getTimeOnAir(size_t) { return time_on_air; }
+  // Semtech's time-on-air, section 4.1.1.7 of the SX1276 datasheet and 6.1.4 of
+  // the SX1268's -- written out longhand rather than lifted from RadioLib, so
+  // that agreeing with the driver is evidence and not a tautology.
+  virtual RadioLibTime_t calculateTimeOnAir(ModemType_t modem, DataRate_t dr, PacketConfig_t pc, size_t len) {
+    if (modem != RADIOLIB_MODEM_LORA) return 0;
+    double sym_us = (double)(1u << dr.lora.spreadingFactor) * 1000.0 / dr.lora.bandwidth;
+    int de = pc.lora.ldrOptimize ? 1 : 0;
+    int num = 8 * (int)len - 4 * dr.lora.spreadingFactor + 28
+              + (pc.lora.crcEnabled ? 16 : 0) - (pc.lora.implicitHeader ? 20 : 0);
+    int den = 4 * (dr.lora.spreadingFactor - 2 * de);
+    int coded = num <= 0 ? 0 : ((num + den - 1) / den) * dr.lora.codingRate;
+    double syms = (double)pc.lora.preambleLength + 4.25 + 8.0 + coded;
+    return (RadioLibTime_t)(sym_us * syms);
+  }
+
+  virtual RadioLibTime_t getTimeOnAir(size_t len) {
+    DataRate_t dr = {};
+    dr.lora.spreadingFactor = cfg_sf;
+    dr.lora.bandwidth = cfg_bw_khz;
+    dr.lora.codingRate = cfg_cr;
+    PacketConfig_t pc = {};
+    pc.lora.preambleLength = cfg_preamble;
+    pc.lora.implicitHeader = cfg_implicit_header;
+    pc.lora.crcEnabled = cfg_crc;
+    pc.lora.ldrOptimize = cfg_ldro;
+    return calculateTimeOnAir(RADIOLIB_MODEM_LORA, dr, pc, len);
+  }
   virtual float getRSSI() { return rssi; }
   virtual float getSNR() { return snr; }
   virtual int32_t random(int32_t max_val) { return max_val / 2; }

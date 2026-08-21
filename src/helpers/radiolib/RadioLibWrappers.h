@@ -43,6 +43,19 @@ protected:
   virtual bool isReceivingPacket() =0;
   virtual void doResetAGC();
 
+  /**
+   * \brief  air-time for a LoRa frame of 'len_bytes' at coding rate 'cr',
+   *        every other modem parameter as given, in milliseconds.
+   * \param  cr  the 4/x denominator; anything outside 5..8 means unknown and
+   *            falls back to getEstAirtimeFor()
+   *
+   * Defers to RadioLib's own time-on-air sum rather than carrying a second copy
+   * of the Semtech formula, which would be free to drift from the one the
+   * driver actually bills transmits with.
+  */
+  uint32_t estAirtimeAtCR(int len_bytes, uint8_t cr, uint8_t sf, float bw_khz,
+                          uint16_t preamble_syms, bool implicit_header, bool crc, bool ldro);
+
 public:
   RadioLibWrapper(PhysicalLayer& radio, mesh::MainBoard& board) : _radio(&radio), _board(&board), _preamble_sf(0) {
     resetStats();

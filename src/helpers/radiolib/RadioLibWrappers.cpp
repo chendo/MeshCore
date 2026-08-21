@@ -186,6 +186,24 @@ uint32_t RadioLibWrapper::getEstAirtimeFor(int len_bytes) {
   return _radio->getTimeOnAir(len_bytes) / 1000;
 }
 
+uint32_t RadioLibWrapper::estAirtimeAtCR(int len_bytes, uint8_t cr, uint8_t sf, float bw_khz,
+                                         uint16_t preamble_syms, bool implicit_header,
+                                         bool crc, bool ldro) {
+  if (cr < 5 || cr > 8) return getEstAirtimeFor(len_bytes);
+  DataRate_t dr = {};
+  dr.lora.spreadingFactor = sf;
+  dr.lora.bandwidth       = bw_khz;
+  dr.lora.codingRate      = cr;   // RadioLib wants the denominator here
+  PacketConfig_t pc = {};
+  pc.lora.preambleLength  = preamble_syms;
+  pc.lora.implicitHeader  = implicit_header;
+  pc.lora.crcEnabled      = crc;
+  // LDRO follows from symbol duration, not from the coding rate, so it stays as
+  // configured even though the rest of the frame is being repriced.
+  pc.lora.ldrOptimize     = ldro;
+  return _radio->calculateTimeOnAir(RADIOLIB_MODEM_LORA, dr, pc, (size_t)len_bytes) / 1000;
+}
+
 bool RadioLibWrapper::startSendRaw(const uint8_t* bytes, int len) {
   _board->onBeforeTransmit();
   int err = _radio->startTransmit((uint8_t *) bytes, len);

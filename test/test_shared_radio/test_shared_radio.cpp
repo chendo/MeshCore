@@ -46,6 +46,10 @@ public:
   bool isReceiving() override { return receiving; }
   float getLastSNR() const override { return 5.5f; }
   float getLastRSSI() const override { return -88; }
+  uint32_t getEstAirtimeFor(int len) override { return (uint32_t)len; }
+  uint32_t getEstAirtimeForCR(int len, uint8_t cr) override {
+    return cr ? (uint32_t)len * cr : getEstAirtimeFor(len);   // 1 ms/byte per 4/x step
+  }
 };
 
 struct Fixture {
@@ -378,6 +382,60 @@ TEST(SharedRadioTrace, FailedTransmitIsLoggedAndExcludedFromTotals) {
 // the two up would quietly hide the interesting case — a neighbour on a
 // different preset — behind our own setting.
 uint8_t g_fake_rx_cr = 0;
+
+// A port's Dispatcher reads the coding rate off the packet it was just handed,
+// but the modem's register has long since moved on to whatever arrived after —
+// behind a fan-out queue, "the last frame decoded" and "the frame this identity
+// is holding" are rarely the same one.
+TEST(SharedRadioCodingRate, EachPortReportsTheCodingRateOfTheFrameItTook) {
+  Fixture f;
+  f.core.setRxCodingRateFn([]() -> uint8_t { return g_fake_rx_cr; });
+  uint8_t buf[MAX_TRANS_UNIT];
+
+  g_fake_rx_cr = 8;
+  f.deliver({0x11});
+  EXPECT_EQ(1, take(f.a, buf));
+  EXPECT_EQ(8, f.a.getLastRxCodingRate());
+
+  g_fake_rx_cr = 6;              // a second sender, while b is still behind
+  f.deliver({0x22});
+  EXPECT_EQ(1, take(f.b, buf));
+  EXPECT_EQ(8, f.b.getLastRxCodingRate()) << "b is holding the first frame, not the newest";
+  EXPECT_EQ(1, take(f.b, buf));
+  EXPECT_EQ(6, f.b.getLastRxCodingRate());
+}
+
+TEST(SharedRadioCodingRate, AnUnreadableCodingRateReachesThePortAsUnknown) {
+  Fixture f;
+  f.core.setRxCodingRateFn([]() -> uint8_t { return 0; });
+  uint8_t buf[MAX_TRANS_UNIT];
+  f.deliver({0x11});
+  take(f.a, buf);
+  EXPECT_EQ(0, f.a.getLastRxCodingRate());
+}
+
+// A looped-back frame never went on the air, so the only coding rate it can
+// honestly carry is the one this node transmits at.
+TEST(SharedRadioCodingRate, ALoopedBackFrameCarriesOurOwn) {
+  Fixture f(true);
+  f.core.setCodingRate(7);
+  uint8_t msg[] = {0x30};
+  ASSERT_TRUE(f.a.startSendRaw(msg, 1));
+  f.a.onSendFinished();
+  f.core.pump();                 // drains the loopback queue
+
+  uint8_t buf[MAX_TRANS_UNIT];
+  ASSERT_EQ(1, take(f.b, buf));
+  EXPECT_EQ(7, f.b.getLastRxCodingRate());
+}
+
+// The port is a mesh::Radio in its own right, so a slot's Dispatcher must be
+// able to price a receive through it exactly as a single-identity node would.
+TEST(SharedRadioCodingRate, APortPricesAirtimeAtTheRateItIsGiven) {
+  Fixture f;
+  EXPECT_EQ(32u, f.a.getEstAirtimeForCR(4, 8));
+  EXPECT_EQ(f.a.getEstAirtimeFor(4), f.a.getEstAirtimeForCR(4, 0));
+}
 
 TEST(SharedRadioTrace, ReceivesCarryTheSendersCodingRateAndTransmitsOurs) {
   Fixture f;

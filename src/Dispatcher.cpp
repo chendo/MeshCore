@@ -212,7 +212,10 @@ void Dispatcher::checkRecv() {
           pkt->_rssi = (int16_t)_radio->getLastRSSI();
           pkt->_cr = _radio->getLastRxCodingRate();
           score = _radio->packetScore(_radio->getLastSNR(), len);
-          air_time = _radio->getEstAirtimeFor(len);
+          // Priced at the SENDER's coding rate: that is how long this frame
+          // actually held the channel, and rx_air_time is a measure of channel
+          // occupancy, not of what we would have spent saying the same thing.
+          air_time = _radio->getEstAirtimeForCR(len, pkt->_cr);
           rx_air_time += air_time;
         } else {
           _mgr->free(pkt);  // put back into pool
