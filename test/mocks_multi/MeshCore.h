@@ -10,6 +10,11 @@
 #define CIPHER_BLOCK_SIZE  16
 #define MAX_PACKET_PAYLOAD 184
 
+// MESH_DEBUG is a firmware serial-logging flag; the real macros live in
+// src/MeshCore.h, which this header shadows.
+#define MESH_DEBUG_PRINT(...) {}
+#define MESH_DEBUG_PRINTLN(...) {}
+
 namespace mesh {
 // The observer differences peers' advert timestamps against our own clock.
 class RTCClock {

@@ -1314,85 +1314,12 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   }
 }
 
-#ifdef LORA_WATCHDOG_MS
-/* Staged: notice a long silence, prove the radio can still transmit, reinit it
-   if it cannot, and reboot only if that fails too. Elapsed-time comparisons are
-   signed and every stage is paced -- an unpaced retry and an unsigned elapsed
-   test have each already cost this project a node. */
-void MyMesh::loraWatchdog() {
-  unsigned long now = millis();
-  if (_lora_next_check_ms != 0 && (long)(now - _lora_next_check_ms) < 0) return;
-  _lora_next_check_ms = now + LORA_CHECK_EVERY_MS;
-
-  unsigned long air = getTotalAirTime() + getReceiveAirTime();
-
-  if (air != _lora_last_air) {              // radio demonstrably working
-    _lora_last_air = air;
-    _lora_activity_ms = now;
-    _lora_wd_state = LORA_WD_IDLE;
-    return;
-  }
-  if (_lora_activity_ms == 0) { _lora_activity_ms = now; return; }
-
-  switch (_lora_wd_state) {
-    case LORA_WD_IDLE:
-      if ((long)(now - _lora_activity_ms) < (long)LORA_IDLE_MS) return;
-      /* Make our own traffic rather than wait for someone else's: on a quiet
-         band nobody may ever transmit, and silence would be misread as death. */
-      _lora_test_air = air;
-      _lora_test_started_ms = now;
-      _lora_wd_state = LORA_WD_TESTING;
-      sendSelfAdvertisement(500, false);     // zero-hop, cheap, no flood
-      MESH_DEBUG_PRINTLN("LoRa watchdog: silent %lus, probing radio",
-                         (unsigned long)((now - _lora_activity_ms) / 1000));
-      return;
-
-    case LORA_WD_TESTING:
-      if ((long)(now - _lora_test_started_ms) < (long)LORA_SELFTEST_GRACE_MS) return;
-      if (air != _lora_test_air) {           // it transmitted: radio is alive
-        _lora_last_air = air;
-        _lora_activity_ms = now;
-        _lora_wd_state = LORA_WD_IDLE;
-        return;
-      }
-      /* Asked to transmit and no airtime resulted. Reinit, and restore every
-         parameter begin() sets -- a bare radio_init() would leave the node on
-         the driver's default frequency, silently off-band, which is worse than
-         the fault being repaired. */
-      _lora_reinits++;
-      MESH_DEBUG_PRINTLN("LoRa watchdog: no airtime after probe, reinitialising");
-      radio_init();
-      radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
-      radio_driver.setTxPower(_prefs.tx_power_dbm);
-      radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
-      board.setLoRaFemLnaEnabled(_prefs.radio_fem_rxgain);
-      board.setLoRaFemPaGainEnabled(_prefs.radio_fem_txgain);
-      _lora_test_started_ms = now;
-      _lora_test_air = getTotalAirTime() + getReceiveAirTime();
-      _lora_wd_state = LORA_WD_REINITED;
-      sendSelfAdvertisement(500, false);
-      return;
-
-    case LORA_WD_REINITED:
-      if ((long)(now - _lora_test_started_ms) < (long)LORA_SELFTEST_GRACE_MS) return;
-      if (air != _lora_test_air) {           // reinit worked
-        _lora_last_air = air;
-        _lora_activity_ms = now;
-        _lora_wd_state = LORA_WD_IDLE;
-        return;
-      }
-      /* Reinitialised and still cannot transmit. Nothing else here can help,
-         and a repeater that cannot use its radio is doing nothing at all. */
-      MESH_DEBUG_PRINTLN("LoRa watchdog: dead after reinit, rebooting");
-      if (dirty_contacts_expiry) {           // the one deferred write we hold
-        acl.save(_fs);
-        dirty_contacts_expiry = 0;
-      }
-      board.reboot();
-      return;
+void MyMesh::flushPendingWrites() {
+  if (dirty_contacts_expiry) {
+    acl.save(_fs);
+    dirty_contacts_expiry = 0;
   }
 }
-#endif
 
 void MyMesh::loop() {
 #ifdef WITH_BRIDGE
@@ -1426,10 +1353,6 @@ void MyMesh::loop() {
     radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
     MESH_DEBUG_PRINTLN("Radio params restored");
   }
-
-#ifdef LORA_WATCHDOG_MS
-  loraWatchdog();   // paces itself, see LORA_CHECK_EVERY_MS
-#endif
 
   // is pending dirty contacts write needed?
   if (dirty_contacts_expiry && millisHasNowPassed(dirty_contacts_expiry)) {

@@ -35,6 +35,37 @@ SimpleMeshTables tables;
 
 MyMesh the_mesh(board, radio_driver, *new ArduinoMillis(), fast_rng, rtc_clock, tables);
 
+#ifdef LORA_WATCHDOG_MS
+#include <helpers/LoraWatchdog.h>
+/* Node-scoped: one watchdog per board, whatever identities run on it. The
+   staged escalation lives in helpers/LoraWatchdog.h; these are the three things
+   it needs to do to this particular node. */
+static LoraWatchdog lora_watchdog;
+
+static uint32_t lora_wd_airtime(void*) {
+  return (uint32_t)(the_mesh.getTotalAirTime() + the_mesh.getReceiveAirTime());
+}
+static void lora_wd_probe(void*) {
+  the_mesh.sendSelfAdvertisement(500, false);   // zero-hop, cheap, no flood
+}
+static void lora_wd_reinit(void*) {
+  /* Restores every parameter begin() applies. A bare radio_init() leaves the
+     driver on its default frequency -- silently off-band is worse than the
+     fault being repaired. */
+  NodePrefs* p = the_mesh.getNodePrefs();
+  radio_init();
+  radio_driver.setParams(p->freq, p->bw, p->sf, p->cr);
+  radio_driver.setTxPower(p->tx_power_dbm);
+  radio_driver.setRxBoostedGainMode(p->rx_boosted_gain);
+  board.setLoRaFemLnaEnabled(p->radio_fem_rxgain);
+  board.setLoRaFemPaGainEnabled(p->radio_fem_txgain);
+}
+static void lora_wd_reboot(void*) {
+  the_mesh.flushPendingWrites();
+  board.reboot();
+}
+#endif
+
 void halt() {
   /* Was a bare while(1). This is reached when radio_init() fails, before BLE or
      the CLI exist, so a sited repeater becomes a silent brick with no way in
@@ -156,6 +187,10 @@ void setup() {
   WDOG_FEED();
 
   the_mesh.begin(fs);
+#ifdef LORA_WATCHDOG_MS
+  lora_watchdog.begin(LORA_WATCHDOG_MS, NULL, lora_wd_airtime, lora_wd_probe,
+                      lora_wd_reinit, lora_wd_reboot);
+#endif
 #if WITH_STATUS_LED
   // Colour is the radio, brightness is the direction: green = LoRa, blue = BLE
   // bridge, dim = receive, bright = transmit. Both dim together every 5s is the
@@ -255,6 +290,9 @@ void loop() {
 #endif
 
   the_mesh.loop();
+#ifdef LORA_WATCHDOG_MS
+  lora_watchdog.loop();   // paces itself, see LoraWatchdog::CHECK_EVERY_MS
+#endif
 #if WITH_STATUS_LED
   status_led.loop();
 #endif

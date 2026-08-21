@@ -98,10 +98,32 @@ public:
   virtual void applyTxPower(int8_t dbm) = 0;
 };
 
+// ---- packet trace sizing --------------------------------------------------
+// PKT_TRACE_ENTRIES is the ring depth. 0 or undefined compiles the buffer, the
+// writer and the reader out entirely -- not a zero-length array that still
+// costs. Default off: at the full 48 x 200 the trace is 10.9 KB of RAM carried
+// whether or not anyone is debugging, which is most of what sharing a radio
+// appears to cost.
+//
+// Deliberately NOT gated on MESH_DEBUG. That flag is the project's serial
+// logging switch; tying a 10.9 KB buffer to it means you cannot have the trace
+// without a flood of serial output, or serial output without the buffer.
+//
+// The raw capture has its own flag because the two dials answer different
+// questions and the cost is their product. "Did packets flow, and when" wants
+// depth and needs only the header; "what exactly was in that frame" wants the
+// bytes and only for a handful of frames. One flag would force you to trade
+// history for detail at a fixed ratio.
+#ifndef PKT_TRACE_ENTRIES
+  #define PKT_TRACE_ENTRIES 0
+#endif
+#ifndef PKT_TRACE_RAW_CAP
+  #define PKT_TRACE_RAW_CAP 200
+#endif
+
 // One row of the radio packet trace kept by SharedRadioCore, for diagnostics.
 // dir: -1 = received, >= 0 = transmitted by that port.
 // flag: 0 = ok, 1 = RX decode/CRC failure, 2 = TX never completed (timed out).
-#define PKT_RAW_CAP 200
 #define PKT_FLAG_OK      0
 #define PKT_FLAG_RX_ERR  1
 #define PKT_FLAG_TX_FAIL 2
@@ -146,7 +168,7 @@ struct PktLogEntry {
   // told apart from genuinely new traffic at a glance.
   //
   // Computed here rather than by the reader because raw[] is truncated at
-  // PKT_RAW_CAP: a long packet's payload is no longer all present downstream,
+  // PKT_TRACE_RAW_CAP: a long packet's payload is no longer all present downstream,
   // so a hash taken there would silently be wrong.
   uint8_t  hash[4];
   bool     hash_ok;  // false when the frame could not be parsed into a payload
@@ -165,14 +187,18 @@ struct PktLogEntry {
   // different CR shows up as such instead of being assumed away. For a
   // transmission it is the CR the shared radio is configured with.
   uint8_t  cr;
-  uint8_t  raw_len;  // bytes captured in raw[] (<= len, capped at PKT_RAW_CAP)
-  uint8_t  raw[PKT_RAW_CAP];
+  uint8_t  raw_len;  // bytes captured in raw[] (<= len, capped at PKT_TRACE_RAW_CAP)
+  uint8_t  raw[PKT_TRACE_RAW_CAP];
 };
 
 class SharedRadioCore {
 public:
   static const int MAX_PORTS = 8;
-  static const int PKT_LOG_SIZE = 48;
+  // Ring depth; 0 when the trace is compiled out, which every reader below
+  // degrades to rather than failing to build.
+  static const int PKT_LOG_SIZE = PKT_TRACE_ENTRIES;
+  static const int PKT_LOG_RAW_CAP = PKT_TRACE_RAW_CAP;
+  static bool pktTraceEnabled() { return PKT_TRACE_ENTRIES != 0; }
   // Received frames are QUEUED rather than held one at a time. The radio is
   // drained the moment a packet lands; identities consume from the queue at
   // their own pace. Previously the next packet could not be fetched until every
@@ -259,7 +285,11 @@ public:
   mesh::Radio* real() { return _real; }
 
   // --- packet trace (single-writer ring; pktLogCopy() is safe from a reader) ---
+#if PKT_TRACE_ENTRIES
   uint32_t pktLogSeq() const { return _pkt_seq; }
+#else
+  uint32_t pktLogSeq() const { return 0; }
+#endif
   uint32_t rxTotal() const { return _rx_total; }
   uint32_t txTotal() const { return _tx_total; }
   // sends refused because a sibling identity held the transmitter — the cost
@@ -272,6 +302,15 @@ public:
   uint32_t txRefused() const { return _tx_refused; }
   // times the radio was re-initialised after going silent
   uint32_t radioRecoveries() const { return _radio_recoveries; }
+  // Time on air, transmit + receive, as the REAL radio saw it — node-wide by
+  // construction, since every identity's traffic passes through here. This is
+  // the input the node's LoRa watchdog reasons from (helpers/LoraWatchdog.h):
+  // a Dispatcher can only account for its own identity's share of transmit.
+  // Receives are priced at the CR out of the sender's header, transmits at the
+  // estimate the duty-cycle pool was charged.
+  uint32_t airtimeMs() const { return _tx_air_ms + _rx_air_ms; }
+  uint32_t txAirtimeMs() const { return _tx_air_ms; }
+  uint32_t rxAirtimeMs() const { return _rx_air_ms; }
   uint32_t msSinceLastRx() const { return _last_rx_ms ? (uint32_t)(millis() - _last_rx_ms) : 0; }
 
   // COLLISION AVOIDANCE IS A PROPERTY OF THE RADIO, NOT OF AN IDENTITY.
@@ -460,13 +499,16 @@ private:
   bool _loopback = true;
   uint32_t _active_mask = 0;   // which ports are currently listening
   bool _tx_completed = false;   // did the current owner's send reach TX-done?
-  PktLogEntry _pkt_log[PKT_LOG_SIZE];
+#if PKT_TRACE_ENTRIES
+  PktLogEntry _pkt_log[PKT_TRACE_ENTRIES];
   volatile uint32_t _pkt_seq = 0;   // total packets ever logged; ring index = seq % SIZE
+#endif
   volatile uint32_t _rx_total = 0, _tx_total = 0;
   volatile uint32_t _tx_contention = 0;
   volatile uint32_t _tx_stuck = 0;
   volatile uint32_t _tx_refused = 0;
   volatile uint32_t _radio_recoveries = 0;
+  volatile uint32_t _tx_air_ms = 0, _rx_air_ms = 0;
   uint32_t _tx_started_ms = 0;
   uint32_t _last_rx_ms = 0;
   void (*_reinit_fn)() = nullptr;

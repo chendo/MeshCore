@@ -20,23 +20,43 @@ public:
 };
 static RadioTxPower s_tx_power;
 
-// LoRa watchdog, node-scoped. The repeater's own LORA_WATCHDOG_MS is left
-// undefined for this build on purpose: it reasons from ITS dispatcher's airtime,
-// which under a shared radio is only one identity's share of the traffic, and it
-// can reboot the board. The arbiter already watches the real radio for silence
-// (RX_SILENCE_LIMIT_MS) and for a transmit that never completes, and it is the
-// only thing here that sees all of it.
+// Putting a wedged transceiver back together. Restores every parameter
+// MyMesh::begin() applies, not just the ones radio_init() leaves at driver
+// defaults -- coming back on the driver's default frequency is silently
+// off-band, which is worse than the fault being repaired. Shared by the
+// arbiter's RX-silence recovery and by the node LoRa watchdog below.
 static void hydra_radio_reinit() {
   Serial.println("hydra: radio silent, re-initialising");
   if (!radio_init()) {
     Serial.println("hydra: radio re-init FAILED");
     return;
   }
-  radio_driver.begin();
+  radio_driver.begin();   // re-attaches the DIO1 ISR that radio_init() dropped
   NodePrefs* p = hydra.repeater().prefs();
   radio_driver.setParams(p->freq, p->bw, p->sf, p->cr);
   radio_driver.setTxPower(p->tx_power_dbm);
+  radio_driver.setRxBoostedGainMode(p->rx_boosted_gain);
+  board.setLoRaFemLnaEnabled(p->radio_fem_rxgain);
+  board.setLoRaFemPaGainEnabled(p->radio_fem_txgain);
 }
+
+#ifdef LORA_WATCHDOG_MS
+/* One watchdog for the board, not one per identity. Detection survives sharing
+   -- RX fans out, so a dead radio goes silent for every slot -- but the
+   response does not: N slots would each probe and each decide to reboot. The
+   airtime comes from the arbiter, which is the only thing here that sees the
+   real radio's whole traffic; the probe is slot 0's identity, since a fault
+   needs one advert, not N. */
+static uint32_t lora_wd_airtime(void*) { return hydra.radio().airtimeMs(); }
+static void lora_wd_probe(void*) {
+  hydra.repeater().mesh().sendSelfAdvertisement(500, false);   // zero-hop, no flood
+}
+static void lora_wd_reinit(void*) { hydra_radio_reinit(); }
+static void lora_wd_reboot(void*) {
+  hydra.repeater().mesh().flushPendingWrites();
+  board.reboot();
+}
+#endif
 
 static uint32_t rx_err_count() { return radio_driver.getPacketsRecvErrors(); }
 
@@ -119,6 +139,10 @@ void HydraNode::begin(FILESYSTEM* fs) {
   // Slot 0's airtime_factor sets it; the chat slots' own Dispatcher budgets
   // still exist but are no longer what limits the node.
   _core.setDutyCycle(p->airtime_factor);
+#ifdef LORA_WATCHDOG_MS
+  _lora_wd.begin(LORA_WATCHDOG_MS, this, lora_wd_airtime, lora_wd_probe,
+                 lora_wd_reinit, lora_wd_reboot);
+#endif
   _core.setCodingRate(p->cr);
   _slot0.port().setPortTxPower(p->tx_power_dbm);
   _core.setPortIdentity(0, _slot0.identity().pub_key);
@@ -171,6 +195,9 @@ void HydraNode::loop() {
     if (_core.portActive(i)) _slots[i]->loop();
   }
   _core.pump();
+#ifdef LORA_WATCHDOG_MS
+  _lora_wd.loop();   // paces itself, see LoraWatchdog::CHECK_EVERY_MS
+#endif
 }
 
 // ---------------------------------------------------------------- slot config
@@ -251,6 +278,40 @@ void HydraNode::handleCommand(char* command, char* reply, size_t reply_sz) {
              _core.numPeers(), (unsigned)(_core.msSinceLastRx() / 1000),
              (unsigned)(_core.txBudgetMs() / 1000), (unsigned)(_core.txBudgetMaxMs() / 1000),
              (unsigned)(_core.txChargedMs() / 1000));
+    return;
+  }
+  if (strcmp(command, "trace") == 0) {          // the packet trace, newest last
+#if PKT_TRACE_ENTRIES
+    Serial.printf("trace: %d entries x %d raw bytes, air rx=%us tx=%us\n",
+                  SharedRadioCore::PKT_LOG_SIZE, SharedRadioCore::PKT_LOG_RAW_CAP,
+                  (unsigned)(_core.rxAirtimeMs() / 1000), (unsigned)(_core.txAirtimeMs() / 1000));
+    static const char* kFlag[] = { "ok", "rxerr", "txfail", "txbusy" };
+    PktLogEntry e[4];
+    uint32_t seq = _core.pktLogSeq();
+    uint32_t after = seq > (uint32_t)SharedRadioCore::PKT_LOG_SIZE
+                     ? seq - SharedRadioCore::PKT_LOG_SIZE : 0;
+    int total = 0;
+    for (int n; (n = _core.pktLogCopy(e, 4, after)) > 0; ) {
+      for (int i = 0; i < n; i++) {
+        const PktLogEntry& x = e[i];
+        Serial.printf("%8lu %s %-6s hdr=%02X len=%3u air=%ums cr=4/%u snr=%d rssi=%d "
+                      "hash=%02x%02x%02x%02x\n",
+                      (unsigned long)x.t_ms,
+                      x.dir < 0 ? "rx" : _core.portName(x.dir),
+                      x.flag < 4 ? kFlag[x.flag] : "?",
+                      x.hdr, (unsigned)x.len, (unsigned)x.air_ms, (unsigned)x.cr,
+                      x.snr4 / 4, x.rssi,
+                      x.hash[0], x.hash[1], x.hash[2], x.hash[3]);
+        after = x.seq;
+      }
+      total += n;
+    }
+    snprintf(reply, reply_sz, "OK - %d entries", total);
+#else
+    // Sized out, not broken: PKT_TRACE_ENTRIES is 0 in shipped builds because
+    // the ring is 10.9 KB of RAM at the full depth.
+    StrHelper::strncpy(reply, "trace disabled - build with -D PKT_TRACE_ENTRIES=N", reply_sz);
+#endif
     return;
   }
   if (strcmp(command, "stats-txwait") == 0) {   // why we could not transmit
