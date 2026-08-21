@@ -42,6 +42,8 @@ public:
   }
   bool isSendComplete() override { return send_complete; }
   void onSendFinished() override { finish_calls++; }
+  bool receiving = false;
+  bool isReceiving() override { return receiving; }
   float getLastSNR() const override { return 5.5f; }
   float getLastRSSI() const override { return -88; }
 };
@@ -1195,4 +1197,331 @@ TEST(ObserverEviction, CollisionProneOneByteEntriesAreGivenUpFirst) {
   }
   EXPECT_FALSE(narrow_survived)
       << "a 1-in-256 guess should be surrendered before a hash we can trust";
+}
+
+// -------------------------------------------------- pooled duty-cycle budget
+//
+// Dispatcher gives every Mesh instance its own tx_budget_ms. Behind one antenna
+// that is N budgets for one transmitter, so a three-slot node believing it held
+// 50% duty would happily transmit at 150%. The pool below is the only thing
+// that knows what the NODE spent.
+
+// A frame's estimated airtime in the fake radio is its length in ms, so budgets
+// and frame sizes can be read as the same units throughout.
+static void sendAndRelease(FakeRadio& radio, RadioPort& p, const uint8_t* buf, int len) {
+  if (!p.startSendRaw(buf, len)) return;
+  radio.send_complete = true;
+  p.isSendComplete();
+  p.onSendFinished();
+}
+
+TEST(PooledBudget, OneBudgetForTheWholeNodeNotOnePerIdentity) {
+  g_fake_millis = 0;
+  Fixture f;
+  f.core.setDutyCycle(9.0f, 10000);              // 10% of a 10s window = 1000 ms
+  ASSERT_EQ(1000u, f.core.txBudgetMaxMs());
+
+  uint8_t frame[200] = {0};
+  for (int i = 0; i < 5; i++) sendAndRelease(f.radio, f.a, frame, 200);
+  ASSERT_EQ(5u, f.radio.sent.size());
+  ASSERT_EQ(0u, f.core.txBudgetMs()) << "one identity has spent the lot";
+
+  EXPECT_FALSE(f.b.startSendRaw(frame, 200))
+      << "a sibling must not arrive with a budget of its own to spend";
+  EXPECT_EQ(5u, f.radio.sent.size()) << "nothing more may reach the air";
+  EXPECT_EQ(1u, f.core.txWaits(TXWAIT_BUDGET));
+}
+
+TEST(PooledBudget, TheNodeNeverTransmitsMoreThanTheDutyCycleAllows) {
+  g_fake_millis = 0;
+  Fixture f;
+  f.core.setDutyCycle(9.0f, 10000);              // 10%
+  const uint32_t start_budget = f.core.txBudgetMaxMs();
+
+  RadioPort* ports[3] = { &f.a, &f.b, &f.c };
+  uint8_t frame[64] = {0};
+
+  // Three identities all transmitting as hard as they are allowed to, for
+  // twenty simulated seconds. The pool is the only brake.
+  for (int step = 0; step < 2000; step++) {
+    for (int i = 0; i < 3; i++) sendAndRelease(f.radio, *ports[i], frame, 64);
+    g_fake_millis += 10;
+
+    // THE INVARIANT: never more airtime than one window's head start plus what
+    // the duty cycle has earned since. Per-identity budgets would blow this out
+    // by a factor of three within the first second.
+    uint32_t allowed = start_budget + (uint32_t)(g_fake_millis / 10);
+    ASSERT_LE(f.core.txChargedMs(), allowed)
+        << "over-drawn at t=" << g_fake_millis << "ms";
+  }
+  EXPECT_GT(f.core.txChargedMs(), 0u) << "the test must actually have transmitted";
+}
+
+TEST(PooledBudget, TheBudgetRefillsAtTheDutyCycleAndIsCappedAtOneWindow) {
+  g_fake_millis = 0;
+  Fixture f;
+  f.core.setDutyCycle(9.0f, 10000);
+  uint8_t frame[200] = {0};
+  for (int i = 0; i < 5; i++) sendAndRelease(f.radio, f.a, frame, 200);
+  ASSERT_EQ(0u, f.core.txBudgetMs());
+
+  g_fake_millis += 5000;
+  EXPECT_EQ(500u, f.core.txBudgetMs()) << "10% of five seconds";
+
+  g_fake_millis += 1000000;
+  EXPECT_EQ(1000u, f.core.txBudgetMs()) << "a long quiet spell does not bank more than a window";
+}
+
+TEST(PooledBudget, AFrameLargerThanWhatIsLeftIsRefusedOutright) {
+  g_fake_millis = 0;
+  Fixture f;
+  f.core.setDutyCycle(9.0f, 10000);
+  uint8_t frame[200] = {0};
+  for (int i = 0; i < 4; i++) sendAndRelease(f.radio, f.a, frame, 200);
+  ASSERT_EQ(200u, f.core.txBudgetMs());
+
+  // startSendRaw() is the ONE gate a dispatcher cannot argue with: its CAD-busy
+  // timeout force-sends past isReceiving() after 4 s, but a refusal here drops
+  // the packet instead of putting the node over its duty cycle.
+  EXPECT_FALSE(f.a.startSendRaw(frame, 201));
+  EXPECT_EQ(4u, f.radio.sent.size());
+  EXPECT_TRUE(f.a.startSendRaw(frame, 200)) << "exactly what is left must still fit";
+}
+
+TEST(PooledBudget, PortsAreToldToBackOffBeforeTheBudgetIsCompletelyGone) {
+  g_fake_millis = 0;
+  Fixture f;
+  f.core.setDutyCycle(9.0f, 10000);
+  uint8_t frame[190] = {0};
+  for (int i = 0; i < 5; i++) sendAndRelease(f.radio, f.a, frame, 190);
+
+  ASSERT_LT(f.core.txBudgetMs(), 100u) << "under the reserve";
+  ASSERT_GT(f.core.txBudgetMs(), 0u)   << "but not empty";
+  EXPECT_TRUE(f.b.isReceiving())
+      << "back off politely while there is still room, rather than have a packet dropped";
+  EXPECT_EQ(1u, f.core.txWaits(TXWAIT_BUDGET));
+}
+
+TEST(PooledBudget, DefaultsToTheSameFiftyPercentDispatcherAssumesWhenNobodySetsIt) {
+  Fixture f;
+  EXPECT_EQ(1800000u, f.core.txBudgetMaxMs())
+      << "an uncapped node is the failure mode; a composition that forgets must still be capped";
+}
+
+// ------------------------------------------------------- why we could not TX
+
+static int g_probe_reason = TXWAIT_RX_PACKET;
+static int fakeBusyProbe() { return g_probe_reason; }
+
+TEST(TxWaitReasons, AQuietBandLeavesEveryCounterAtZero) {
+  g_fake_millis = 0;
+  Fixture f;
+  uint8_t msg[] = {1, 2, 3};
+  for (int i = 0; i < 5; i++) {
+    ASSERT_FALSE(f.a.isReceiving());
+    sendAndRelease(f.radio, f.a, msg, 3);
+  }
+  // The whole point: a node with nothing in its way must not look like one that
+  // cannot get a word in edgeways.
+  for (int r = 0; r < TXWAIT_NUM; r++) EXPECT_EQ(0u, f.core.txWaits(r)) << "reason " << r;
+}
+
+TEST(TxWaitReasons, ASiblingHoldingTheTransmitterIsNotConfusedWithABusyChannel) {
+  g_fake_millis = 0;
+  Fixture f;
+  uint8_t msg[] = {1, 2, 3};
+  f.radio.send_complete = false;
+  ASSERT_TRUE(f.a.startSendRaw(msg, 3));
+
+  EXPECT_TRUE(f.b.isReceiving());
+  EXPECT_FALSE(f.b.startSendRaw(msg, 3));
+  EXPECT_EQ(2u, f.core.txWaits(TXWAIT_SIBLING)) << "the deferral and the refusal are both ours";
+  EXPECT_EQ(0u, f.core.txWaits(TXWAIT_RX_PACKET)) << "the band was not busy at all";
+}
+
+TEST(TxWaitReasons, ChannelBusyIsSplitIntoItsThreeUnderlyingConditions) {
+  g_fake_millis = 0;
+  Fixture f;
+  f.radio.receiving = true;
+  f.core.setChannelBusyProbe(fakeBusyProbe);
+
+  g_probe_reason = TXWAIT_RX_PACKET; EXPECT_TRUE(f.a.isReceiving());
+  g_probe_reason = TXWAIT_RSSI;      EXPECT_TRUE(f.a.isReceiving());
+  g_probe_reason = TXWAIT_RSSI;      EXPECT_TRUE(f.a.isReceiving());
+  g_probe_reason = TXWAIT_CAD;       EXPECT_TRUE(f.a.isReceiving());
+
+  // "channel busy" covers a neighbour mid-packet, a threshold set too tight and
+  // hardware CAD; those call for three completely different responses.
+  EXPECT_EQ(1u, f.core.txWaits(TXWAIT_RX_PACKET));
+  EXPECT_EQ(2u, f.core.txWaits(TXWAIT_RSSI));
+  EXPECT_EQ(1u, f.core.txWaits(TXWAIT_CAD));
+}
+
+TEST(TxWaitReasons, WithNoProbeABusyChannelIsAttributedToPacketDetectionNotGuessed) {
+  g_fake_millis = 0;
+  Fixture f;
+  f.radio.receiving = true;
+  EXPECT_TRUE(f.a.isReceiving());
+  EXPECT_EQ(1u, f.core.txWaits(TXWAIT_RX_PACKET));
+}
+
+TEST(TxWaitReasons, ASendTheDriverItselfRefusesIsCountedAsARadioFailure) {
+  g_fake_millis = 0;
+  Fixture f;
+  uint8_t msg[] = {1, 2, 3};
+  f.radio.send_ok = false;
+  EXPECT_FALSE(f.a.startSendRaw(msg, 3));
+  EXPECT_EQ(1u, f.core.txWaits(TXWAIT_RADIO));
+  EXPECT_EQ(1u, f.core.txRefused());
+}
+
+TEST(TxWaitReasons, AnExhaustedBudgetIsDistinguishableFromABusyChannel) {
+  g_fake_millis = 0;
+  Fixture f;
+  f.core.setDutyCycle(9.0f, 10000);
+  uint8_t frame[200] = {0};
+  for (int i = 0; i < 5; i++) sendAndRelease(f.radio, f.a, frame, 200);
+
+  f.radio.receiving = true;                  // band busy AS WELL
+  EXPECT_TRUE(f.b.isReceiving());
+  EXPECT_EQ(1u, f.core.txWaits(TXWAIT_BUDGET))
+      << "our own duty cycle is the obstacle, and blaming the band would hide that";
+  EXPECT_EQ(0u, f.core.txWaits(TXWAIT_RX_PACKET));
+}
+
+// ------------------------------------------------------ cross-slot priority
+//
+// Upstream ranks packets WITHIN a Dispatcher (routed traffic queues at
+// ACTION_RETRANSMIT_DELAYED(0, d)). Across identities there was nothing: the
+// transmitter was first-come-first-served, so a chatty chat slot could sit in
+// front of the repeater's routed traffic for as long as it had something to say.
+
+TEST(CrossSlotPriority, AHigherRankedPortGetsTheChannelAheadOfALowerOne) {
+  g_fake_millis = 1000;
+  Fixture f;
+  f.core.setPortPriority(0, 0);                  // port a = repeater
+  uint8_t msg[] = {1, 2, 3};
+
+  f.radio.send_complete = false;
+  ASSERT_TRUE(f.c.startSendRaw(msg, 3));
+  EXPECT_FALSE(f.a.startSendRaw(msg, 3)) << "the repeater wanted the air and did not get it";
+  f.radio.send_complete = true;
+  f.c.isSendComplete();
+  f.c.onSendFinished();                          // transmitter free again
+
+  EXPECT_TRUE(f.b.isReceiving())
+      << "a chat identity must not step in front of routed traffic that is already waiting";
+  EXPECT_EQ(1u, f.core.txWaits(TXWAIT_PRIORITY));
+  EXPECT_FALSE(f.a.isReceiving()) << "the claimant itself is never held back";
+  EXPECT_TRUE(f.a.startSendRaw(msg, 3));
+}
+
+TEST(CrossSlotPriority, PriorityIsPerPortNotHardCodedToSlotZero) {
+  g_fake_millis = 1000;
+  Fixture f;
+  f.core.setPortPriority(2, 0);                  // rank the LAST port highest
+  uint8_t msg[] = {1, 2, 3};
+
+  f.radio.send_complete = false;
+  ASSERT_TRUE(f.a.startSendRaw(msg, 3));
+  EXPECT_FALSE(f.c.startSendRaw(msg, 3));        // c claims
+  f.radio.send_complete = true;
+  f.a.isSendComplete();
+  f.a.onSendFinished();
+
+  EXPECT_TRUE(f.a.isReceiving()) << "port 0 yields when it is not the ranked one";
+  EXPECT_TRUE(f.b.isReceiving());
+  EXPECT_EQ(0u, f.core.portPriority(2));
+}
+
+TEST(CrossSlotPriority, EqualRanksDoNotYieldToEachOther) {
+  g_fake_millis = 1000;
+  Fixture f;                                     // every port left at the default rank
+  uint8_t msg[] = {1, 2, 3};
+
+  f.radio.send_complete = false;
+  ASSERT_TRUE(f.c.startSendRaw(msg, 3));
+  EXPECT_FALSE(f.a.startSendRaw(msg, 3));
+  f.radio.send_complete = true;
+  f.c.isSendComplete();
+  f.c.onSendFinished();
+
+  EXPECT_FALSE(f.b.isReceiving()) << "without a rank there is nothing to yield to";
+  EXPECT_EQ(0u, f.core.txWaits(TXWAIT_PRIORITY));
+}
+
+TEST(CrossSlotPriority, TransmittingClearsTheClaimAndReleasesTheOthersAtOnce) {
+  g_fake_millis = 1000;
+  Fixture f;
+  f.core.setPortPriority(0, 0);
+  uint8_t msg[] = {1, 2, 3};
+
+  f.radio.send_complete = false;
+  ASSERT_TRUE(f.c.startSendRaw(msg, 3));
+  EXPECT_FALSE(f.a.startSendRaw(msg, 3));
+  f.radio.send_complete = true;
+  f.c.isSendComplete();
+  f.c.onSendFinished();
+
+  ASSERT_TRUE(f.b.isReceiving());
+  sendAndRelease(f.radio, f.a, msg, 3);          // the claimant gets its turn
+  EXPECT_FALSE(f.b.isReceiving()) << "a satisfied claim must not linger";
+}
+
+TEST(CrossSlotPriority, AClaimExpiresSoAQuietHighRankedPortCannotSilenceTheRest) {
+  g_fake_millis = 1000;
+  Fixture f;
+  f.core.setPortPriority(0, 0);
+  uint8_t msg[] = {1, 2, 3};
+
+  f.radio.send_complete = false;
+  ASSERT_TRUE(f.c.startSendRaw(msg, 3));
+  EXPECT_FALSE(f.a.startSendRaw(msg, 3));
+  f.radio.send_complete = true;
+  f.c.isSendComplete();
+  f.c.onSendFinished();
+  ASSERT_TRUE(f.b.isReceiving());
+
+  g_fake_millis += 1500;                         // past CLAIM_TTL_MS
+  EXPECT_FALSE(f.b.isReceiving())
+      << "a repeater that went quiet must not hold the board off indefinitely";
+}
+
+TEST(CrossSlotPriority, ASilencedHighRankedPortHoldsNobodyBack) {
+  g_fake_millis = 1000;
+  Fixture f;
+  f.core.setPortPriority(0, 0);
+  uint8_t msg[] = {1, 2, 3};
+
+  f.radio.send_complete = false;
+  ASSERT_TRUE(f.c.startSendRaw(msg, 3));
+  EXPECT_FALSE(f.a.startSendRaw(msg, 3));
+  f.radio.send_complete = true;
+  f.c.isSendComplete();
+  f.c.onSendFinished();
+  ASSERT_TRUE(f.b.isReceiving());
+
+  f.core.setPortActive(f.ia, false);
+  EXPECT_FALSE(f.b.isReceiving()) << "a disabled identity has no say in anything";
+}
+
+TEST(CrossSlotPriority, PriorityDefersButNeverRefusesSoAForcedSendStillGetsThrough) {
+  g_fake_millis = 1000;
+  Fixture f;
+  f.core.setPortPriority(0, 0);
+  uint8_t msg[] = {1, 2, 3};
+
+  f.radio.send_complete = false;
+  ASSERT_TRUE(f.c.startSendRaw(msg, 3));
+  EXPECT_FALSE(f.a.startSendRaw(msg, 3));
+  f.radio.send_complete = true;
+  f.c.isSendComplete();
+  f.c.onSendFinished();
+  ASSERT_TRUE(f.b.isReceiving());
+
+  // b's dispatcher has burned its own 4 s CAD-busy timeout and force-sent.
+  // Refusing here would drop the packet; letting it through bounds starvation
+  // at the timeout that already exists upstream.
+  EXPECT_TRUE(f.b.startSendRaw(msg, 3));
+  EXPECT_EQ(1u, f.core.txWaits(TXWAIT_FORCED));
 }

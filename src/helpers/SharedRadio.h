@@ -21,6 +21,17 @@
 //     defers them cleanly. Just before a send the core applies that port's
 //     TX power (per-persona power offset / jitter).
 //
+//   * DUTY-CYCLE BUDGET: pooled here, because the duty cycle is a property of
+//     the radio and not of an identity. Dispatcher keeps tx_budget_ms per Mesh
+//     instance, so N identities behind one antenna is N budgets for one
+//     transmitter — three slots each believing they hold 50% duty would put
+//     the node on air at 150%. See setDutyCycle().
+//
+//   * PRIORITY: ports may be ranked, so routed repeater traffic is not left
+//     behind a chatty chat identity. Upstream has priority WITHIN a Dispatcher
+//     (ACTION_RETRANSMIT_DELAYED(0, d)); this is the missing cross-identity
+//     equivalent.
+//
 // Everything is cooperative and single-threaded, driven from the main loop;
 // there are no interrupts mutating shared state, so no locking is needed.
 //
@@ -101,6 +112,23 @@ public:
 // failure means the header itself was lost, so nothing read out of it is ours
 // to report.
 #define PKT_RX_ERR_CRC   (-7)
+
+// Why a transmission did not happen. A node that cannot get a word in edgeways
+// is otherwise indistinguishable from one on a quiet band: both just sit there.
+// TXWAIT_RX_PACKET / _RSSI / _CAD are the three separate conditions hiding
+// behind the driver's single isReceiving() bool, and they mean quite different
+// things — a neighbour mid-packet, an interference threshold set too tight, and
+// hardware CAD respectively.
+#define TXWAIT_BUDGET      0   // pooled duty-cycle budget exhausted
+#define TXWAIT_SIBLING     1   // another identity on this board held the transmitter
+#define TXWAIT_PRIORITY    2   // yielded to a higher-priority identity
+#define TXWAIT_RX_PACKET   3   // channel busy: preamble/header already detected
+#define TXWAIT_RSSI        4   // channel busy: RSSI above noise floor + threshold
+#define TXWAIT_CAD         5   // channel busy: hardware CAD said occupied
+#define TXWAIT_RADIO       6   // the driver itself refused the send
+#define TXWAIT_FORCED      7   // sent anyway, over a live higher-priority claim
+#define TXWAIT_NUM         8
+
 struct PktLogEntry {
   uint32_t seq;
   uint32_t t_ms;
@@ -173,6 +201,45 @@ public:
   void setPortActive(int idx, bool active);
   bool portActive(int idx) const;
 
+  // ---- pooled duty-cycle budget --------------------------------------------
+  // factor is Dispatcher's airtime budget factor: duty = 1/(1+factor), so 1.0
+  // is 50%. Defaults to that, matching Dispatcher::getAirtimeBudgetFactor(), so
+  // a composition that forgets to call this is capped rather than uncapped.
+  //
+  // The pool is charged the ESTIMATED airtime of a frame before that frame
+  // reaches the air, not the measured airtime afterwards: a send that is later
+  // force-released by the TX watchdog still used the channel, and a budget that
+  // only debits on clean completion would not have noticed.
+  void setDutyCycle(float airtime_budget_factor, uint32_t window_ms = 3600000);
+  uint32_t txBudgetMs();                 // refills first, so this is the live figure
+  uint32_t txBudgetMaxMs() const { return _duty_max_ms; }
+  // Airtime the pool has been charged since boot. Never exceeds what the duty
+  // cycle permits over the elapsed window; the invariant the tests pin down.
+  uint32_t txChargedMs() const { return _tx_charged_ms; }
+
+  // ---- cross-identity priority ---------------------------------------------
+  // 0 = highest, default 1. Per port rather than "slot 0 always wins" because
+  // the arbiter has no idea what a slot is, and a room server wants the same
+  // standing as a repeater. A port that wanted the air and was denied it leaves
+  // a CLAIM; lower-priority ports then report isReceiving() until the claim
+  // expires or the claimant transmits, so their dispatchers back off cleanly.
+  // Priority never REFUSES a send — a dispatcher that has burned through its
+  // own CAD-busy timeout and force-sent is let through, which bounds how long
+  // one identity can be held off at the 4 s that timeout already allows.
+  void setPortPriority(int idx, uint8_t pri);
+  uint8_t portPriority(int idx) const;
+
+  // ---- deferral accounting --------------------------------------------------
+  uint32_t txWaits(int reason) const {
+    return (reason >= 0 && reason < TXWAIT_NUM) ? _tx_waits[reason] : 0;
+  }
+  // Splits the driver's isReceiving() into its three underlying conditions.
+  // Supplied by the composition because doing it requires the concrete radio
+  // wrapper, which this file deliberately knows nothing about. Returns one of
+  // TXWAIT_RX_PACKET / TXWAIT_RSSI / TXWAIT_CAD.
+  typedef int (*ChannelBusyProbe)();
+  void setChannelBusyProbe(ChannelBusyProbe fn) { _busy_probe = fn; }
+
   // Pump the real radio once: if the current frame is fully delivered, fetch
   // the next one. Call AFTER every mesh has had its loop() this cycle.
   void pump();
@@ -185,6 +252,9 @@ public:
   void onSendFinishedFor(RadioPort* p);
   bool txBusyForOthers(RadioPort* p) const { return _tx_owner != nullptr && _tx_owner != p; }
   bool txInFlight() const { return _tx_owner != nullptr; }
+  // The whole of RadioPort::isReceiving(), so every reason a port is told to
+  // wait is decided — and counted — in one place.
+  bool portMustWait(RadioPort* p);
 
   mesh::Radio* real() { return _real; }
 
@@ -340,6 +410,32 @@ private:
   int      _thresh_applied = 0;
   uint32_t _last_calib_ms = 0;
   static const uint32_t CALIB_MIN_INTERVAL_MS = 2000;   // stock per-mesh cadence
+
+  // ---- pooled duty-cycle budget ----
+  void     refillBudget();
+  void     noteWait(int reason) { if (reason >= 0 && reason < TXWAIT_NUM) _tx_waits[reason]++; }
+  float    _duty = 0.5f;                    // fraction of the window we may transmit for
+  uint32_t _duty_window_ms = 3600000;
+  uint32_t _duty_max_ms = 1800000;
+  uint32_t _budget_ms = 1800000;
+  uint32_t _budget_last_ms = 0;
+  uint32_t _tx_charged_ms = 0;
+  // Below this the pool stops volunteering for new sends, mirroring
+  // Dispatcher's MIN_TX_BUDGET_RESERVE_MS so the two agree on what "nearly out"
+  // means. The per-frame test in tryStartSend() is the hard cap; this is only
+  // the low-water mark that makes ports back off before they get there.
+  static const uint32_t BUDGET_RESERVE_MS = 100;
+  volatile uint32_t _tx_waits[TXWAIT_NUM] = {0};
+  ChannelBusyProbe _busy_probe = nullptr;
+
+  // ---- cross-identity priority ----
+  bool     higherPriorityClaimed(int idx) const;
+  uint8_t  _port_pri[MAX_PORTS] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+  uint32_t _claim_ms[MAX_PORTS] = {0};      // when this port last wanted the air and was denied
+  // Long enough for a denied port's next attempt to land (its dispatcher retries
+  // every getCADFailRetryDelay(), 200 ms), short enough that a claimant which
+  // goes quiet cannot hold the others off for any noticeable time.
+  static const uint32_t CLAIM_TTL_MS = 1000;
 
   RadioPort* _tx_owner;
   TxPowerControl* _pwr_ctl;
