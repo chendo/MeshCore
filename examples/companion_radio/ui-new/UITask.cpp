@@ -221,33 +221,36 @@ public:
       the_mesh.getStatWindow(10, w5);
       the_mesh.getStatWindow(MESH_STAT_BUCKETS, w15);
 
-      display.setTextSize(1);
+      // Tiny font: this is a table, and the built-in 6x8 glyphs fit three times the
+      // columns. It also positions from the TOP-LEFT rather than the baseline, so the
+      // y values below are the top of each row, not its baseline.
+      display.setTextSize(0);
       display.setColor(UIColor::primary_txt);
 
       uint32_t seen15 = w15.rx + w15.crc_fail;
       int crc_pct = seen15 ? (int)((w15.crc_fail * 100) / seen15) : 0;
-      sprintf(tmp, "%u/%u/%u", (unsigned) w1.rx, (unsigned) w5.rx, (unsigned) w15.rx);
-      display.setCursor(0, 13);
+      sprintf(tmp, "RX %u/%u/%u 1.5.15m", (unsigned) w1.rx, (unsigned) w5.rx, (unsigned) w15.rx);
+      display.setCursor(0, 11);
       display.print(tmp);
       sprintf(tmp, "CRC %d%%", crc_pct);
-      display.drawTextRightAlign(display.width(), 13, tmp);
+      display.drawTextRightAlign(display.width(), 11, tmp);
 
       if (w15.has_snr) {
-        sprintf(tmp, "%+.1f %+.1f %+.1f", w15.snr_min, w15.snr_avg, w15.snr_max);
+        sprintf(tmp, "SNR %+.1f / %+.1f / %+.1f  (15m)", w15.snr_min, w15.snr_avg, w15.snr_max);
       } else {
-        strcpy(tmp, "no signal 15m");
+        strcpy(tmp, "SNR --   nothing heard in 15m");
       }
-      display.setCursor(0, 23);
+      display.setCursor(0, 17);
       display.print(tmp);
 
       display.setColor(UIColor::title_bkg);
-      display.fillRect(0, 27, display.width(), 1);
+      display.fillRect(0, 24, display.width(), 1);
       display.setColor(UIColor::secondary_txt);
-      display.setCursor(0, 35);
+      display.setCursor(0, 27);
       display.print("NAME");
-      display.drawTextRightAlign(88, 35, "SNR");
-      display.drawTextRightAlign(108, 35, "AGE");
-      display.drawTextRightAlign(display.width(), 35, "PKT");
+      display.drawTextRightAlign(84, 27, "SNR");
+      display.drawTextRightAlign(106, 27, "AGE");
+      display.drawTextRightAlign(display.width(), 27, "PKT");
 
       // Direct neighbours only -- an advert that arrived with no path. out_path_len is
       // the wrong test: it reads 255 for anything heard passively, so it would count
@@ -256,7 +259,7 @@ public:
       int num_recent = 0;
       const AdvertPath* recent_list = the_mesh.getSortedRecentlyHeard(num_recent);
       uint32_t now = _rtc->getCurrentTime();
-      int ny = 46;
+      int ny = 34;
       int shown = 0;
       for (int i = 0; i < num_recent && ny <= 116; i++) {
         const AdvertPath* a = &recent_list[i];
@@ -264,66 +267,63 @@ public:
 
         char filtered[sizeof(a->name)];
         display.translateUTF8ToBlocks(filtered, a->name, sizeof(filtered));
-        display.drawTextEllipsized(0, ny, 56, filtered);
+        display.drawTextEllipsized(0, ny, 52, filtered);
 
         sprintf(tmp, "%+.1f", a->snr / 4.0f);
-        display.drawTextRightAlign(88, ny, tmp);
+        display.drawTextRightAlign(84, ny, tmp);
 
         uint32_t secs = now - a->recv_timestamp;
         if (secs < 60)        sprintf(tmp, "%us", (unsigned) secs);
         else if (secs < 3600) sprintf(tmp, "%um", (unsigned)(secs / 60));
         else                  sprintf(tmp, "%uh", (unsigned)(secs / 3600));
-        display.drawTextRightAlign(108, ny, tmp);
+        display.drawTextRightAlign(106, ny, tmp);
 
         sprintf(tmp, "%u", (unsigned) a->pkts);
         display.drawTextRightAlign(display.width(), ny, tmp);
 
-        ny += 10;
+        ny += 6;
         shown++;
       }
       if (shown == 0) {
-        display.setCursor(0, 46);
-        display.print("no neighbours yet");
+        display.setCursor(0, 34);
+        display.print("no direct neighbours heard yet");
       }
 
+      display.setTextSize(1);   // leave the driver as the other pages expect it
+
     } else if (_page == HomePage::MSGS) {
-      display.setTextSize(1);
+      display.setTextSize(0);
       display.setColor(UIColor::primary_txt);
 
       uint8_t head, count;
       const MsgLogEntry* log = _task->getMsgLog(head, count);
 
-      // Two rows per message: who and when, then the text under it. One row would fit
-      // about six characters of message after the timestamp at this size.
-      const int msg_h = 20, last_row_y = 116;
-      int rows = (last_row_y - 13) / msg_h + 1;
+      const int top_y = 11, bottom_y = 116, row_h = 6;
+      int rows = (bottom_y - top_y) / row_h + 1;
       int n = count < rows ? count : rows;
 
       if (n == 0) {
-        display.setCursor(0, 13);
+        display.setCursor(0, top_y);
         display.print("no messages yet");
       }
 
-      // Anchored to the bottom, so the newest message is always in the same place
-      // rather than wandering up the screen as the log fills.
-      int my = last_row_y - msg_h * (n - 1);
-      for (int i = 0; i < n; i++, my += msg_h) {
+      // Anchored to the bottom, so the newest line is always in the same place rather
+      // than wandering up the screen as the log fills.
+      int my = bottom_y - (n - 1) * row_h;
+      for (int i = 0; i < n; i++, my += row_h) {
         const MsgLogEntry* m = &log[(head + UI_MSG_LOG - (n - 1) + i) % UI_MSG_LOG];
         if (m->at == 0) continue;
 
         uint32_t secs = m->at % 86400;   // UTC, same basis as the rest of the UI
         char from[sizeof(m->from)];
         display.translateUTF8ToBlocks(from, m->from, sizeof(from));
-        sprintf(tmp, "%02u:%02u:%02u", (unsigned)(secs / 3600),
-                (unsigned)((secs / 60) % 60), (unsigned)(secs % 60));
-        display.setColor(UIColor::secondary_txt);
-        display.setCursor(0, my - 10);
-        display.print(tmp);
-        display.drawTextEllipsized(52, my - 10, display.width() - 52, from);
-
-        display.setColor(UIColor::primary_txt);
-        display.drawTextEllipsized(4, my, display.width() - 4, m->text);
+        sprintf(tmp, "%02u:%02u:%02u %s: %s",
+                (unsigned)(secs / 3600), (unsigned)((secs / 60) % 60), (unsigned)(secs % 60),
+                from, m->text);
+        display.drawTextEllipsized(0, my, display.width(), tmp);
       }
+
+      display.setTextSize(1);
 
     } else if (_page == HomePage::FIRST) {
       display.setColor(UIColor::primary_txt);
