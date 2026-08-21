@@ -33,8 +33,8 @@ int MeshObserver::selfIndex(const uint8_t* hash, uint8_t width) const {
 void MeshObserver::observeTx(const uint8_t* frame, int len, int stream) {
   if (frame == nullptr || len < 1) return;
   if (stream < 0 || stream >= MAX_STREAMS) return;
-  // Only floods get relayed onward, so only they can ever be confirmed. Route
-  // types 0 and 1 are the flooded ones.
+  // Other nodes relay only floods. Therefore only a flood can get a
+  // confirmation. Route types 0 and 1 are the flooded types.
   uint8_t route = frame[0] & 0x03;
   if (route != 0 && route != 1) return;
 
@@ -42,7 +42,7 @@ void MeshObserver::observeTx(const uint8_t* frame, int len, int stream) {
   if (_tx_ring_count < TX_RING) {
     _tx_ring[(_tx_ring_head + _tx_ring_count) % TX_RING] = { (uint32_t)millis(), (int8_t)stream, false };
     _tx_ring_count++;
-  } else {                                  // ring full: drop the oldest
+  } else {                                  // the ring is full: discard the oldest
     _tx_ring[_tx_ring_head] = { (uint32_t)millis(), (int8_t)stream, false };
     _tx_ring_head = (_tx_ring_head + 1) % TX_RING;
   }
@@ -50,15 +50,16 @@ void MeshObserver::observeTx(const uint8_t* frame, int len, int stream) {
 
 void MeshObserver::creditRelay(int stream, uint8_t hash_width) {
   if (hash_width >= 1 && hash_width <= 4) _confirm_width[hash_width - 1]++;
-  // A 1-byte hash collides once every 256 packets, so on its own it is not
-  // evidence anyone relayed us: tallied above, but never credited.
+  // A 1-byte hash collides one time in every 256 packets. On its own it is
+  // therefore not evidence that a node relayed us. The code counts it above,
+  // but it never credits it.
   if (hash_width < 2) return;
 
   uint32_t now = millis();
   for (int k = _tx_ring_count - 1; k >= 0; k--) {
     TxRecord& r = _tx_ring[(_tx_ring_head + k) % TX_RING];
     if (r.stream != stream || r.confirmed) continue;
-    if ((uint32_t)(now - r.t_ms) > _confirm_window_ms) break;   // older ones are older still
+    if ((uint32_t)(now - r.t_ms) > _confirm_window_ms) break;   // the records before this one are older
     r.confirmed = true;
     if (stream >= 0 && stream < MAX_STREAMS) _flood_confirmed[stream]++;
     return;
@@ -66,7 +67,7 @@ void MeshObserver::creditRelay(int stream, uint8_t hash_width) {
 }
 
 int MeshObserver::peerTier(const PeerEntry& e) const {
-  if (e.heard_us > 0) return 3;                   // it has relayed us: proven
+  if (e.heard_us > 0) return 3;                   // it has relayed us: this is proof
   if (e.direct_rx > 0) {
     if (e.snr_n > 0 && e.snr4_sum / (int32_t)e.snr_n >= STRONG_SNR_4) return 2;
     return 1;
@@ -87,11 +88,12 @@ int MeshObserver::evictionVictim(uint32_t now) const {
   for (int i = 0; i < _num_peers; i++) {
     const PeerEntry& e = _peers[i];
     int tier = peerTier(e);
-    uint32_t age = now - e.last_ms;               // unsigned: wrap-safe
-    // Everything we have actually heard is spared until it goes quiet. Only
-    // relay-only sightings can be dropped while still fresh.
+    uint32_t age = now - e.last_ms;               // unsigned: safe across a wrap
+    // The code keeps every node that we have truly heard until that node goes
+    // quiet. It can discard a fresh entry only if that entry has relay
+    // sightings alone.
     if (tier > 0 && age < STALE_MS) continue;
-    int wide = (e.width >= 2) ? 1 : 0;            // 1-byte hashes go first
+    int wide = (e.width >= 2) ? 1 : 0;            // the 1-byte hashes go first
     if (best < 0 || tier < best_tier ||
         (tier == best_tier && wide < best_wide) ||
         (tier == best_tier && wide == best_wide && age > best_age)) {
@@ -104,7 +106,7 @@ int MeshObserver::evictionVictim(uint32_t now) const {
 int MeshObserver::claimSlot(uint32_t now) {
   if (_num_peers < MAX_PEERS) return _num_peers++;
   int victim = evictionVictim(now);
-  if (victim < 0) { _refused++; return -1; }      // all slots held by live peers
+  if (victim < 0) { _refused++; return -1; }      // live peers hold all the slots
   _evictions++;
   return victim;
 }
@@ -114,7 +116,7 @@ int MeshObserver::findPeer(const uint8_t* hash, uint8_t width) const {
   for (int i = 0; i < _num_peers; i++) {
     uint8_t cmp = width < _peers[i].width ? width : _peers[i].width;
     if (memcmp(hash, _peers[i].hash, cmp) != 0) continue;
-    if (found >= 0) return -2;          // prefix matches several known peers
+    if (found >= 0) return -2;          // the prefix matches more than one known peer
     found = i;
   }
   return found;
@@ -125,7 +127,7 @@ void MeshObserver::observeRx(const uint8_t* frame, int len, int8_t snr4) {
   _frames++;
   _types[(frame[0] >> 2) & 0x0F]++;
 
-  // hop depth of what we are hearing
+  // the hop depth of the traffic that we hear
   uint8_t route = frame[0] & 0x03;
   int o = 1;
   if (route == 0 || route == 3) o += 4;          // transport codes
@@ -151,10 +153,11 @@ void MeshObserver::notePeersInPath(const uint8_t* frame, int len, int8_t snr4) {
   uint32_t now = millis();
   for (uint8_t h = 0; h < hops; h++) {
     const uint8_t* hop = &frame[o + h * sz];
-    // Our own hash only ever enters a path when WE forwarded the packet, so
-    // hearing it come back at ANY position is proof the transmission
-    // propagated — that is the confirmation. Attribution to a specific peer
-    // needs the following entry, and is handled further down.
+    // Our own hash enters a path only when WE forwarded the packet. Therefore
+    // our hash at ANY position in a returning path is proof that the
+    // transmission propagated. That is the confirmation. To attribute the
+    // relay to one peer, the code needs the entry that follows ours. The code
+    // below does that.
     int mine = selfIndex(hop, sz);
     if (mine >= 0) {
       creditRelay(mine, sz);
@@ -162,16 +165,16 @@ void MeshObserver::notePeersInPath(const uint8_t* frame, int len, int8_t snr4) {
     }
 
     int idx = findPeer(hop, sz);
-    if (idx == -2) continue;                     // ambiguous, attribute nothing
+    if (idx == -2) continue;                     // ambiguous: attribute nothing
     if (idx < 0) {
       idx = claimSlot(now);
-      if (idx < 0) continue;                     // every slot held by a live peer
+      if (idx < 0) continue;                     // live peers hold every slot
       PeerEntry& n = _peers[idx];
       memset(&n, 0, sizeof(n));
       memcpy(n.hash, hop, sz);
       n.width = sz;
     } else if (sz > _peers[idx].width) {
-      memcpy(_peers[idx].hash, hop, sz);         // a wider sighting refines it
+      memcpy(_peers[idx].hash, hop, sz);         // a wider sighting improves it
       _peers[idx].width = sz;
     }
 
@@ -179,21 +182,23 @@ void MeshObserver::notePeersInPath(const uint8_t* frame, int len, int8_t snr4) {
     e.relays++;
     e.last_ms = now;
 
-    // Distance is position from the END: the last forwarder is one hop away.
+    // The distance is the position from the END. The last forwarder is one hop
+    // away.
     uint8_t dist = (uint8_t)(hops - h);
     if (e.min_hops == 0 || dist < e.min_hops) e.min_hops = dist;
 
-    if (h + 1 == hops) {          // final hop: this frame came off ITS radio
+    if (h + 1 == hops) {          // the final hop: this frame came off ITS radio
       e.direct_rx++;
       e.last_direct_ms = now;
       e.snr4_sum += snr4;         // only these sightings describe our link to it
       e.snr_n++;
     }
 
-    // Did it forward something WE transmitted? Only the entry immediately after
-    // one of ours proves that, and only at 2 bytes or wider.
+    // Did this node forward a frame that WE transmitted? Only the entry
+    // directly after one of ours gives that proof, and only at a width of 2
+    // bytes or more.
     if (h > 0 && isSelf(&frame[o + (h - 1) * sz], sz)) {
-      if (sz >= 2) e.heard_us++; else e.heard_us_1b++;   // credited above
+      if (sz >= 2) e.heard_us++; else e.heard_us_1b++;   // the code credits this above
     }
   }
 }
@@ -217,7 +222,7 @@ bool MeshObserver::parseAdvert(const uint8_t* frame, int len,
   // payload: [pub_key 32][timestamp 4][signature 64][app_data]
   if (o + 100 > len) return false;
   pub = &frame[o];
-  if (isSelf(pub, 4)) return false;                   // never record ourselves
+  if (isSelf(pub, 4)) return false;                   // never record our own node
 
   memcpy(&their_ts, &frame[o + 32], 4);
   return true;
@@ -232,10 +237,10 @@ void MeshObserver::observeBridgedAdvert(const uint8_t* frame, int len) {
   if (!parseAdvert(frame, len, pub, hops, their_ts)) return;
   if (their_ts < MIN_SANE_EPOCH) return;
 
-  /* Clock evidence ONLY -- see the header for why the peer table and the
-     histograms are deliberately left alone. noteClockSample keys on the
-     originator, so an advert reaching us over both the radio and the bridge
-     updates one slot rather than counting as two agreeing sources. */
+  /* Clock evidence ONLY. The header explains why this code does not change the
+     peer table or the histograms. noteClockSample keys on the originator.
+     Therefore an advert that reaches us over both the radio and the bridge
+     updates one slot. It does not count as two sources that agree. */
   noteSighting(pub, their_ts, hops);
   noteClockSample(pub, hops, their_ts);
 }
@@ -246,15 +251,16 @@ void MeshObserver::noteAdvert(const uint8_t* frame, int len, int8_t snr4) {
   uint32_t their_ts;
   if (!parseAdvert(frame, len, pub, hops, their_ts)) return;
 
-  // An empty path means we received the originator's own transmission, so it is
-  // one hop away. Otherwise it sits beyond the forwarders that did relay it.
+  // An empty path means that we received the transmission of the originator
+  // itself, so that node is one hop away. If the path is not empty, the node
+  // sits beyond the forwarders that relayed the advert.
   uint8_t dist = (uint8_t)(hops + 1);
 
   // Time this advert, and take a clock reading from it, BEFORE the peer-table
-  // rules below get a say. A table slot is only granted to a node within two
-  // hops -- correct for a neighbour table, and fatal here: a repeater indoors
-  // hears mostly distant traffic, and gating on the slot left the estimator
-  // with nothing to work from at all.
+  // rules below apply. The code gives a table slot only to a node within two
+  // hops. That rule is correct for a neighbour table, and fatal here. A
+  // repeater indoors hears mostly distant traffic. When the code gated the
+  // reading on the slot, the estimator had no data at all.
   int32_t  clock_delta = 0;
   bool     have_clock = false;
   if (_clock != nullptr) {
@@ -262,7 +268,7 @@ void MeshObserver::noteAdvert(const uint8_t* frame, int len, int8_t snr4) {
     if (their_ts >= MIN_SANE_EPOCH) {
       noteSighting(pub, their_ts, hops);
       noteClockSample(pub, hops, their_ts);
-      if (ours >= MIN_SANE_EPOCH) {                 // peer-table display only
+      if (ours >= MIN_SANE_EPOCH) {                 // for the peer-table display only
         clock_delta = (int32_t)(their_ts - ours);
         have_clock = true;
       }
@@ -270,11 +276,11 @@ void MeshObserver::noteAdvert(const uint8_t* frame, int len, int8_t snr4) {
   }
 
   int idx = findPeer(pub, 3);
-  if (idx == -2) return;                              // ambiguous, leave alone
+  if (idx == -2) return;                              // ambiguous: change nothing
   if (idx < 0) {
-    if (dist > 2) return;                             // only near nodes earn a slot
+    if (dist > 2) return;                             // only a near node earns a slot
     idx = claimSlot(millis());
-    if (idx < 0) return;                              // nothing evictable
+    if (idx < 0) return;                              // the code can evict nothing
     PeerEntry& n = _peers[idx];
     memset(&n, 0, sizeof(n));
     memcpy(n.hash, pub, 3);
@@ -283,7 +289,7 @@ void MeshObserver::noteAdvert(const uint8_t* frame, int len, int8_t snr4) {
   PeerEntry& e = _peers[idx];
   if (e.min_hops == 0 || dist < e.min_hops) e.min_hops = dist;
   e.last_ms = millis();
-  if (hops == 0) {                                    // heard it on our own radio
+  if (hops == 0) {                                    // we heard it on our own radio
     e.direct_rx++;
     e.last_direct_ms = e.last_ms;
     e.snr4_sum += snr4;
@@ -292,19 +298,20 @@ void MeshObserver::noteAdvert(const uint8_t* frame, int len, int8_t snr4) {
 
   memcpy(e.pub, pub, sizeof(e.pub));
 
-  // Their clock against ours, from this advert's signed timestamp. Zero hops
-  // only — see PeerEntry::clock_delta_s for why a relayed advert cannot be
-  // used. Both sides must believe they know the date, or the subtraction is
-  // measuring "never synced" rather than drift.
-  if (have_clock && hops == 0) {   // the peer table shows skew for neighbours only
+  // Their clock against ours, from the signed timestamp of this advert. Use
+  // zero-hop adverts only. PeerEntry::clock_delta_s explains why the code
+  // cannot use a relayed advert. Both nodes must think that they know the
+  // date. If not, the subtraction measures "never synced" and not the drift.
+  if (have_clock && hops == 0) {   // the peer table shows the skew for neighbours only
     e.clock_delta_s = clock_delta;
     e.clock_ms = e.last_ms;
     e.clock_n++;
   }
 
-  /* app_data sits after [pub_key 32][timestamp 4][signature 64]. parseAdvert
-     handed back `pub`, which points at the start of that payload, so the
-     offset it computed is recovered here rather than duplicated. */
+  /* app_data comes after [pub_key 32][timestamp 4][signature 64]. parseAdvert
+     returned `pub`, which points at the start of that payload. Therefore this
+     code recovers the offset that parseAdvert computed. It does not compute
+     the offset a second time. */
   const uint8_t* ad = pub + 100;
   int ad_len = len - (int)(pub - frame) - 100;
   if (ad_len <= 0) return;
@@ -332,9 +339,10 @@ void MeshObserver::noteSighting(const uint8_t* pub, uint32_t advert_ts, uint8_t 
   for (int i = 0; i < _num_sightings; i++) {
     AdvertSighting& s = _sightings[i];
     if (memcmp(s.pub4, pub, 4) == 0 && s.advert_ts == advert_ts) {
-      // A later copy of an advert we have already seen. Only a copy that came
-      // further counts: an equal or shorter path is a different branch of the
-      // flood, not another hop of the same one.
+      // This is a later copy of an advert that we have already seen. Only a
+      // copy that travelled further counts. A path of equal or shorter length
+      // is a different branch of the flood. It is not another hop of the same
+      // branch.
       if (hops > s.last_hops) {
         _hop_delay_sum_ms += (uint32_t)(now - s.last_ms);
         _hop_delay_hops   += (uint32_t)(hops - s.last_hops);
@@ -360,7 +368,7 @@ uint16_t MeshObserver::hopDelayMs() const {
   if (_hop_delay_pairs < HOP_DELAY_MIN_PAIRS || _hop_delay_hops == 0)
     return HOP_DELAY_DEFAULT_MS;
   uint32_t d = _hop_delay_sum_ms / _hop_delay_hops;
-  return d > 60000 ? 60000 : (uint16_t)d;      // a minute a hop is already absurd
+  return d > 60000 ? 60000 : (uint16_t)d;      // one minute for each hop is already too much
 }
 
 void MeshObserver::noteClockSample(const uint8_t* pub, uint8_t hops, uint32_t their_ts) {
@@ -376,16 +384,17 @@ void MeshObserver::noteClockSample(const uint8_t* pub, uint8_t hops, uint32_t th
     memset(&_clock_samples[idx], 0, sizeof(_clock_samples[idx]));
     memcpy(_clock_samples[idx].pub4, pub, 4);
   } else {
-    // Same node again: carry the reading being replaced down so a rate can be
-    // estimated, but only once the old one is far enough back to mean anything.
+    // This is the same node again. Keep the reading that the new one replaces,
+    // so that the code can estimate a rate. Keep it only after the old reading
+    // is far enough back in time to have a meaning.
     ClockSample& s = _clock_samples[idx];
     if (s.ms != 0 && (s.prev_ms == 0 ||
         (uint32_t)(s.ms - s.prev_ms) >= DRIFT_MIN_SPAN_MS)) {
       s.prev_their_ts = s.their_ts;
       s.prev_ms = s.ms;
     }
-    // Prefer the shortest path we have heard recently: a zero-hop reading needs
-    // no correction at all, so do not let a relayed copy displace one.
+    // Use the shortest path that we have heard recently. A zero-hop reading
+    // needs no correction. Therefore a relayed copy must not replace one.
     if (hops > s.hops && (uint32_t)(now - s.ms) < CLOCK_VOTE_MAX_AGE_MS / 4) return;
   }
   ClockSample& s = _clock_samples[idx];
@@ -394,8 +403,9 @@ void MeshObserver::noteClockSample(const uint8_t* pub, uint8_t hops, uint32_t th
   s.ms = now;
 }
 
-/* Sorted ascending in place, carrying the parallel arrays along. n is bounded
-   by CLOCK_SAMPLES so an insertion sort beats qsort's comparator indirection. */
+/* This function sorts the array in place, in ascending order. It moves the
+   parallel arrays with it. CLOCK_SAMPLES limits n. Therefore an insertion sort
+   is faster than qsort, which must call a comparator through a pointer. */
 static void sortSamples(int32_t* a, uint8_t* z, uint8_t* cnt, int n) {
   for (int i = 1; i < n; i++) {
     int32_t v = a[i]; uint8_t vz = z[i], vc = cnt[i];
@@ -410,8 +420,8 @@ static void sortSamples(int32_t* a, uint8_t* z, uint8_t* cnt, int n) {
 static int32_t medianOfSorted(const int32_t* a, int n) {
   if (n <= 0) return 0;
   if (n & 1) return a[n / 2];
-  // Truncates toward zero, so an even split either side of true time does not
-  // manufacture a correction out of nothing.
+  // The division truncates toward zero. Therefore an equal split on the two
+  // sides of the true time does not create a correction from nothing.
   return (a[n / 2 - 1] + a[n / 2]) / 2;
 }
 
@@ -423,7 +433,7 @@ MeshObserver::ClockConsensus MeshObserver::clockConsensus(uint8_t min_sources) c
 
   int32_t d[CLOCK_SAMPLES];
   uint8_t z[CLOCK_SAMPLES];
-  uint8_t cnt[CLOCK_SAMPLES];   // nodes collapsed into each distinct value
+  uint8_t cnt[CLOCK_SAMPLES];   // the nodes collapsed into each distinct value
   int n = 0, nodes = 0;
   uint32_t now = millis();
   if (_clock == nullptr) return c;
@@ -432,18 +442,19 @@ MeshObserver::ClockConsensus MeshObserver::clockConsensus(uint8_t min_sources) c
   for (int i = 0; i < _num_clock_samples && n < CLOCK_SAMPLES; i++) {
     const ClockSample& s = _clock_samples[i];
     if (s.ms == 0) continue;
-    if ((uint32_t)(now - s.ms) > CLOCK_VOTE_MAX_AGE_MS) continue;   // stale
+    if ((uint32_t)(now - s.ms) > CLOCK_VOTE_MAX_AGE_MS) continue;   // too old
     if (s.hops > MAX_CLOCK_HOPS) continue;
 
     uint32_t elapsed_s = (uint32_t)(now - s.ms) / 1000;
     uint32_t theirs_now = s.their_ts + elapsed_s;
-    // A node that has not had its own clock set cannot help us set ours.
+    // A node whose own clock is not set cannot help us to set ours.
     if (theirs_now < CLOCK_SET_EPOCH) continue;
 
-    // A rate no crystal can produce means that clock is being SET, not
-    // drifting, and its current value says nothing about what time it is.
-    // Measured as their elapsed seconds against our elapsed milliseconds, so
-    // it stays honest even if our own clock was stepped in between.
+    // A rate that no crystal can produce means that something SETS that clock.
+    // The clock does not drift, and its present value says nothing about the
+    // true time. The code measures their elapsed seconds against our elapsed
+    // milliseconds. The measurement therefore stays correct even if a person
+    // stepped our own clock between the two readings.
     if (s.prev_ms != 0) {
       uint32_t span = (uint32_t)(s.ms - s.prev_ms);
       if (span >= DRIFT_MIN_SPAN_MS) {
@@ -454,17 +465,20 @@ MeshObserver::ClockConsensus MeshObserver::clockConsensus(uint8_t min_sources) c
       }
     }
 
-    // A relayed advert was stamped before it set off, so it reads late by
-    // however long the trip took. Undo that and the reading is as good as any
-    // other -- the residual scatter grows only as sqrt(hops), which is well
-    // inside the spread the mesh itself runs at, so nothing is down-weighted.
+    // The originator stamped a relayed advert before the advert started.
+    // Therefore the advert reads late by the duration of the journey. The code
+    // removes that error, and the reading is then as good as any other. The
+    // scatter that remains grows only as sqrt(hops). That value is well inside
+    // the spread of the mesh itself. Therefore the code gives every reading the
+    // same weight.
     int32_t corrected = (int32_t)(theirs_now - ours)
                       + (int32_t)(((uint32_t)s.hops * c.hop_delay_ms + 500) / 1000);
 
     nodes++;
-    // Collapse a cluster to a single vote. Nodes sharing an upstream sync
-    // source share its error exactly, so counting them individually lets one
-    // wrong sub-network outvote the rest of the mesh on population alone.
+    // Collapse a cluster to one vote. Nodes that share an upstream sync source
+    // share the exact error of that source. If the code counted them one by
+    // one, a single wrong sub-network could outvote the rest of the mesh on
+    // its size alone.
     bool dup = false;
     for (int j = 0; j < n; j++) {
       if (d[j] == corrected) {
@@ -478,19 +492,21 @@ MeshObserver::ClockConsensus MeshObserver::clockConsensus(uint8_t min_sources) c
     d[n] = corrected; z[n] = (s.hops == 0) ? 1 : 0; cnt[n] = 1; n++;
   }
 
-  /* Quorum counts NODES, not distinct values. Collapsing a cluster is right for
-     the statistics -- 41 nodes sharing one upstream error must not vote 41
-     times -- but it must not also decide whether we have enough sources: at
-     second granularity a handful of honest neighbours land on the same value
-     often enough that quorum-by-value would refuse perfectly good data. */
+  /* The quorum counts NODES, not distinct values. The collapse of a cluster is
+     correct for the statistics, because 41 nodes that share one upstream error
+     must not vote 41 times. But the collapse must not also decide whether we
+     have enough sources. Both clocks read to the second, so a small number of
+     correct neighbours land on the same value frequently. A quorum by value
+     would therefore refuse data that is completely good. */
   c.n_seen = (uint8_t)(nodes > 255 ? 255 : nodes);
   if (nodes < min_sources || n < 1) return c;
 
   sortSamples(d, z, cnt, n);
   int32_t med = medianOfSorted(d, n);
 
-  // Median absolute deviation: the spread of the honest majority, and unlike a
-  // standard deviation it does not care how extreme the outliers are.
+  // The median absolute deviation. It gives the spread of the correct
+  // majority. A standard deviation changes with the size of the outliers. This
+  // measure does not.
   int32_t dev[CLOCK_SAMPLES];
   uint8_t dz[CLOCK_SAMPLES], dc[CLOCK_SAMPLES];
   for (int i = 0; i < n; i++) {
@@ -499,13 +515,13 @@ MeshObserver::ClockConsensus MeshObserver::clockConsensus(uint8_t min_sources) c
   sortSamples(dev, dz, dc, n);
   int32_t mad = medianOfSorted(dev, n);
 
-  // 3 * 1.4826 * MAD is the three-sigma equivalent for a normal core.
+  // 3 * 1.4826 * MAD is the equivalent of three sigma for a normal core.
   int32_t limit = (int32_t)(((int64_t)mad * 4448) / 1000);
   if (limit < CLOCK_CLIP_FLOOR_S) limit = CLOCK_CLIP_FLOOR_S;
 
   int32_t kept[CLOCK_SAMPLES];
   int k = 0, kept_nodes = 0, zero_hop = 0;
-  for (int i = 0; i < n; i++) {          // d is sorted, so kept stays sorted
+  for (int i = 0; i < n; i++) {          // d is sorted, so kept also stays sorted
     int32_t v = d[i] - med;
     if (v < 0) v = -v;
     if (v <= limit) { kept[k++] = d[i]; kept_nodes += cnt[i]; if (z[i]) zero_hop++; }

@@ -3,59 +3,62 @@
 #include <stdint.h>
 
 /**
- * @brief  Resets the node if the main loop stops advancing.
+ * @brief  Resets the node if the main loop stops.
  *
- * Deliberately NOT the hardware WDT. The nRF52 watchdog cannot be stopped once
- * started and survives a soft reset, so it keeps counting after the app jumps
- * to the bootloader -- and a DFU over BLE takes around 200 seconds. Nothing in
- * the Arduino core feeds it, and the bootloader ships as a prebuilt binary, so
- * whether IT feeds one is unverifiable from here. Enabling the hardware
- * watchdog would therefore risk resetting a node mid-update, on hardware whose
- * only remote route in is that update.
+ * This is not the hardware WDT. You cannot stop the nRF52 watchdog after it
+ * starts. It also continues through a soft reset. Therefore it keeps count
+ * after the application starts the bootloader. A DFU over BLE needs
+ * approximately 200 seconds. Nothing in the Arduino core feeds the hardware
+ * watchdog. The bootloader is supplied as a prebuilt binary, so we cannot
+ * verify from here whether the bootloader feeds one. If we enabled the hardware
+ * watchdog, it could reset a node during an update. The only remote route into
+ * this hardware is that same update.
  *
- * This runs entirely inside the application. feed() is called from the main
- * loop; a dedicated FreeRTOS task at TASK_PRIO_NORMAL wakes once a second and
- * resets the node if that stamp has gone stale. NORMAL sits above the loop
- * (LOW), so it preempts a spinning loop and cannot be starved by it.
+ * This watchdog runs fully inside the application. The main loop calls feed().
+ * A dedicated FreeRTOS task at TASK_PRIO_NORMAL wakes one time each second. It
+ * resets the node if that stamp is too old. NORMAL is above the loop (LOW).
+ * Therefore the task preempts a loop that spins, and the loop cannot starve it.
  *
- * An earlier design checked only from BLE event context, so each subsystem
- * watched the other. That failed the one time it mattered -- a node hung with
- * BOTH stopped and no way in short of the reset button -- because whatever
- * wedges one can wedge the other. check() is still called from BLE context as
- * well, which is harmless and costs nothing, but the task is what makes the
- * guarantee.
+ * An earlier design made the check only from BLE event context, so each
+ * subsystem watched the other. That design failed the one time it was
+ * necessary. A node hung with BOTH parts stopped, and the reset button was the
+ * only way in. Whatever stops one part can also stop the other. BLE context
+ * still calls check(). This does no damage and has no cost, but the task is
+ * what makes the guarantee.
  *
- * What it still cannot catch is a spin at TASK_PRIO_HIGH (Bluefruit's own
- * tasks), which starves the loop AND this task. That is the remaining gap and
- * the hardware WDT is the only real answer to it -- not taken, for the DFU
- * reason above.
+ * This watchdog still cannot catch a spin at TASK_PRIO_HIGH (the tasks of
+ * Bluefruit). Such a spin starves the loop AND this task. That is the gap that
+ * remains. The hardware WDT is the only true answer to it. We do not use the
+ * hardware WDT, for the DFU reason above.
  *
- * ARMING: begin() as early in setup() as possible, with a generous boot limit,
- * because everything before it is unwatched -- radio_init(), the filesystem,
- * and the I2C probes all have unbounded waits. Once the main loop is genuinely
- * running, setLimit() tightens to the runtime limit. Arming tight from the
- * start would reset the node mid-setup on a slow-but-legitimate boot (a
- * LittleFS format, or the SoftDevice role ladder).
+ * ARMING: call begin() as early in setup() as you can, with a large boot limit.
+ * Everything before that call is unwatched. radio_init(), the filesystem and
+ * the I2C probes all have waits with no limit. After the main loop truly runs,
+ * setLimit() decreases the limit to the runtime value. A small limit from the
+ * start would reset the node during setup on a boot that is slow but correct.
+ * Examples are a LittleFS format, or the SoftDevice role ladder.
  */
 namespace LoopWatchdog {
 
-/** Arm with a stall limit in milliseconds. 0 disables. Safe to call twice --
- *  the task is created once; a later call only retunes the limit. */
+/** Arm the watchdog with a stall limit in milliseconds. A value of 0 disables
+ *  it. It is safe to call this two times. The code creates the task one time.
+ *  A later call only changes the limit. */
 void begin(uint32_t limit_ms);
 
-/** Retune the stall limit on an already-armed watchdog. 0 disables. */
+/** Change the stall limit on a watchdog that is already armed. A value of 0
+ *  disables it. */
 void setLimit(uint32_t limit_ms);
 
-/** Called from the main loop to say it is still running. */
+/** The main loop calls this to show that it still runs. */
 void feed();
 
-/** Called from another context; resets the node if the loop has stalled. */
+/** Another context calls this. It resets the node if the loop has stalled. */
 void check();
 
-/** Stall limit, for reporting. */
+/** The stall limit, for reports. */
 uint32_t limitMs();
 
-/** True only if the task actually exists and a non-zero limit is set. */
+/** True only if the task exists and the limit is not 0. */
 bool isArmed();
 
 }

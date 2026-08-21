@@ -50,16 +50,17 @@ public:
 
   void doResetAGC() override { sx126xResetAGC((SX126x *)_radio, getRxBoostedGainMode()); }
 
-  // The SX126x latches the coding rate out of the header of the frame it just
-  // decoded, and reports RADIOLIB_ERR_WRONG_MODEM in implicit-header mode, where
-  // no such field was transmitted.
+  // The SX126x holds the coding rate from the header of the frame that it
+  // decoded last. In implicit-header mode it reports RADIOLIB_ERR_WRONG_MODEM,
+  // because the sender transmitted no such field.
   uint8_t getLastRxCodingRate() const override {
     uint8_t raw = 0;
     if (((CustomSX1262 *)_radio)->getLoRaRxHeaderInfo(&raw, NULL) != RADIOLIB_ERR_NONE) return 0;
     return decodeHeaderCodingRate(raw);
   }
 
-  // The frame's own header said how heavily it was coded; bill it for that.
+  // The header of the frame gives the coding that the sender used. Price the
+  // frame at that coding rate.
   uint32_t getEstAirtimeForCR(int len_bytes, uint8_t cr) override {
     CustomSX1262* r = (CustomSX1262 *)_radio;
     return estAirtimeAtCR(len_bytes, cr, r->spreadingFactor, r->bandwidthKhz,

@@ -5,31 +5,32 @@
 /**
  * @brief  Two-LED radio activity indicator.
  *
- * The RAK3401 has exactly two LEDs, green (P0.35) and blue (P0.36), and no red.
- * Rather than try to mix a colour it cannot make, this uses the two axes it does
- * have: COLOUR says which radio, BRIGHTNESS says which direction.
+ * The RAK3401 has exactly two LEDs: green (P0.35) and blue (P0.36). It has no
+ * red LED. The board cannot mix a third colour, so this code uses the two axes
+ * that it does have. The COLOUR shows which radio. The BRIGHTNESS shows which
+ * direction.
  *
  *              dim = receive        bright = transmit
  *   blue       BLE bridge RX        BLE bridge TX
  *   green      LoRa RX              LoRa TX
  *
- *   heartbeat  both dim together, every 5s
+ *   heartbeat  both LEDs dim together, one time every 5s
  *
- * So a node quietly listening to LoRa ticks dim green; one relaying a flood
- * flashes bright green; and a bridged packet lights blue alongside it, because
- * bridging happens on the back of a LoRa transmit. Nothing is lit when idle
- * except the heartbeat.
+ * A node that listens quietly to LoRa gives dim green ticks. A node that
+ * relays a flood gives bright green flashes. A bridged packet makes blue at
+ * the same time, because the bridge sends its data with a LoRa transmit. When
+ * the node is idle, only the heartbeat is lit.
  *
- * Brightness is real hardware PWM (analogWrite), so levels do not depend on how
- * often loop() gets called. Nothing else in this firmware uses the nRF52 PWM
- * peripherals.
+ * The brightness uses true hardware PWM (analogWrite). Therefore the levels do
+ * not depend on how frequently the code calls loop(). Nothing else in this
+ * firmware uses the nRF52 PWM peripherals.
  */
 class StatusLed {
 public:
   /**
    * @param pin_blue   GPIO for the blue LED
    * @param pin_green  GPIO for the green LED
-   * @param on_state   1 if the LEDs are active-high, 0 if active-low
+   * @param on_state   1 if the LEDs are active-high, 0 if they are active-low
    */
   void begin(uint8_t pin_blue, uint8_t pin_green, uint8_t on_state = 1);
 
@@ -38,29 +39,32 @@ public:
   void notifyBleTx();    // bright blue
   void notifyBleRx();    // dim blue
 
-  /** Drive the LEDs. Call every main-loop iteration. */
+  /** Drive the LEDs. Call this on every main-loop iteration. */
   void loop();
 
   bool isEnabled() const { return _enabled; }
 
-  /* Static shims so code with no reference to the instance -- the mesh log
-     hooks, the BLE bridge -- can flash it. No-ops when unconfigured. */
+  /* Static shims. They let code that has no reference to the instance flash
+     the LEDs. Examples are the mesh log hooks and the BLE bridge. They do
+     nothing while the LEDs are not configured. */
   static void loraTx();
   static void loraRx();
   static void bleTx();
   static void bleRx();
 
 private:
-  /* A dim flash is much harder to notice than a bright one, so it is held a
-     little longer to even out how visible the two are. */
+  /* A dim flash is much more difficult to see than a bright one. Therefore the
+     code holds a dim flash for a longer time. The two flashes are then equally
+     easy to see. */
   static const uint16_t BRIGHT_MS = 40;
   static const uint16_t DIM_MS = 70;
 
   static const uint16_t HEARTBEAT_ON_MS = 70;
   static const uint32_t HEARTBEAT_PERIOD_MS = 5000;
 
-  /* Low enough to read clearly as "not a transmit", high enough to see across
-     a room. Raise DIM_LEVEL if the receive flashes are too subtle. */
+  /* This level is low enough to read clearly as "not a transmit". It is also
+     high enough to see across a room. Increase DIM_LEVEL if the receive
+     flashes are too difficult to see. */
   static const uint8_t DIM_LEVEL = 24;
   static const uint8_t BRIGHT_LEVEL = 255;
 
@@ -71,11 +75,12 @@ private:
   bool _active_high = true;
   uint8_t _pin_blue = 0, _pin_green = 0;
 
-  /* Last level written per pin, so a steady state does not re-run analogWrite
-     on every loop iteration. 0xFF means "nothing written yet". */
+  /* The last level written to each pin. A steady state then does not run
+     analogWrite again on every loop iteration. 0xFF means that the code has
+     written nothing to that pin. */
   uint8_t _lvl_blue = 0xFF, _lvl_green = 0xFF;
 
-  /* Deadline and the level to hold until it, per LED. */
+  /* For each LED: the deadline, and the level to hold until that deadline. */
   unsigned long _blue_until = 0, _green_until = 0;
   uint8_t _blue_level = 0, _green_level = 0;
 

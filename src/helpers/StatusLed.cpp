@@ -15,12 +15,13 @@ void StatusLed::begin(uint8_t pin_blue, uint8_t pin_green, uint8_t on_state) {
   _enabled = true;
   instance = this;
 
-  /* Both off to start. _lvl_* is 0xFF so these writes are not skipped. */
+  /* Set both LEDs off at the start. _lvl_* is 0xFF, so the code does not skip
+     these writes. */
   write(_pin_blue, _lvl_blue, 0);
   write(_pin_green, _lvl_green, 0);
 
-  /* Offset the first heartbeat so boot does not flash immediately -- a flash
-     during init would be indistinguishable from a fault indication. */
+  /* Delay the first heartbeat, so the boot does not flash immediately. A flash
+     during the init looks the same as a fault indication. */
   _last_hb = millis();
 }
 
@@ -34,8 +35,8 @@ void StatusLed::flash(unsigned long &until, uint8_t &level, uint8_t want_level, 
   unsigned long now = millis();
   bool still_lit = (long)(now - until) < 0;
 
-  /* A transmit must never be masked by a receive that happens to overlap, so
-     brightness only ever escalates while an LED is still lit. */
+  /* A receive that overlaps a transmit must never hide that transmit.
+     Therefore the brightness only increases while an LED is still lit. */
   level = (still_lit && level > want_level) ? level : want_level;
 
   unsigned long want_until = now + ms;
@@ -73,14 +74,15 @@ void StatusLed::loop() {
     _hb_until = now + HEARTBEAT_ON_MS;
   }
 
-  /* Signed comparison so the deadlines survive millis() wrapping. */
+  /* Use a signed comparison, so the deadlines stay correct when millis()
+     wraps. */
   bool hb = (long)(now - _hb_until) < 0;
 
   uint8_t blue = ((long)(now - _blue_until) < 0) ? _blue_level : 0;
   uint8_t green = ((long)(now - _green_until) < 0) ? _green_level : 0;
 
-  /* The heartbeat is a floor, not an override: real activity during the tick
-     still shows at its own brightness. */
+  /* The heartbeat sets a minimum level. It does not replace the level. True
+     activity during the tick still shows at its own brightness. */
   if (hb) {
     if (blue < DIM_LEVEL) blue = DIM_LEVEL;
     if (green < DIM_LEVEL) green = DIM_LEVEL;
