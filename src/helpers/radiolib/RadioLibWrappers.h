@@ -16,6 +16,20 @@ protected:
   PhysicalLayer* _radio;
   mesh::MainBoard* _board;
   uint32_t n_recv, n_sent, n_recv_errors;
+  // Receive failures split by cause. The mix is what carries the information:
+  // CRC-dominated points at collisions, header damage at a signal too weak or
+  // too interfered-with for even the PHY header to survive, and timeouts at a
+  // preamble that never turned into a frame.
+  uint32_t n_err_crc, n_err_header, n_err_timeout, n_err_other;
+  int16_t last_recv_error;   // RadioLib code of the most recent failure
+#if RX_ERR_PAYLOAD_BYTES > 0
+  // RadioLib fills the receive buffer BEFORE it reports a CRC mismatch, and says
+  // so ("to give user the option to keep them", SX126x::readData). So a damaged
+  // frame is recoverable, and a corrupt copy of a packet that arrives cleanly
+  // moments later in a burst is real evidence about what collided with what.
+  uint8_t last_err_payload[RX_ERR_PAYLOAD_BYTES];
+  uint8_t last_err_len;
+#endif
   int16_t _noise_floor, _threshold;
   bool _cad_enabled;
   uint16_t _num_floor_samples;
@@ -24,12 +38,15 @@ protected:
 
   void idle();
   void startRecv();
+  void recordRecvError(int16_t err, const uint8_t* bytes, int len);
   float packetScoreInt(float snr, int sf, int packet_len);
   virtual bool isReceivingPacket() =0;
   virtual void doResetAGC();
 
 public:
-  RadioLibWrapper(PhysicalLayer& radio, mesh::MainBoard& board) : _radio(&radio), _board(&board), _preamble_sf(0) { n_recv = n_sent = 0; }
+  RadioLibWrapper(PhysicalLayer& radio, mesh::MainBoard& board) : _radio(&radio), _board(&board), _preamble_sf(0) {
+    resetStats();
+  }
 
   void begin() override;
   virtual void powerOff() { _radio->sleep(); }
@@ -67,8 +84,24 @@ public:
 
   uint32_t getPacketsRecv() const { return n_recv; }
   uint32_t getPacketsRecvErrors() const { return n_recv_errors; }
+  uint32_t getRecvErrCrc() const { return n_err_crc; }
+  uint32_t getRecvErrHeader() const { return n_err_header; }
+  uint32_t getRecvErrTimeout() const { return n_err_timeout; }
+  uint32_t getRecvErrOther() const { return n_err_other; }
+  int16_t  getLastRecvError() const { return last_recv_error; }
+#if RX_ERR_PAYLOAD_BYTES > 0
+  const uint8_t* getLastRecvErrorPayload() const { return last_err_payload; }
+  uint8_t getLastRecvErrorLen() const { return last_err_len; }
+#endif
   uint32_t getPacketsSent() const { return n_sent; }
-  void resetStats() { n_recv = n_sent = n_recv_errors = 0; }
+  void resetStats() {
+    n_recv = n_sent = n_recv_errors = 0;
+    n_err_crc = n_err_header = n_err_timeout = n_err_other = 0;
+    last_recv_error = 0;
+#if RX_ERR_PAYLOAD_BYTES > 0
+    last_err_len = 0;
+#endif
+  }
 
   virtual float getLastRSSI() const override;
   virtual float getLastSNR() const override;
