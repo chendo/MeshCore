@@ -272,6 +272,15 @@ public:
   uint32_t txRefused() const { return _tx_refused; }
   // times the radio was re-initialised after going silent
   uint32_t radioRecoveries() const { return _radio_recoveries; }
+  // Time on air, transmit + receive, as the REAL radio saw it — node-wide by
+  // construction, since every identity's traffic passes through here. This is
+  // the input the node's LoRa watchdog reasons from (helpers/LoraWatchdog.h):
+  // a Dispatcher can only account for its own identity's share of transmit.
+  // Receives are priced at the CR out of the sender's header, transmits at the
+  // estimate the duty-cycle pool was charged.
+  uint32_t airtimeMs() const { return _tx_air_ms + _rx_air_ms; }
+  uint32_t txAirtimeMs() const { return _tx_air_ms; }
+  uint32_t rxAirtimeMs() const { return _rx_air_ms; }
   uint32_t msSinceLastRx() const { return _last_rx_ms ? (uint32_t)(millis() - _last_rx_ms) : 0; }
 
   // COLLISION AVOIDANCE IS A PROPERTY OF THE RADIO, NOT OF AN IDENTITY.
@@ -467,6 +476,7 @@ private:
   volatile uint32_t _tx_stuck = 0;
   volatile uint32_t _tx_refused = 0;
   volatile uint32_t _radio_recoveries = 0;
+  volatile uint32_t _tx_air_ms = 0, _rx_air_ms = 0;
   uint32_t _tx_started_ms = 0;
   uint32_t _last_rx_ms = 0;
   void (*_reinit_fn)() = nullptr;

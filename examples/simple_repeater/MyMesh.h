@@ -120,28 +120,6 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   ESPNowBridge bridge;
 #endif
 
-#ifdef LORA_WATCHDOG_MS
-  /* Repeaters have been found with a radio that sent and received nothing for
-     over an hour on correct config, and a reboot did not clear it. Nobody
-     noticed, because from the outside a quiet band and a dead radio look the
-     same. They are only distinguishable if the node makes its own traffic: a
-     zero-hop advert whose airtime we can then check. Staged from there --
-     probe, reinit, reboot. LORA_WATCHDOG_MS is the idle time that starts it. */
-  static const uint32_t LORA_IDLE_MS = LORA_WATCHDOG_MS;
-  static const uint32_t LORA_SELFTEST_GRACE_MS = 30000;  // time for a probe to reach the air
-  static const uint32_t LORA_CHECK_EVERY_MS = 30000;     // pacing: an unpaced retry has cost a node
-  enum LoraWd : uint8_t { LORA_WD_IDLE = 0, LORA_WD_TESTING, LORA_WD_REINITED };
-
-  unsigned long _lora_activity_ms = 0;   // when air time last moved
-  unsigned long _lora_last_air = 0;      // tx+rx air time at that moment
-  unsigned long _lora_next_check_ms = 0;
-  unsigned long _lora_test_started_ms = 0;
-  unsigned long _lora_test_air = 0;
-  uint8_t  _lora_wd_state = LORA_WD_IDLE;
-  uint32_t _lora_reinits = 0;
-  void loraWatchdog();
-#endif
-
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
   uint8_t handleLoginReq(const mesh::Identity& sender, const uint8_t* secret, uint32_t sender_timestamp, const uint8_t* data, bool is_flood);
   uint8_t handleAnonRegionsReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
@@ -206,6 +184,12 @@ public:
 
   void begin(FILESYSTEM* fs);
   void sendNodeDiscoverReq();
+
+  /* Push the one write this node defers -- the ACL -- before something outside
+     this class reboots the board. Public because the LoRa watchdog that decides
+     to do that is node-scoped (helpers/LoraWatchdog.h): on a multi-identity node
+     there is one of it, not one per identity. */
+  void flushPendingWrites();
   const char* getFirmwareVer() override { return FIRMWARE_VERSION; }
   const char* getBuildDate() override { return FIRMWARE_BUILD_DATE; }
   const char* getRole() override { return FIRMWARE_ROLE; }

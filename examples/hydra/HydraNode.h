@@ -30,6 +30,9 @@
 #include "ChatSlot.h"
 #include "HydraSlot.h"
 #include "RepeaterSlot.h"
+#ifdef LORA_WATCHDOG_MS
+  #include <helpers/LoraWatchdog.h>
+#endif
 
 #ifndef HYDRA_NUM_SLOTS
   #define HYDRA_NUM_SLOTS  2
@@ -71,6 +74,9 @@ private:
   RepeaterSlot    _slot0;
 #if HYDRA_NUM_CHAT_SLOTS > 0
   ChatSlot        _chat[HYDRA_NUM_CHAT_SLOTS];
+#endif
+#ifdef LORA_WATCHDOG_MS
+  LoraWatchdog    _lora_wd;   // node-scoped: one per board, not one per slot
 #endif
   HydraSlot*      _slots[HYDRA_NUM_SLOTS];
   SlotType        _cfg[HYDRA_NUM_SLOTS];   // configured type; _slots[i]->type() is the live one
