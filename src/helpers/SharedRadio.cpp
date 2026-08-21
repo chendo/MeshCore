@@ -98,7 +98,7 @@ void SharedRadioCore::pump() {
     // Read now: the register holds this frame's coding rate only until the next
     // one is decoded, and the identities take frames off the queue much later.
     enqueueRx(tmp, len, _real->getLastSNR(), _real->getLastRSSI(),
-              _rx_cr_fn ? _rx_cr_fn() : 0, 0);
+              _real ? _real->getLastRxCodingRate() : 0, 0);
     pktLogAdd(-1, tmp, len, (int8_t)(_real->getLastSNR() * 4), (int16_t)_real->getLastRSSI());
     _obs.observeRx(tmp, len, (int8_t)(_real->getLastSNR() * 4));    // peers, hops, types
     if (_frame_hook) _frame_hook(tmp, len, false, _real->getLastSNR(), _real->getLastRSSI());
@@ -370,12 +370,12 @@ void SharedRadioCore::pktLogAdd(int8_t dir, const uint8_t* bytes, int len, int8_
 #endif
     bool hdr_trustworthy = (flag != PKT_FLAG_RX_ERR) || (aux == PKT_RX_ERR_CRC);
     if (dir < 0) {
-      uint8_t rx_cr = (hdr_trustworthy && _rx_cr_fn != nullptr) ? _rx_cr_fn() : 0;
+      uint8_t rx_cr = (hdr_trustworthy && _real != nullptr) ? _real->getLastRxCodingRate() : 0;
       cr = (rx_cr >= 5 && rx_cr <= 8) ? rx_cr : 0;
     } else {
       cr = _cfg_cr;
     }
-    if (dir < 0 && cr != 0 && _rx_air_fn != nullptr) air = _rx_air_fn(len, cr);
+    if (dir < 0 && cr != 0 && _real != nullptr) air = _real->getEstAirtimeForCR(len, cr);
     else if (_real != nullptr) air = _real->getEstAirtimeFor(len);
   }
 

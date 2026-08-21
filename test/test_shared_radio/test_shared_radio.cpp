@@ -44,6 +44,8 @@ public:
   void onSendFinished() override { finish_calls++; }
   bool receiving = false;
   bool isReceiving() override { return receiving; }
+  uint8_t rx_cr = 0;                  // coding rate of the frame recvRaw() just handed out
+  uint8_t getLastRxCodingRate() const override { return rx_cr; }
   float getLastSNR() const override { return 5.5f; }
   float getLastRSSI() const override { return -88; }
   uint32_t getEstAirtimeFor(int len) override { return (uint32_t)len; }
@@ -381,7 +383,6 @@ TEST(SharedRadioTrace, FailedTransmitIsLoggedAndExcludedFromTotals) {
 // we receive at belongs to the sender, who puts it in the LoRa header. Mixing
 // the two up would quietly hide the interesting case — a neighbour on a
 // different preset — behind our own setting.
-uint8_t g_fake_rx_cr = 0;
 
 // A port's Dispatcher reads the coding rate off the packet it was just handed,
 // but the modem's register has long since moved on to whatever arrived after —
@@ -389,15 +390,14 @@ uint8_t g_fake_rx_cr = 0;
 // is holding" are rarely the same one.
 TEST(SharedRadioCodingRate, EachPortReportsTheCodingRateOfTheFrameItTook) {
   Fixture f;
-  f.core.setRxCodingRateFn([]() -> uint8_t { return g_fake_rx_cr; });
   uint8_t buf[MAX_TRANS_UNIT];
 
-  g_fake_rx_cr = 8;
+  f.radio.rx_cr = 8;
   f.deliver({0x11});
   EXPECT_EQ(1, take(f.a, buf));
   EXPECT_EQ(8, f.a.getLastRxCodingRate());
 
-  g_fake_rx_cr = 6;              // a second sender, while b is still behind
+  f.radio.rx_cr = 6;              // a second sender, while b is still behind
   f.deliver({0x22});
   EXPECT_EQ(1, take(f.b, buf));
   EXPECT_EQ(8, f.b.getLastRxCodingRate()) << "b is holding the first frame, not the newest";
@@ -407,7 +407,6 @@ TEST(SharedRadioCodingRate, EachPortReportsTheCodingRateOfTheFrameItTook) {
 
 TEST(SharedRadioCodingRate, AnUnreadableCodingRateReachesThePortAsUnknown) {
   Fixture f;
-  f.core.setRxCodingRateFn([]() -> uint8_t { return 0; });
   uint8_t buf[MAX_TRANS_UNIT];
   f.deliver({0x11});
   take(f.a, buf);
@@ -440,8 +439,7 @@ TEST(SharedRadioCodingRate, APortPricesAirtimeAtTheRateItIsGiven) {
 TEST(SharedRadioTrace, ReceivesCarryTheSendersCodingRateAndTransmitsOurs) {
   Fixture f;
   f.core.setCodingRate(5);
-  f.core.setRxCodingRateFn([]() -> uint8_t { return g_fake_rx_cr; });
-  g_fake_rx_cr = 8;                        // the sender is running 4/8, we are not
+  f.radio.rx_cr = 8;                        // the sender is running 4/8, we are not
   f.deliver({0x10, 0x20});
   uint8_t msg[] = {0x30};
   f.a.startSendRaw(msg, 1);
@@ -459,9 +457,7 @@ TEST(SharedRadioTrace, ReceivesCarryTheSendersCodingRateAndTransmitsOurs) {
 TEST(SharedRadioTrace, ReceivedAirtimeIsPricedAtTheSendersCodingRate) {
   Fixture f;
   f.core.setCodingRate(5);
-  f.core.setRxCodingRateFn([]() -> uint8_t { return g_fake_rx_cr; });
-  f.core.setRxAirtimeFn([](int len, uint8_t cr) -> uint32_t { return (uint32_t)len * cr; });
-  g_fake_rx_cr = 8;
+  f.radio.rx_cr = 8;
   f.deliver({1, 2, 3, 4});
   uint8_t msg[] = {1, 2, 3, 4};
   f.a.startSendRaw(msg, 4);
@@ -478,8 +474,7 @@ TEST(SharedRadioTrace, CodingRateIsUnknownRatherThanGuessedAt) {
   f.core.setCodingRate(9);                 // not a 4/x denominator: refuse it
   EXPECT_EQ(0, f.core.codingRate());
   f.core.setCodingRate(7);
-  f.core.setRxCodingRateFn([]() -> uint8_t { return g_fake_rx_cr; });
-  g_fake_rx_cr = 0;                        // radio could not report one
+  f.radio.rx_cr = 0;                        // radio could not report one
   f.deliver({0x10});
 
   PktLogEntry entries[SharedRadioCore::PKT_LOG_SIZE];
@@ -571,7 +566,7 @@ TEST(SharedRadioCorrupt, ACrcFailureKeepsItsCodingRateButAHeaderFailureCannot) {
     Fixture f;
     g_bad_payload = damaged; g_bad_len = sizeof(damaged);
     g_err_count = 0; g_err_code = code;
-    f.core.setRxCodingRateFn([]() -> uint8_t { return 8; });   // stale-but-present
+    f.radio.rx_cr = 8;                 // stale-but-present in the modem register
     f.core.setRxErrorCounter([]() -> uint32_t { return g_err_count; },
                              []() -> int16_t { return g_err_code; },
                              []() -> const uint8_t* { return g_bad_payload; },
