@@ -88,6 +88,21 @@ public:
    * and overwritten by the next frame decoded.
    */
   virtual uint8_t getLastRxCodingRate() const { return 0; }
+
+  /**
+   * \brief  estimated air-time for 'len_bytes' had it been sent at coding rate
+   *        'cr' (the 4/x denominator, 5..8), in milliseconds.
+   * \param  cr  0 where the sender's coding rate is unknown
+   *
+   * A frame occupies the channel for as long as ITS sender's coding rate made
+   * it, which in explicit-header mode need not be ours: 4/8 spends 60% longer
+   * than 4/5 on the same bytes. Radios that cannot reprice fall back to our own
+   * figure, which is also what an unknown 'cr' must cost -- a guess would be
+   * worse than the number we already have.
+  */
+  virtual uint32_t getEstAirtimeForCR(int len_bytes, uint8_t cr) {
+    return getEstAirtimeFor(len_bytes);
+  }
 };
 
 /**

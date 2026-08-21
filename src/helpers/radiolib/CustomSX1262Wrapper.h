@@ -58,4 +58,13 @@ public:
     if (((CustomSX1262 *)_radio)->getLoRaRxHeaderInfo(&raw, NULL) != RADIOLIB_ERR_NONE) return 0;
     return decodeHeaderCodingRate(raw);
   }
+
+  // The frame's own header said how heavily it was coded; bill it for that.
+  uint32_t getEstAirtimeForCR(int len_bytes, uint8_t cr) override {
+    CustomSX1262* r = (CustomSX1262 *)_radio;
+    return estAirtimeAtCR(len_bytes, cr, r->spreadingFactor, r->bandwidthKhz,
+                          r->preambleLengthLoRa,
+                          r->headerType == RADIOLIB_SX126X_LORA_HEADER_IMPLICIT,
+                          (bool)r->crcTypeLoRa, (bool)r->ldrOptimize);
+  }
 };
