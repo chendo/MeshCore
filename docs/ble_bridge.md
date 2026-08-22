@@ -146,6 +146,10 @@ pio run -e RAK_3401_repeater_bridge_ble -t upload
 pio run -e ThinkNode_M1_repeater_bridge_ble -t upload   # the ThinkNode M1
 ```
 
+Both envs belong to this fork and are defined in `variants/hydra_rak3401` and
+`variants/hydra_m1`. The board definitions under `variants/rak3401` and
+`variants/thinknode_m1` are upstream's and carry no configuration of ours.
+
 Both ends must run the same build. The framing is part of the firmware.
 
 ### 2. Set a shared secret, and do this first
@@ -236,11 +240,11 @@ cannot be connected to.
 
 ## Cost
 
-Measured against `RAK_3401_repeater` on the same tree:
+Measured against `RAK_3401_repeater_hardened` on the same tree:
 
 | | Flash | RAM |
 |---|---|---|
-| `RAK_3401_repeater` | 380,092 | 33,048 |
+| `RAK_3401_repeater_hardened` | 380,092 | 33,048 |
 | `RAK_3401_repeater_bridge_ble` | 395,848 | 41,200 |
 | **Cost of the bridge** | **+15,756** | **+8,152** |
 
@@ -249,8 +253,8 @@ SoftDevice:
 
 | | Flash | RAM |
 |---|---|---|
-| `ThinkNode_M1_repeater` | 304,864 | 30,768 |
-| `ThinkNode_M1_repeater_bridge_ble` | 320,428 | 38,904 |
+| `ThinkNode_M1_repeater_hardened` | 304,848 | 30,768 |
+| `ThinkNode_M1_repeater_bridge_ble` | 320,412 | 38,904 |
 | **Cost of the bridge** | **+15,564** | **+8,136** |
 
 For comparison, the two-transport experiment on `origin/ble-clean`, which also
