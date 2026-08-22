@@ -11,13 +11,14 @@
 // The slot has no companion interface, and it answers no messages. The
 // callbacks for a message and for an ack are empty on purpose.
 //
-// SLOT_ROOM IS NOT COMPLETE. A room slot gets a real, private ClientACL and a
-// real post buffer. It adverts as ADV_TYPE_ROOM. So the membership and the RAM
-// accounting behave as they will in the finished code. The room PROTOCOL is not
-// written. That protocol is the delivery of posts, the sync of clients and the
-// retry of pushes. The function onCommandDataRecv is still empty.
+// A room slot gets a real, private ClientACL, a real post buffer and the room
+// server protocol. RoomMesh.h holds that protocol, and RoomSync.h holds the part
+// of it that a host test can run. A room slot never reaches onCommandDataRecv
+// below: that callback belongs to the contact path of a chat client, and a room
+// answers one level down, at onPeerDataRecv. RoomMesh.h says why.
 
 #include "HydraSlot.h"
+#include "RoomMesh.h"
 #include "RoomStore.h"
 #include "SlotMeshTables.h"
 #include <helpers/AdvertDataHelpers.h>
@@ -40,7 +41,7 @@
   #define HYDRA_CHAT_ADVERT_MINS  60
 #endif
 
-class ChatMesh : public BaseChatMesh {
+class ChatMesh : public RoomMesh {
   char _name[SLOT_NAME_MAX];
   unsigned long _next_advert;
   uint8_t _advert_mins;
@@ -78,7 +79,7 @@ public:
       // not useful. The operator does not have to know to enable discovery.
       // The value _advert_mins limits the airtime. It is the setting that
       // matters.
-      : BaseChatMesh(radio, ms, rng, rtc, mgr, tables), _next_advert(0),
+      : RoomMesh(radio, ms, rng, rtc, mgr, tables), _next_advert(0),
         _advert_mins(HYDRA_CHAT_ADVERT_MINS), _flood(true), _adv_type(ADV_TYPE_CHAT) {
     _name[0] = 0;
   }
@@ -109,7 +110,7 @@ public:
   }
 
   void loop() {
-    BaseChatMesh::loop();
+    RoomMesh::loop();
     // this is zero until the first advert. A slot that never started stays quiet.
     if (_advert_mins > 0 && _next_advert != 0 && millisHasNowPassed(_next_advert)) {
       advertise(0, _flood);
@@ -183,6 +184,7 @@ public:
       // changes its type keeps its members.
       snprintf(_acl_file, sizeof(_acl_file), "/acl%s", id_name);
       _room->load(_fs, _mesh.self_id, _acl_file);
+      _mesh.setRoom(_room, this);   // from here the mesh answers as a room server
     }
 
     // This calls only the base begin(). MyMesh::begin() in the repeater sends
@@ -215,12 +217,15 @@ public:
     // ACL writes. The reason is the same. The write blocks the loop for ~1.6 s
     // and wears the flash. So a series of `setperm` commands costs one write,
     // and not one write for each command.
+    if (_room && _room->acl_dirty) { _room->acl_dirty = false; markAclDirty(); }
     if (_acl_dirty_at && (long)(millis() - _acl_dirty_at) >= 0) flushPendingWrites();
   }
 
   void handleCommand(uint32_t sender_timestamp, char* command,
                      char* reply, size_t reply_sz) override {
     if (!_begun) { StrHelper::strncpy(reply, "slot not running", reply_sz); return; }
+
+    if (_mesh.handleRoomCommand(sender_timestamp, command, reply, reply_sz)) return;
 
     if (strcmp(command, "advert") == 0) {
       _mesh.advertise(0, false);
@@ -260,8 +265,9 @@ public:
       reply[0] = 0;
     } else if (strcmp(command, "posts") == 0) {
       if (_room == nullptr) { StrHelper::strncpy(reply, "ERR: not a room slot", reply_sz); return; }
-      snprintf(reply, reply_sz, "posts: %u held of %d (RAM only, lost on reboot); members %d",
-               (unsigned)_room->num_posted, MAX_UNSYNCED_POSTS, _room->acl.getNumClients());
+      snprintf(reply, reply_sz, "posts: %u stored, %u pushed; buffer %d (RAM only, lost on reboot); members %d",
+               (unsigned)_room->ring.num_posted, (unsigned)_room->ring.num_post_pushes,
+               MAX_UNSYNCED_POSTS, _room->acl.getNumClients());
     } else {
       StrHelper::strncpy(reply, "?", reply_sz);
     }

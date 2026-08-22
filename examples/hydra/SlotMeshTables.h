@@ -10,14 +10,25 @@
 #include <Mesh.h>
 #include <string.h>
 
+// The dedup counters sit in a base class that is NOT a template. A caller that
+// only holds a mesh::MeshTables* can then read them without knowing the size of
+// the table. The room server status reply needs exactly that.
+class DupCountingTables : public mesh::MeshTables {
+protected:
+  uint32_t _direct_dups, _flood_dups;
+public:
+  DupCountingTables() : _direct_dups(0), _flood_dups(0) {}
+  uint32_t getNumDirectDups() const { return _direct_dups; }
+  uint32_t getNumFloodDups() const { return _flood_dups; }
+};
+
 template <int N_HASHES>
-class SlotMeshTables : public mesh::MeshTables {
+class SlotMeshTables : public DupCountingTables {
   uint8_t _hashes[N_HASHES * MAX_HASH_SIZE];
   int _next_idx;
-  uint32_t _direct_dups, _flood_dups;
 
 public:
-  SlotMeshTables() : _next_idx(0), _direct_dups(0), _flood_dups(0) {
+  SlotMeshTables() : _next_idx(0) {
     memset(_hashes, 0, sizeof(_hashes));
   }
 
@@ -49,7 +60,4 @@ public:
       if (memcmp(hash, sp, MAX_HASH_SIZE) == 0) { memset(sp, 0, MAX_HASH_SIZE); break; }
     }
   }
-
-  uint32_t getNumDirectDups() const { return _direct_dups; }
-  uint32_t getNumFloodDups() const { return _flood_dups; }
 };
