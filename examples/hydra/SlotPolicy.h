@@ -180,3 +180,64 @@ inline bool slotVerbIsNodeLevel(const char* verb) {
 inline const char* slotNodeLevelError() {
   return "ERR: node-level setting - use it unqualified, not under a slot";
 }
+
+// -------------------------------------------------------------- advert phase
+//
+// Every enabled slot floods an advert (decision C), and each slot runs its own
+// interval. Nothing else spreads them, so all the identities on one board
+// transmit together, and they do it again at every interval boundary. That
+// costs more than it looks. The board has one half-duplex antenna, so the
+// adverts contend with each other and with the routed traffic of slot 0, which
+// has priority. A flood advert also spends airtime on every node that hears
+// it. And the duty-cycle pool of SharedRadioCore drains in a lump.
+//
+// The phase of a slot comes from the public key of its identity, and not from
+// the slot index. IdentityStore holds that key, so the phase is the same after
+// a reboot. The key is also unique to the identity, so two hydra nodes in
+// range spread against each other as well as against themselves. An index
+// would give every node the same set of phases, and a site that comes back
+// after a power cut would put all of them in step.
+
+// The first 2 bytes of a public key, as a fraction of 65536. A key is random,
+// so this value is flat across the range.
+inline uint16_t advertPhaseFraction(const uint8_t* pub_key, size_t key_len) {
+  if (pub_key == nullptr || key_len < 2) return 0;
+  return (uint16_t)(((uint16_t)pub_key[0] << 8) | pub_key[1]);
+}
+
+// The point of this slot in a window, from 0 up to window_ms - 1.
+inline uint32_t advertPhaseWithin(uint32_t window_ms, const uint8_t* pub_key, size_t key_len) {
+  if (window_ms == 0) return 0;
+  return (uint32_t)(((uint64_t)advertPhaseFraction(pub_key, key_len) * window_ms) >> 16);
+}
+
+// A jitter of a few seconds on each cycle. Two nodes whose adverts collide keep
+// the same period forever, so without this they collide again on every cycle.
+// The anchor below removes the jitter of the last cycle, so the phase never
+// walks away from the key.
+#ifndef HYDRA_ADVERT_JITTER_MS
+  #define HYDRA_ADVERT_JITTER_MS  30000
+#endif
+
+// The delay from now until the next advert of this slot, in milliseconds.
+// A result of 0 means that the slot must not advert at all. An interval of 0
+// minutes is the only way to get that result, because a live interval always
+// gives at least half of itself.
+inline uint32_t nextAdvertDelay(uint32_t now, uint8_t interval_mins,
+                                const uint8_t* pub_key, size_t key_len,
+                                uint32_t jitter_ms) {
+  uint32_t interval = (uint32_t)interval_mins * 60000UL;
+  if (interval == 0) return 0;
+  uint32_t offset = advertPhaseWithin(interval, pub_key, key_len);
+  // This puts the advert on the next point of the cycle that belongs to the
+  // slot. It does not add the offset to each interval, because that would only
+  // make the interval longer. It also pulls the phase back to the key after a
+  // jitter. Every term stays below 2 intervals, so nothing here overflows.
+  uint32_t phase = now % interval;
+  uint32_t delay = (offset + interval - phase) % interval;
+  if (delay == 0) delay = interval;   // a slot that is on its phase waits a whole cycle
+  // A cycle that is almost over gives a very short delay. Two adverts close
+  // together are the fault that this code removes, so wait for the cycle after.
+  if (delay < interval / 2) delay += interval;
+  return delay + jitter_ms;
+}
