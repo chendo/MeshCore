@@ -51,16 +51,17 @@
  * A stranger can therefore make us open a connection, and it can dial us. The
  * rules are the same both ways. It gets no data, and:
  *  - a link whose first frame fails the tag is dropped at once;
- *  - a link that writes and never authenticates is dropped after
- *    BleLink::AUTH_GRACE_MS, and one that authenticates and then goes silent
- *    after BleLink::LINK_IDLE_LIMIT_MS;
+ *  - a link that never authenticates is dropped after BleLink::AUTH_GRACE_MS,
+ *    whether it wrote something or nothing, and one that authenticates and then
+ *    goes silent after BleLink::LINK_IDLE_LIMIT_MS;
  *  - either way the address goes on the deny list for BleDenyList::DENY_MS,
  *    which gates a dial out and an inbound adoption alike.
  *
  * That deny list is load-bearing. There are only three central slots on a
  * RAK3401 (BleLink::MAX_LINKS) and one inbound slot, so slot exhaustion is a
- * real denial of service. See docs/ble_bridge.md for the one gap that is left:
- * a peer that connects inward and writes nothing is invisible to the bridge.
+ * real denial of service. A peer that dials in and writes nothing meets the
+ * same rules, because BleLink::loop() sweeps the peripheral connections. See
+ * BLE_LINK_SILENT_SWEEP for the one build that must switch that sweep off.
  *
  * Configuration:
  *  - put ${bridge.ble} in the env's build_flags, and the .cpp files in its
