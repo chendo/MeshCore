@@ -146,12 +146,15 @@ void BLEBridge::onBeacon(const ble_gap_addr_t& addr, int8_t rssi) {
 }
 
 bool BLEBridge::allow_cb(const ble_gap_addr_t& addr) {
-  if (_instance == nullptr) return true;
+  return _instance == nullptr || _instance->onInboundAdopt(addr);
+}
+
+bool BLEBridge::onInboundAdopt(const ble_gap_addr_t& addr) {
   /* A peer that dials IN passes the same deny list as one that we dial. It is
      refused for the whole deny period, so a stranger cannot fail the group tag
      and come straight back to the single inbound slot. */
-  if (_instance->_deny.isDenied(addr.addr, millis())) {
-    _instance->_num_inbound_refused++;
+  if (_deny.isDenied(addr.addr, millis())) {
+    _num_inbound_refused++;
     BRIDGE_DEBUG_PRINTLN("BLE: inbound peer is denied, disconnecting\n");
     return false;
   }

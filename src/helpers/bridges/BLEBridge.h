@@ -200,6 +200,8 @@ private:
   static bool allow_cb(const ble_gap_addr_t& addr);
   void onLinkFrame(const uint8_t* data, uint16_t len, uint8_t link_idx);
   void onBeacon(const ble_gap_addr_t& addr, int8_t rssi);
+  /** @returns false to refuse a peer that dialled in. */
+  bool onInboundAdopt(const ble_gap_addr_t& addr);
   void sendHeartbeat();
   /** Map a link index onto a LinkStamp slot. */
   LinkStamp* stampFor(uint8_t link_idx);
