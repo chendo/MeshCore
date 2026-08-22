@@ -143,6 +143,9 @@ void HydraNode::begin(FILESYSTEM* fs) {
   // physical node in the same room would hear.
   _core.setLoopback(true);
   _core.observer().setClock(&rtc_clock);   // the advert clocks of peers then have a meaning
+#ifdef CLOCK_CONVERGE_MS
+  _clock_prev_ms = millis();   // so the first pass counts from here, not from 0
+#endif
 
   // The code seeds the RNG once, for the whole node. StdRNG is a front end for
   // the global Arduino PRNG. A seed for each slot would seed the same generator
@@ -258,6 +261,9 @@ void HydraNode::loop() {
   _core.pump();
 #ifdef LORA_WATCHDOG_MS
   _lora_wd.loop();   // this paces itself. See LoraWatchdog::CHECK_EVERY_MS.
+#endif
+#ifdef CLOCK_CONVERGE_MS
+  loopClockConverge();   // this paces itself too
 #endif
 }
 
@@ -395,6 +401,19 @@ void HydraNode::handleCommand(uint32_t sender_timestamp, char* command,
     formatSlotTable(reply, reply_sz);
     return;
   }
+#ifdef CLOCK_CONVERGE_MS
+  if (strcmp(command, "clocks") == 0 || strncmp(command, "clocks ", 7) == 0) {
+    const char* arg = (command[6] == ' ') ? &command[7] : "";
+    if (strcmp(arg, "on") == 0) {
+      _clock_converge = true;
+      _clock_due_ms = 0;             // look at the neighbourhood on the next pass
+    } else if (strcmp(arg, "off") == 0) {
+      _clock_converge = false;
+    }
+    reportClocks(reply, reply_sz);
+    return;
+  }
+#endif
   if (strcmp(command, "peers") == 0) {
     /* Decision E. This is a map of who can hear whom in the neighbourhood. It
        comes from third parties who never agreed to be in it. So it does not go
@@ -700,4 +719,118 @@ bool HydraNode::setSlotPrivateKey(int idx, const char* hex, char* reply, size_t 
   }
   return true;
 }
+#endif
+
+// -------------------------------------------------------- clock convergence
+
+#ifdef CLOCK_CONVERGE_MS
+
+void HydraNode::loopClockConverge() {
+  const uint32_t now_ms = millis();
+  /* Every counter below advances from the DIFFERENCE between two passes, never
+     from an absolute millis() reading. An unsigned difference is correct across
+     the wrap at 49.7 days, and this node stays up for longer than that. A hold
+     of 7 days measured against an absolute reading would look unexpired again
+     the moment the counter passed zero. */
+  const uint32_t delta = mesh::clockPollDelta(now_ms, _clock_prev_ms);
+  _clock_prev_ms = now_ms;
+
+  _clock_since_move_ms = mesh::clockAdvanceElapsed(_clock_since_move_ms, delta);
+  // The hold runs down whether or not convergence is on, so that turning it on
+  // does not revive a hold that has already expired.
+  _clock_admin_hold_ms = mesh::clockReduceHold(_clock_admin_hold_ms, delta);
+  _clock_due_ms = mesh::clockReduceHold(_clock_due_ms, delta);
+
+  /* Did anything other than convergence move the clock? See
+     CLOCK_EXTERNAL_SET_S. The test compares how far the clock moved since the
+     PREVIOUS PASS with how far it should have moved. The expectation resets to
+     the true reading on every pass, so a hardware RTC that runs at 100 ppm
+     against millis() never accumulates its way into a false detection, and a
+     pass that arrives late is still measured correctly. */
+  const uint32_t reads = rtc_clock.getCurrentTime();
+  if (_clock_expect_ok) {
+    const int32_t moved = (int32_t)(reads - _clock_expect_s);
+    const int32_t owed  = (int32_t)(delta / 1000);
+    const int32_t jump  = moved - owed;
+    if (jump > CLOCK_EXTERNAL_SET_S || jump < -CLOCK_EXTERNAL_SET_S) {
+      _clock_admin_hold_ms = mesh::CLOCK_ADMIN_HOLD_MS;
+      _clock_admin_sets++;
+    }
+  } else {
+    _clock_expect_ok = true;         // the first pass only learns the value
+  }
+  _clock_expect_s = reads;
+
+  if (!_clock_converge || _clock_due_ms > 0) return;
+
+  const bool unset = mesh::clockIsUnset(reads);
+  _clock_due_ms = unset ? CLOCK_CONVERGE_FAST_MS : CLOCK_CONVERGE_MS;
+
+  mesh::ClockSample samples[mesh::CLOCK_POLICY_MAX_SAMPLES];
+  const int n = _core.observer().clockSamples(samples, mesh::CLOCK_POLICY_MAX_SAMPLES);
+  const mesh::ClockEstimate est =
+      mesh::clockEstimate(samples, n,
+                          unset ? mesh::CLOCK_UNSET_MIN_SOURCES : mesh::CLOCK_MIN_SOURCES,
+                          _core.observer().hopDelayMs());
+
+  mesh::ClockContext ctx;
+  ctx.now_s = reads;
+  ctx.since_move_ms = _clock_since_move_ms;
+  ctx.admin_hold_ms = _clock_admin_hold_ms;
+  /* The newest timestamp this node has put on the air. clockDecide will not
+     take the clock to or below it, because a peer drops an advert that is not
+     newer than the mark it already holds for us. */
+  ctx.sent_high_s = _core.observer().sentHighWater();
+
+  const mesh::ClockDecision d = mesh::clockDecide(est, ctx);
+  _clock_last_hold = (uint8_t)d.hold;
+  if (d.action == mesh::CLOCK_HOLD) return;
+
+  rtc_clock.setCurrentTime(mesh::clockApply(ctx.now_s, d.apply_s));
+  // Move the expectation with it, or the next pass reads this as an admin set.
+  _clock_expect_s = rtc_clock.getCurrentTime();
+  _clock_last_adj_s = d.apply_s;
+  _clock_since_move_ms = 0;
+  if (d.action == mesh::CLOCK_STEP) _clock_steps++; else _clock_slews++;
+}
+
+static const char* clockHoldName(uint8_t h) {
+  switch (h) {
+    case mesh::CLOCK_HOLD_NO_QUORUM: return "no-quorum";
+    case mesh::CLOCK_HOLD_IN_BAND:   return "in-band";
+    case mesh::CLOCK_HOLD_ADMIN:     return "admin";
+    case mesh::CLOCK_HOLD_REPLAY:    return "replay-floor";
+    case mesh::CLOCK_HOLD_RATE:      return "rate";
+    default:                         return "-";
+  }
+}
+
+void HydraNode::reportClocks(char* reply, size_t reply_sz) {
+  const uint32_t reads = rtc_clock.getCurrentTime();
+  const bool unset = mesh::clockIsUnset(reads);
+
+  mesh::ClockSample samples[mesh::CLOCK_POLICY_MAX_SAMPLES];
+  const int n = _core.observer().clockSamples(samples, mesh::CLOCK_POLICY_MAX_SAMPLES);
+  const mesh::ClockEstimate est =
+      mesh::clockEstimate(samples, n,
+                          unset ? mesh::CLOCK_UNSET_MIN_SOURCES : mesh::CLOCK_MIN_SOURCES,
+                          _core.observer().hopDelayMs());
+
+  const uint32_t mark = _core.observer().sentHighWater();
+  snprintf(reply, reply_sz,
+           "clocks %s%s epoch %lu; %+ld from %u/%u src (%u direct, %u%%, spread %ld); "
+           "hop %ums/%lup; step %lu slew %lu last %+ld; hold %lum sets %lu; mark %+ld; %s",
+           _clock_converge ? "on" : "off", unset ? " UNSET" : "",
+           (unsigned long)reads,
+           (long)est.offset_s, est.n_used, est.n_seen, est.n_direct,
+           est.agree_pct, (long)est.spread_s,
+           _core.observer().hopDelayMs(), (unsigned long)_core.observer().hopDelayPairs(),
+           (unsigned long)_clock_steps, (unsigned long)_clock_slews,
+           (long)_clock_last_adj_s,
+           (unsigned long)(_clock_admin_hold_ms / 60000UL),
+           (unsigned long)_clock_admin_sets,
+           (long)(mark == 0 ? 0 : (int32_t)(mark - reads)),
+           clockHoldName(_clock_last_hold));
+}
+
 #endif
