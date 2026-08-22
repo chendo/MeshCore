@@ -56,12 +56,28 @@ static std::vector<uint8_t> payloadOf(size_t len, uint8_t seed = 1) {
   return p;
 }
 
+/* The bridge's deny list, as BleLink sees it: one address, and a switch. */
+static ble_gap_addr_t g_denied;
+static bool g_deny_on = false;
+static uint32_t g_refused = 0;
+
+static bool allow_handler(const ble_gap_addr_t& addr) {
+  if (g_deny_on && memcmp(addr.addr, g_denied.addr, 6) == 0) {
+    g_refused++;
+    return false;
+  }
+  return true;
+}
+
 class BleLinkTest : public ::testing::Test {
 protected:
   void SetUp() override {
     BleMock::reset();
     g_rx.clear();
-    link.begin(rx_handler, self_addr());
+    g_deny_on = false;
+    g_refused = 0;
+    memset(&g_denied, 0, sizeof(g_denied));
+    link.begin(rx_handler, self_addr(), allow_handler);
   }
   void TearDown() override { link.end(); }
 
@@ -187,4 +203,114 @@ TEST_F(BleLinkTest, aReconnectDoesNotResumeAPartlyDrainedQueue) {
   BleMock::completeDial();
   link.loop();
   EXPECT_TRUE(BleMock::sink[0].empty());
+}
+
+/* ---- The inbound peer --------------------------------------------------- */
+
+/* A peer that dials US. It holds the single inbound slot, so every rule that
+   protects an outward slot has to protect this one too. */
+static ble_gap_addr_t inbound_addr() { return addrEndingIn(0x09); }
+
+/** Open a connection and send one good frame over it, which adopts the peer. */
+static uint16_t bringUpInbound(const ble_gap_addr_t& peer) {
+  uint16_t h = BleMock::openConn(peer);
+  std::vector<uint8_t> f = framed(payloadOf(16));
+  BleMock::writeFrom(h, f.data(), (uint16_t)f.size());
+  return h;
+}
+
+TEST_F(BleLinkTest, anInboundPeerThatGoesQuietLosesTheSlot) {
+  bringUpInbound(inbound_addr());
+  link.markAuthed(BleLink::INBOUND_LINK);
+
+  ble_gap_addr_t a;
+  ASSERT_TRUE(link.getInboundAddr(a));
+
+  /* Authenticated, and then silent. The heartbeat is 15s, so a minute of
+     nothing is a dead peer and not a lull. */
+  BleMock::advance(61000);
+  link.loop();
+  EXPECT_FALSE(link.getInboundAddr(a));
+  EXPECT_EQ(link.numUp(), 0);
+}
+
+TEST_F(BleLinkTest, anInboundPeerThatKeepsTalkingKeepsTheSlot) {
+  uint16_t h = bringUpInbound(inbound_addr());
+  link.markAuthed(BleLink::INBOUND_LINK);
+
+  for (int i = 0; i < 6; i++) {
+    BleMock::advance(15000);                 // one heartbeat interval
+    std::vector<uint8_t> f = framed(payloadOf(16));
+    BleMock::writeFrom(h, f.data(), (uint16_t)f.size());
+    link.loop();
+  }
+
+  ble_gap_addr_t a;
+  EXPECT_TRUE(link.getInboundAddr(a));
+}
+
+TEST_F(BleLinkTest, theInboundReceiveAgeIsVisible) {
+  uint16_t h = BleMock::openConn(inbound_addr());
+
+  /* A write adopts the peer, but no frame has completed yet. */
+  const uint8_t junk[2] = {0x00, 0x00};
+  BleMock::writeFrom(h, junk, 2);
+
+  ble_gap_addr_t a;
+  uint32_t age = 0, queued = 99;
+  ASSERT_TRUE(link.getInboundAddr(a, &age, &queued));
+  EXPECT_EQ(age, 0xFFFFFFFFu);
+  EXPECT_EQ(queued, 0u);
+
+  std::vector<uint8_t> f = framed(payloadOf(16));
+  BleMock::writeFrom(h, f.data(), (uint16_t)f.size());
+  BleMock::advance(5000);
+  ASSERT_TRUE(link.getInboundAddr(a, &age, nullptr));
+  EXPECT_EQ(age, 5u);
+}
+
+TEST_F(BleLinkTest, aWriteFromADroppedPeerDoesNotBuyANewWindow) {
+  uint16_t h = bringUpInbound(inbound_addr());
+  link.dropLink(BleLink::INBOUND_LINK);
+
+  ble_gap_addr_t a;
+  ASSERT_FALSE(link.getInboundAddr(a));
+
+  /* The disconnect is asynchronous, so more writes from that peer still
+     arrive. They must not adopt it again with a fresh grace window. */
+  std::vector<uint8_t> f = framed(payloadOf(16));
+  BleMock::writeFrom(h, f.data(), (uint16_t)f.size());
+  EXPECT_FALSE(link.getInboundAddr(a));
+
+  /* The hold is short on purpose: the SoftDevice reuses handles. */
+  BleMock::advance(2001);
+  BleMock::writeFrom(h, f.data(), (uint16_t)f.size());
+  EXPECT_TRUE(link.getInboundAddr(a));
+}
+
+TEST_F(BleLinkTest, aDeniedPeerThatDialsInIsRefused) {
+  g_denied = inbound_addr();
+  g_deny_on = true;
+
+  uint16_t h = BleMock::openConn(inbound_addr());
+  std::vector<uint8_t> f = framed(payloadOf(16));
+  BleMock::writeFrom(h, f.data(), (uint16_t)f.size());
+
+  ble_gap_addr_t a;
+  EXPECT_FALSE(link.getInboundAddr(a));
+  EXPECT_EQ(g_refused, 1u);
+  EXPECT_FALSE(BleMock::conns[h].connected);   // disconnected at once
+  EXPECT_EQ(g_rx.size(), 0u);                  // and it carried nothing
+}
+
+TEST_F(BleLinkTest, aPeerThatIsNotDeniedIsAdopted) {
+  g_denied = addrEndingIn(0x77);
+  g_deny_on = true;
+
+  bringUpInbound(inbound_addr());
+
+  ble_gap_addr_t a;
+  EXPECT_TRUE(link.getInboundAddr(a));
+  EXPECT_EQ(g_refused, 0u);
+  EXPECT_EQ(g_rx.size(), 1u);
 }
