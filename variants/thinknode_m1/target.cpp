@@ -2,6 +2,7 @@
 #include "target.h"
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/sensors/MicroNMEALocationProvider.h>
+#include "GpsDiagnostic.h"   // empty unless GPS_DIAGNOSTIC is set
 
 ThinkNodeM1Board board;
 
@@ -11,7 +12,14 @@ WRAPPER_CLASS radio_driver(radio, board);
 
 VolatileRTCClock fallback_clock;
 AutoDiscoverRTCClock rtc_clock(fallback_clock);
-MicroNMEALocationProvider nmea = MicroNMEALocationProvider(Serial1, &rtc_clock);
+#if GPS_DIAGNOSTIC
+  // The tap sits between Serial1 and the parser. It counts the bytes that come
+  // from the GPS module. The parser still gets every byte. See GpsDiagnostic.h.
+  GpsSerialTap gps_tap(Serial1);
+  MicroNMEALocationProvider nmea = MicroNMEALocationProvider(gps_tap, &rtc_clock);
+#else
+  MicroNMEALocationProvider nmea = MicroNMEALocationProvider(Serial1, &rtc_clock);
+#endif
 ThinkNodeM1SensorManager sensors = ThinkNodeM1SensorManager(nmea);
 
 #ifdef DISPLAY_CLASS
@@ -58,6 +66,13 @@ bool ThinkNodeM1SensorManager::begin() {
     start_gps();
   }
 
+#if GPS_DIAGNOSTIC
+  // The probe reads PIN_GPS_SWITCH three ways, and it puts the pin back to
+  // INPUT. It does not touch last_gps_switch_state, so the switch logic above
+  // keeps its own record.
+  gps_diag_boot_block(gps_active, last_gps_switch_state);
+#endif
+
   return true;
 }
 
@@ -91,6 +106,22 @@ void ThinkNodeM1SensorManager::loop() {
     
     last_switch_check = millis();
   }
+
+#if GPS_DIAGNOSTIC
+  {
+    static unsigned long next_gps_diag = GPS_DIAG_PERIOD_MS;
+
+    // The GPS code reads Serial1 only when the GPS is active. When it is not
+    // active, the receive buffer fills, and the byte count stops. Read the
+    // bytes here so that the count stays true.
+    if (!gps_active) gps_tap.drain();
+
+    if ((long)(millis() - next_gps_diag) >= 0) {
+      gps_diag_status_line(gps_tap, *_location, gps_active);
+      next_gps_diag = millis() + GPS_DIAG_PERIOD_MS;
+    }
+  }
+#endif
 
   if (!gps_active) {
     return;  // GPS is not active, skip further processing
