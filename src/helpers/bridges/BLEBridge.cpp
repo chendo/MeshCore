@@ -78,6 +78,14 @@ void BLEBridge::loop() {
 
   _link.loop();
 
+  /* A slot that went down loses its stamp. The next peer on that slot counts
+     from its own sequence number, and a stamp left by the peer before it books
+     either a false loss or a false restart. Metrics only. */
+  for (uint8_t i = 0; i < NUM_STAMPS; i++) {
+    uint8_t idx = (i == BleLink::MAX_LINKS) ? BleLink::INBOUND_LINK : i;
+    if (_stamps[i].seq_valid && !_link.isUp(idx)) memset(&_stamps[i], 0, sizeof(_stamps[i]));
+  }
+
   /* A link that never proved group membership. BleLink drops it and reports the
      address; the deny list is here, because the bridge owns the key. */
   ble_gap_addr_t failed;
