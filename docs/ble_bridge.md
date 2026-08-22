@@ -222,8 +222,8 @@ Measured against `RAK_3401_repeater` on the same tree:
 | | Flash | RAM |
 |---|---|---|
 | `RAK_3401_repeater` | 380,092 | 33,048 |
-| `RAK_3401_repeater_bridge_ble` | 394,744 | 41,184 |
-| **Cost of the bridge** | **+14,652** | **+8,136** |
+| `RAK_3401_repeater_bridge_ble` | 395,592 | 41,200 |
+| **Cost of the bridge** | **+15,500** | **+8,152** |
 
 For comparison, the two-transport experiment on `origin/ble-clean`, which also
 carried datagrams over extended advertising, measured +28,940 flash and +14,712
