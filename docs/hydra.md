@@ -17,11 +17,20 @@ tested it" are two different claims, and this page keeps them apart. `SharedRadi
 90 host test cases that drive a mock `mesh::Radio`. The arbiter has never driven a real
 SX1262. Do not make a remote repeater your first target.
 
-**The features are nRF52 and RAK3401 only.** `LoopWatchdog` and `I2CBusRecovery` are
-nRF52 code. The Bluetooth bridge needs the SoftDevice. `StatusLed` and `LoraWatchdog`
-are portable, but only RAK3401 envs turn them on. There is no hydra env and no Bluetooth
-bridge env for the ThinkNode M5. The one claim for that board is in the build table
-below: an unmodified upstream target still builds against this tree.
+**Three boards carry these features: the RAK3401, the Elecrow ThinkNode M1 and the
+Elecrow ThinkNode M5.** The M1 is a second nRF52840 with the same SoftDevice, so it gets
+everything the RAK3401 gets except the status LED. The M5 is an ESP32-S3, so it gets the
+portable half. `LoopWatchdog` and `I2CBusRecovery` are nRF52 code, and the Bluetooth
+bridge needs the SoftDevice; none of the three run on the M5. `StatusLed` needs two LEDs
+that it can drive with hardware PWM, and only the RAK3401 has them.
+
+| feature | RAK3401 | ThinkNode M1 | ThinkNode M5 |
+|---|---|---|---|
+| hydra (`SharedRadio`, slots, `MeshObserver`) | yes | yes | yes |
+| `LoraWatchdog` | yes | yes | yes |
+| `LoopWatchdog`, `I2CBusRecovery` | yes | yes | no, nRF52 only |
+| Bluetooth bridge | yes | yes | no, needs the SoftDevice |
+| `StatusLed` | yes | no, one usable LED | no, the LEDs sit on an I2C expander |
 
 **The room server is not complete.** A room slot gets its own identity, its own ACL and
 its own post buffer, and it adverts as a room. The room protocol itself is not written.
@@ -156,8 +165,10 @@ own `Dispatcher`, which under a shared radio is one identity's share of the traf
 can also reboot the whole board. So the module takes its three actions — probe, reinit
 and reboot — as injected functions, and the node supplies one of each. The
 `LORA_WATCHDOG_MS` flag both turns the feature on and sets the idle time before a probe.
-It is set to 15 minutes on `RAK_3401_repeater`, `RAK_3401_repeater_bridge_ble` and
-`RAK_3401_hydra`.
+It is set to 15 minutes on `RAK_3401_repeater`, `RAK_3401_repeater_bridge_ble`,
+`RAK_3401_hydra`, `ThinkNode_M1_repeater`, `ThinkNode_M1_repeater_bridge_ble`,
+`ThinkNode_M1_hydra`, `ThinkNode_M5_Repeater` and `ThinkNode_M5_hydra`. The module holds
+no nRF52 code, so the M5 runs the same watchdog that the nRF52 boards run.
 
 ### The status LED
 
@@ -173,6 +184,23 @@ colour is the radio. The brightness is the direction.**
 Both LEDs go dim together one time every 5 s as a heartbeat. The brightness is true
 hardware PWM (`analogWrite`), so the levels do not change with how often `loop()` runs.
 The `WITH_STATUS_LED` flag turns it on.
+
+**Neither ThinkNode board turns it on, and each has its own reason.** The M1 has one LED
+that this firmware can own: the green LED on P0.13, which `ThinkNodeM1Board` already
+lights for each LoRa transmit. Its other LED is the red charge indicator on P1.04, and
+the charger blinks that one in hardware. One LED cannot carry two axes. The `LED_RED`,
+`LED_GREEN`, `LED_BLUE` and `LED_STATE_ON` values in `variants/thinknode_m1/variant.h`
+come from a Seeed template, and they collide with `PIN_SPI1_MISO`, `PIN_GPS_PPS` and
+`PIN_NEOPIXEL` in that same file, so a status LED must not be built on them.
+
+The M5 puts its LEDs behind a PCA9557 I2C expander, and `ThinknodeM5Board` reaches them
+with `expander.digitalWrite()`. `StatusLed` calls `pinMode()` and `analogWrite()` on a
+GPIO, and no hardware PWM reaches an I2C expander. The blue LED on expander pin 1 is
+also already the LoRa transmit indicator of that board.
+
+To light either board a redesign is needed, not a build flag: `StatusLed` would have to
+accept a pin writer rather than a pin number, and it would have to fall back to on/off
+where no PWM exists.
 
 ---
 
@@ -271,7 +299,8 @@ with the chat slots off": an absent file returns early, a bad `'H',2` magic keep
 defaults, a short read keeps what it got, and an unknown slot type becomes `SLOT_OFF`
 rather than a different type.
 
-Build flags in `variants/rak3401/platformio.ini` configure hydra: `HYDRA_NUM_SLOTS`
+Build flags in `variants/rak3401/platformio.ini`, `variants/thinknode_m1/platformio.ini`
+and `variants/thinknode_m5/platformio.ini` configure hydra: `HYDRA_NUM_SLOTS`
 (1 to 8), `HYDRA_CHAT_POOL`, `HYDRA_CHAT_HASHES`, `HYDRA_RAM_RESERVE`, `MAX_CONTACTS` and
 `MAX_CONNECTIONS`. `HYDRA_NAME_PREFIX` has one use only: it names a slot that a version 1
 config file carried with no name. It does not name a new slot. A new slot has no name
@@ -331,28 +360,48 @@ it again. A frame on the link is up to 256 bytes, so a full MeshCore packet fits
 For the wire format, the group marker, the deny list, the settings and the threat model,
 see **[ble_bridge.md](ble_bridge.md)**. This page does not repeat them.
 
-`RAK_3401_repeater_bridge_ble` is the only env that enables the bridge.
+`RAK_3401_repeater_bridge_ble` and `ThinkNode_M1_repeater_bridge_ble` are the envs that
+enable the bridge. Both boards carry an nRF52840 with s140 6.1.1 and link against
+`boards/nrf52840_s140_v6.ld`, so the SoftDevice gets the same 24 KB at RAM origin
+`0x20006000` on each, and each env asks for the same 2 peripheral and 2 central slots.
+`BleStack::ensure()` still finds the true ceiling at boot and steps down to what fits, so
+those numbers stay a request on both boards and never an assumption.
 
 ---
 
 ## Build results
 
-Measured on this tree at commit `8214ec1d`. The host is aarch64 Linux with the toolchain
-override that the README describes, so the nRF52 sizes differ by a few percent from the
-official release artifacts.
+The host is aarch64 Linux with the toolchain override that the README describes, so the
+nRF52 sizes differ by a few percent from the official release artifacts.
+
+The flash ceiling is the whole application region on the nRF52 boards, and one OTA slot
+on the M5.
 
 | env | result | flash | RAM |
 |---|---|---:|---:|
 | `RAK_3401_repeater` | builds | 380,092 B (46.6% of 815,104) | 33,048 B (14.0% of 235,520) |
-| `RAK_3401_repeater_bridge_ble` | builds | 394,744 B (48.4%) | 41,184 B (17.5%) |
+| `RAK_3401_repeater_bridge_ble` | builds | 395,848 B (48.6%) | 41,200 B (17.5%) |
 | `RAK_3401_hydra` (3 slots) | builds | 389,916 B (47.8%) | 54,544 B (23.2%) |
 | `RAK_3401_hydra_debug` (packet trace on) | builds | 392,540 B (48.2%) | 65,496 B (27.8%) |
-| `ThinkNode_M5_Repeater` | builds | 1,125,785 B (85.9% of 1,310,720) | 60,856 B (11.6% of 524,288) |
+| `ThinkNode_M1_repeater` | builds | 304,864 B (37.4% of 815,104) | 30,768 B (13.1% of 235,520) |
+| `ThinkNode_M1_repeater_bridge_ble` | builds | 320,428 B (39.3%) | 38,904 B (16.5%) |
+| `ThinkNode_M1_hydra` (3 slots) | builds | 329,952 B (40.5%) | 52,504 B (22.3%) |
+| `ThinkNode_M5_Repeater` | builds | 1,126,361 B (85.9% of 1,310,720) | 60,912 B (11.6% of 524,288) |
+| `ThinkNode_M5_hydra` (5 slots) | builds | 1,125,169 B (57.2% of 1,966,080) | 104,280 B (19.9%) |
 
-**What the M5 row means, and what it does not.** `ThinkNode_M5_Repeater` is an
-unmodified upstream target, and that is the whole claim: it still builds cleanly against
-our tree. There is no M5 work here, no hydra env for the M5, and none of the features
-above run on it.
+The M1 rows sit below the RAK3401 rows because those envs drive no display and pull in
+no sensor drivers. The M5 rows are far larger than either, because that image carries the
+ESP32 WiFi stack for the over-the-air update endpoint.
+
+**The M5 partition table.** `ThinkNode_M5_Repeater` keeps the stock table for a 4 MB part
+and fills 85.9% of its 1,310,720 B OTA slot. `ThinkNode_M5_hydra` moves to
+`min_spiffs.csv`, a stock table of the platform that four other variants in this tree
+already use. It gives each OTA slot 1,966,080 B and leaves 131,072 B of SPIFFS, which is
+far more than the identities, the preferences, the ACLs and `/hydra_slots` need.
+`huge_app.csv` would give 3 MB, but it deletes the second OTA slot, and a repeater on a
+mast is the node that most needs to accept an image over the air. The hydra env also
+drops `DISPLAY_CLASS`, which keeps GxEPD2 and its fonts out of the image. That reduction
+is about the size of hydra itself, so the two envs land within 1,200 B of each other.
 
 **A build that passes is not a test on hardware.** No firmware from this tree has gone
 onto a board.
@@ -382,6 +431,17 @@ buffer.
 
 Most of the 5,640 B is the contact table of `BaseChatMesh`, so `MAX_CONTACTS` is the
 dial that matters if that figure has to come down.
+
+The same measurement on `ThinkNode_M5_hydra`, at 3 slots and again at 5, gives **9,096 B
+of static RAM for each chat slot** and 4 B of flash for the pair. That figure is higher
+than the 5,640 B of the nRF52 envs because the M5 sets `MAX_CONTACTS=32` where they set
+16, and the contact table of `BaseChatMesh` is most of the cost.
+
+Slot counts follow the RAM of the part. The nRF52 boards hold 235,520 B and take 3 slots.
+The M5 holds 524,288 B, so a chat slot costs it 1.7% where the same slot costs an nRF52
+2.4%, and that env takes 5. Above five the antenna is the limit and not the RAM: slot 0
+already forwards every flood that the radio hears, and each further identity adds only
+its own advert schedule to one half-duplex antenna.
 
 ### The cost of the packet trace
 
