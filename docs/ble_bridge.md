@@ -10,7 +10,7 @@ on a narrow and fast one, where traffic and adverts must flow between them with
 no second radio and no internet link.
 
 This is the nRF52 counterpart to the ESP-NOW bridge. A board such as the RAK3401
-has no WiFi, so ESP-NOW is unavailable to it.
+or the Elecrow ThinkNode M1 has no WiFi, so ESP-NOW is unavailable to it.
 
 **nRF52840 only.** An ESP32 repeater cannot join a BLE bridge group.
 
@@ -143,6 +143,7 @@ notices a radio that went away and not a peer that stopped to talk.
 
 ```sh
 pio run -e RAK_3401_repeater_bridge_ble -t upload
+pio run -e ThinkNode_M1_repeater_bridge_ble -t upload   # the ThinkNode M1
 ```
 
 Both ends must run the same build. The framing is part of the firmware.
@@ -240,8 +241,17 @@ Measured against `RAK_3401_repeater` on the same tree:
 | | Flash | RAM |
 |---|---|---|
 | `RAK_3401_repeater` | 380,092 | 33,048 |
-| `RAK_3401_repeater_bridge_ble` | 395,592 | 41,200 |
-| **Cost of the bridge** | **+15,500** | **+8,152** |
+| `RAK_3401_repeater_bridge_ble` | 395,848 | 41,200 |
+| **Cost of the bridge** | **+15,756** | **+8,152** |
+
+The same pair on the ThinkNode M1, which carries the same nRF52840 and the same
+SoftDevice:
+
+| | Flash | RAM |
+|---|---|---|
+| `ThinkNode_M1_repeater` | 304,864 | 30,768 |
+| `ThinkNode_M1_repeater_bridge_ble` | 320,428 | 38,904 |
+| **Cost of the bridge** | **+15,564** | **+8,136** |
 
 For comparison, the two-transport experiment on `origin/ble-clean`, which also
 carried datagrams over extended advertising, measured +28,940 flash and +14,712

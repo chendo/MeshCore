@@ -10,9 +10,11 @@ bug fixes. Seven carry the link-metric work. We offer both of those back to upst
 [docs/hydra.md](docs/hydra.md) names every upstream file that this fork changes.
 
 No firmware from this tree has run on real hardware. Only host tests and builds support
-the claims here. The new features build for the RAK3401 (nRF52840) and for no other
-board. The room protocol is not written yet. Read [docs/hydra.md](docs/hydra.md) before
-you flash a node.
+the claims here. The new features build for three boards: the RAK3401 (nRF52840), the
+Elecrow ThinkNode M1 (nRF52840) and the Elecrow ThinkNode M5 (ESP32-S3). The M5 gets the
+portable half only, because the Bluetooth bridge and `LoopWatchdog` need an nRF52. The
+room protocol is not written yet. Read [docs/hydra.md](docs/hydra.md) before you flash a
+node.
 
 ## Key features
 
@@ -39,6 +41,13 @@ The project uses PlatformIO.
 pio run -e RAK_3401_repeater             # repeater, watchdogs, status LED
 pio run -e RAK_3401_hydra                # multi-identity node, 3 slots
 pio run -e RAK_3401_repeater_bridge_ble  # repeater with a Bluetooth bridge
+
+pio run -e ThinkNode_M1_repeater             # the same, on a ThinkNode M1
+pio run -e ThinkNode_M1_hydra
+pio run -e ThinkNode_M1_repeater_bridge_ble
+
+pio run -e ThinkNode_M5_Repeater         # repeater with the LoRa watchdog
+pio run -e ThinkNode_M5_hydra            # multi-identity node, 5 slots
 ```
 
 To flash a board, connect it over USB and add the upload target:
@@ -49,9 +58,13 @@ pio run -e RAK_3401_hydra -t upload
 
 Then open the serial console at 115200 baud and type `help`.
 
-These envs need a RAK3401 (nRF52840). This fork adds one more, `RAK_3401_hydra_debug`,
-which turns the packet trace on. The other firmware envs are upstream's. This tree
-changes only how a bridged env names its bridge class.
+The M1 has no status LED env, because it has one LED that this firmware can own; the M5
+has none either, because its LEDs sit behind an I2C expander. The M5 has no Bluetooth
+bridge env, because that bridge needs the SoftDevice of an nRF52. `docs/hydra.md`
+explains both. This fork adds one more env, `RAK_3401_hydra_debug`, which turns the
+packet trace on. The other firmware envs are upstream's. This tree changes only how a
+bridged env names its bridge class, and it adds the LoRa watchdog to
+`ThinkNode_M5_Repeater`.
 
 On an aarch64 Linux host, the pinned ARM toolchain has no package. Write a
 `platformio.local.ini` file with one section for each env that you build:
