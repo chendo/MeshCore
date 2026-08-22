@@ -235,6 +235,7 @@ void BleLink::loop() {
   unsigned long now = millis();
 
   checkInbound();
+  sweepInbound();
 
   /* Drop a link that went quiet. Heartbeats put a frame on every link in each
      interval, so a minute of silence is not a lull. It is a connection that the
@@ -434,31 +435,67 @@ void BleLink::onNotify(uint8_t idx, const uint8_t* data, uint16_t len) {
   if (idx < MAX_LINKS) feed(_links[idx], idx, data, len);
 }
 
+bool BleLink::adoptInbound(uint16_t conn, BLEConnection* c) {
+  /* Refuse the handle that we dropped a moment ago. Its disconnect is still
+     in flight, and to adopt it again would grant another grace window. */
+  if (conn == _in_dropped_conn
+      && (long)(millis() - _in_dropped_ms) < (long)IN_DROP_HOLD_MS) return false;
+
+  /* The deny list gates a peer that dials IN as well as one that we dial.
+     Without this the deny list stops nothing on this side: a peer whose
+     first frame failed the group tag simply connects again and takes the
+     single inbound slot back. */
+  if (_allow != nullptr && c != nullptr && !_allow(c->getPeerAddr())) {
+    c->disconnect();
+    return false;
+  }
+  _in_conn = conn;
+  _in_expect = _in_have = 0; _in_hdr_have = 0;
+  _in_authed = false;
+  _in_last_rx_ms = 0;                        // start of this peer's silence timer
+  _in_up_ms = millis();                      // start of the authentication window
+  _topology_changed = true;
+  return true;
+}
+
+/* Find a peer that dialled in and has written nothing.
+   A write used to be the ONLY event that made an inbound peer known, so a peer
+   that connected and stayed silent was never adopted, never timed out and
+   never denied. It held the one inbound slot for as long as its radio stayed
+   in range. This sweep closes that, and the peer then meets the authentication
+   grace and the deny list that every other peer meets.
+
+   A poll, and not a callback. Bluefruit.Periph.setConnectCallback() is a
+   SINGLE slot, and SerialBLEInterface already holds it. Two owners of one slot
+   means whichever begin() runs last takes the callback from the other in
+   silence, and that fault appears only in a build combination that nobody has
+   tried. loop() already runs on every main pass, so a poll costs one short
+   walk over the connection handles and owes nothing to anybody.
+
+   Periph.connected(h) is role AND liveness in one call, so an outward link of
+   our own can never match here.
+
+   A secured or bonded connection belongs to the CLI or to DFU. Both need MITM
+   encryption before they carry a byte, and a bridge peer never pairs, so this
+   is what keeps the sweep away from the CLI. */
+void BleLink::sweepInbound() {
+#if BLE_LINK_SILENT_SWEEP
+  if (_in_conn != BLE_CONN_HANDLE_INVALID) return;    // the slot is already ours
+
+  for (uint16_t h = 0; h < BLE_MAX_CONNECTION; h++) {
+    if (!Bluefruit.Periph.connected(h)) continue;
+    BLEConnection* c = Bluefruit.Connection(h);
+    if (c == nullptr) continue;
+    if (c->secured() || c->bonded()) continue;        // the CLI, or DFU
+    if (adoptInbound(h, c)) return;
+  }
+#endif
+}
+
 void BleLink::onWritten(uint16_t conn, const uint8_t* data, uint16_t len) {
   /* A peer dialled US. Reassembled apart from the outward links: it has no Link
      slot, because we did not choose it and cannot dial it back. */
-  if (_in_conn != conn) {
-    /* Refuse the handle that we dropped a moment ago. Its disconnect is still
-       in flight, and to adopt it again would grant another grace window. */
-    if (conn == _in_dropped_conn
-        && (long)(millis() - _in_dropped_ms) < (long)IN_DROP_HOLD_MS) return;
-
-    BLEConnection* c = Bluefruit.Connection(conn);
-    /* The deny list gates a peer that dials IN as well as one that we dial.
-       Without this the deny list stops nothing on this side: a peer whose
-       first frame failed the group tag simply connects again and takes the
-       single inbound slot back. */
-    if (_allow != nullptr && c != nullptr && !_allow(c->getPeerAddr())) {
-      c->disconnect();
-      return;
-    }
-    _in_conn = conn;
-    _in_expect = _in_have = 0; _in_hdr_have = 0;
-    _in_authed = false;
-    _in_last_rx_ms = 0;                      // start of this peer's silence timer
-    _in_up_ms = millis();                    // start of the authentication window
-    _topology_changed = true;
-  }
+  if (_in_conn != conn && !adoptInbound(conn, Bluefruit.Connection(conn))) return;
   reassemble(_in_hdr, _in_hdr_have, _in_expect, _in_have, _in_buf,
              _in_started_ms, _in_resyncs, _in_recv, _in_last_rx_ms,
              INBOUND_LINK, data, len);

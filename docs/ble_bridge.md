@@ -71,8 +71,8 @@ A stranger can therefore make a node open a connection, and it can also dial the
 node itself. It gets no data, and the rules are the same in both directions:
 
 - a link whose first frame fails the group tag is dropped at once;
-- a link that writes something and then never authenticates is dropped after 45
-  seconds;
+- a link that never authenticates is dropped after 45 seconds, whether it wrote
+  something or nothing at all;
 - a link that authenticates and then goes silent is dropped after 60 seconds;
 - either way the address goes on a deny list for 5 minutes, and that list is
   checked both before the node dials out and before it adopts a peer that
@@ -84,12 +84,29 @@ occupy a slot for a few seconds at a time, from a fresh address each time, and
 read the group marker. It cannot inject a packet into the mesh, and it cannot
 read the secret.
 
-One gap remains. The bridge sees a peer that dialled in only on its FIRST write,
-because that write is the event it hooks. A peer that connects inward and then
-sends nothing at all is thus invisible to the bridge, and it holds the inbound
-peripheral slot for as long as the connection lives. The node keeps its CLI and
-DFU slot, and it keeps every outward link, so the cost is that no other peer can
-dial in until that connection ends.
+The second rule used to have a hole. The bridge saw a peer that dialled in only
+on its FIRST write, because that write was the event it hooked. A peer that
+connected inward and then sent nothing was invisible, so it was never adopted,
+never timed out and never denied, and it held the inbound peripheral slot for as
+long as the connection lived. `BleLink::loop()` now sweeps the peripheral
+connections on every main pass and adopts a peer that has written nothing. The
+authentication grace, the idle limit and the deny list then all reach it.
+
+The sweep is a poll, and it registers NO Bluefruit callback.
+`Periph.setConnectCallback` is a single slot that `SerialBLEInterface` already
+holds, and a second owner would take it from the first in silence.
+`Bluefruit.Periph.connected(handle)` reports the role and the liveness of one
+connection together, so an outward link of our own never matches the sweep.
+
+One restriction remains, and it is a restriction and not a hole. The sweep skips
+a connection that is secured or bonded. The CLI and DFU both need MITM
+encryption before they carry a byte, and a bridge peer never pairs, so that test
+is exact for a CLI session in use. It is not exact for a CLI client that sits at
+the passkey prompt: that client is not secured yet, and the sweep cannot tell it
+from a peer that says nothing. A build that carries the bridge AND the BLE CLI
+must therefore set `-D BLE_LINK_SILENT_SWEEP=0`. Such a build keeps the old
+fault: a silent inbound peer holds the slot until its connection ends. No
+shipped env carries both today.
 
 Only the node with the numerically lower BLE address dials. A pair therefore
 agrees on exactly one link, with no negotiation and no timers.
@@ -185,6 +202,7 @@ repeater status reply is `0x04`; `0x01` is UART and `0x03` is ESP-NOW.
 | `${bridge.ble}` | Selects this bridge. Put it in the env's `build_flags`. |
 | `BLE_PRPH_SLOTS` | Inbound connections. **2 minimum**: one for a peer that dials in, one spare. |
 | `BLE_CENTRAL_SLOTS` | Outward links. 1 is enough for a two-node bridge. |
+| `BLE_LINK_SILENT_SWEEP` | Reclaims the inbound slot from a peer that connects and writes nothing. On by default. Set it to **0** in a build that also carries the BLE CLI. |
 | `LOOP_WATCHDOG_MS` | Reboots the node if the main loop stalls this long. |
 | `BRIDGE_DEBUG` | Serial log for each frame. Off in a shipped build. |
 | `BLE_DISCOVERY_DEBUG_LOGGING` | Serial log from the advert arbiter and the scanner. |
@@ -244,7 +262,11 @@ group marker, the deny list, and the oversize guard with its counter.
 the shipped source file is what runs. That covers the framing and the teardown
 paths: a header split across two writes, a truncated frame, a hunt that lands on
 a payload byte that looks like SYNC, a reconnect with a part-drained queue, and
-the deny list and the silence limit on the inbound peer.
+the deny list and the silence limit on the inbound peer. The stand-in also
+presents a peripheral connection, so the sweep has cases of its own: a peer that
+writes nothing loses the slot and reaches the deny list, a peer that writes in
+time keeps it, a peer dropped for silence is not adopted again at once, and a
+paired connection is left to the CLI.
 
 `BleStack`, `BleDiscovery` and `BLEBridge` itself still need a SoftDevice and
 have no host test.

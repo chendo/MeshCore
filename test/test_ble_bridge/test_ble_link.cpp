@@ -314,3 +314,110 @@ TEST_F(BleLinkTest, aPeerThatIsNotDeniedIsAdopted) {
   EXPECT_EQ(g_refused, 0u);
   EXPECT_EQ(g_rx.size(), 1u);
 }
+
+/* ---- A peer that connects and says nothing ------------------------------ */
+
+/* There is exactly ONE inbound slot. A write used to be the only event that
+   made an inbound peer known, so a peer that connected and stayed silent was
+   never adopted, never timed out and never denied. It held that slot for as
+   long as its radio stayed in range. BleLink::loop() now sweeps the peripheral
+   connections, which needs no Bluefruit callback and thus cannot take one from
+   the BLE CLI. */
+
+TEST_F(BleLinkTest, aPeerThatConnectsAndNeverWritesLosesTheSlot) {
+  uint16_t h = BleMock::openConn(inbound_addr());
+
+  /* Not one byte from this peer. The sweep is what makes it known. */
+  link.loop();
+  ble_gap_addr_t a;
+  ASSERT_TRUE(link.getInboundAddr(a));
+
+  /* From here it meets the ordinary authentication grace, because a peer that
+     writes nothing has certainly proved no group membership. */
+  BleMock::advance(45001);
+  link.loop();
+  EXPECT_FALSE(link.getInboundAddr(a));
+  EXPECT_FALSE(BleMock::conns[h].connected);
+  EXPECT_EQ(link.numUp(), 0);
+}
+
+TEST_F(BleLinkTest, aPeerThatWritesInsideTheLimitKeepsTheSlot) {
+  uint16_t h = BleMock::openConn(inbound_addr());
+  link.loop();
+  ble_gap_addr_t a;
+  ASSERT_TRUE(link.getInboundAddr(a));
+
+  /* The peer speaks well inside the grace, and its frame passes the group tag.
+     The sweep must cost an honest peer nothing. */
+  BleMock::advance(30000);
+  std::vector<uint8_t> f = framed(payloadOf(16));
+  BleMock::writeFrom(h, f.data(), (uint16_t)f.size());
+  link.markAuthed(BleLink::INBOUND_LINK);
+  link.loop();
+
+  /* Past the grace, and still up, because the peer authenticated. */
+  BleMock::advance(30000);
+  link.loop();
+  EXPECT_TRUE(link.getInboundAddr(a));
+  EXPECT_TRUE(BleMock::conns[h].connected);
+  EXPECT_EQ(g_rx.size(), 1u);
+}
+
+TEST_F(BleLinkTest, aPeerDroppedForSilenceIsNotAdoptedAgainAtOnce) {
+  uint16_t h = BleMock::openConn(inbound_addr());
+  link.loop();
+  ble_gap_addr_t a;
+  ASSERT_TRUE(link.getInboundAddr(a));
+
+  BleMock::advance(45001);
+  link.loop();
+  ASSERT_FALSE(link.getInboundAddr(a));
+
+  /* A disconnect is asynchronous, so the connection is still there on the next
+     pass. Without the hold the sweep adopts it again and grants a fresh grace
+     window, which is exactly the squat that the drop was for. */
+  BleMock::disconnectInFlight(h);
+  link.loop();
+  EXPECT_FALSE(link.getInboundAddr(a));
+
+  /* The hold is short on purpose: the SoftDevice reuses handles. */
+  BleMock::advance(2001);
+  link.loop();
+  EXPECT_TRUE(link.getInboundAddr(a));
+}
+
+TEST_F(BleLinkTest, aPeerThatSaysNothingReachesTheDenyList) {
+  BleMock::openConn(inbound_addr());
+  link.loop();
+
+  BleMock::advance(45001);
+  link.loop();
+
+  /* Silence for the whole grace is three heartbeat intervals with no frame, so
+     the peer is no use to this bridge. Without the deny list it reconnects at
+     once and holds the single slot for another full window, and the disconnect
+     buys nothing. */
+  ble_gap_addr_t failed;
+  ASSERT_TRUE(link.takeAuthFailure(failed));
+  EXPECT_EQ(memcmp(failed.addr, inbound_addr().addr, 6), 0);
+  EXPECT_FALSE(link.takeAuthFailure(failed));      // one drop, one report
+}
+
+TEST_F(BleLinkTest, theCliConnectionIsNotTakenForTheInboundPeer) {
+  /* The CLI needs MITM encryption before it carries a byte, so its connection
+     is secured and bonded. A bridge peer never pairs. That is how the sweep
+     tells them apart, and the CLI must keep its slot whatever happens. */
+  uint16_t cli = BleMock::openConn(addrEndingIn(0x55));
+  BleMock::pair(cli);
+  uint16_t peer = BleMock::openConn(inbound_addr());
+
+  link.loop();
+  ble_gap_addr_t a;
+  ASSERT_TRUE(link.getInboundAddr(a));
+  EXPECT_EQ(memcmp(a.addr, inbound_addr().addr, 6), 0);
+
+  BleMock::advance(45001);
+  link.loop();
+  EXPECT_TRUE(BleMock::conns[cli].connected);
+  EXPECT_FALSE(BleMock::conns[peer].connected);
+}

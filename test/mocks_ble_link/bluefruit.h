@@ -13,6 +13,9 @@
 #include <vector>
 
 static const uint16_t BLE_CONN_HANDLE_INVALID = 0xFFFF;
+/* The real header sets 20. Only the count matters here, so keep it at the
+   number of connections that this stand-in holds. */
+static const uint16_t BLE_MAX_CONNECTION = 8;
 
 #define CHR_PROPS_WRITE_WO_RESP 0x04
 #define CHR_PROPS_NOTIFY        0x10
@@ -39,6 +42,14 @@ static const uint8_t MAX_CONNS = 8;
 struct Conn {
   bool used = false;
   bool connected = false;
+  /* The role WE hold on this connection. A peer that dialled us makes us the
+     peripheral; a link that we dialled makes us the central. BleLink sweeps
+     the peripheral connections only. */
+  bool periph = false;
+  /* MITM pairing. The CLI needs it and a bridge peer never asks for it, so
+     this is how BleLink keeps away from a CLI session. */
+  bool secured = false;
+  bool bonded = false;
   ble_gap_addr_t peer = {};
   uint16_t mtu = 247;
 };
@@ -95,6 +106,8 @@ public:
   uint16_t handle = BLE_CONN_HANDLE_INVALID;
   bool connected() const { return BleMock::conns[handle].connected; }
   void disconnect() { BleMock::conns[handle].connected = false; }
+  bool secured() const { return BleMock::conns[handle].secured; }
+  bool bonded() const { return BleMock::conns[handle].bonded; }
   ble_gap_addr_t getPeerAddr() const { return BleMock::conns[handle].peer; }
   uint16_t getMtu() const { return BleMock::conns[handle].mtu; }
 };
@@ -177,9 +190,26 @@ public:
   }
 };
 
+/* The real BLEPeriph::connected(handle) is role AND liveness in one call. That
+   is exactly what BleLink asks of it, so model both. */
+class BluefruitPeriph {
+public:
+  bool connected(uint16_t h) {
+    if (h >= BleMock::MAX_CONNS) return false;
+    const BleMock::Conn& c = BleMock::conns[h];
+    return c.used && c.connected && c.periph;
+  }
+  uint8_t connected() {
+    uint8_t n = 0;
+    for (uint16_t h = 0; h < BleMock::MAX_CONNS; h++) if (connected(h)) n++;
+    return n;
+  }
+};
+
 class BluefruitClass {
 public:
   BluefruitCentral Central;
+  BluefruitPeriph Periph;
   BLEConnection* Connection(uint16_t h) {
     if (h >= BleMock::MAX_CONNS || !BleMock::conns[h].used) return nullptr;
     BleMock::wrapper[h].handle = h;
@@ -208,12 +238,15 @@ inline void clearSinks() {
   for (uint8_t i = 0; i < MAX_SINKS; i++) sink[i].clear();
 }
 
-/** Open a connection to a peer and report its handle. */
-inline uint16_t openConn(const ble_gap_addr_t& peer, uint16_t mtu = 247) {
+/** Open a connection to a peer and report its handle. A peer that dialled US
+ *  puts us in the peripheral role, which is the default here. */
+inline uint16_t openConn(const ble_gap_addr_t& peer, uint16_t mtu = 247,
+                         bool periph = true) {
   for (uint16_t h = 0; h < MAX_CONNS; h++) {
     if (conns[h].used) continue;
     conns[h].used = true;
     conns[h].connected = true;
+    conns[h].periph = periph;
     conns[h].peer = peer;
     conns[h].mtu = mtu;
     return h;
@@ -221,12 +254,19 @@ inline uint16_t openConn(const ble_gap_addr_t& peer, uint16_t mtu = 247) {
   return BLE_CONN_HANDLE_INVALID;
 }
 
-/** Answer the dial that BleLink::loop() just made. */
+/** Answer the dial that BleLink::loop() just made. We are the central here. */
 inline uint16_t completeDial(uint16_t mtu = 247) {
-  uint16_t h = openConn(dial_addr, mtu);
+  uint16_t h = openConn(dial_addr, mtu, false);
   if (connect_cb) connect_cb(h);
   return h;
 }
+
+/** A client that paired, which is what the CLI and DFU both need. */
+inline void pair(uint16_t h) { conns[h].secured = true; conns[h].bonded = true; }
+
+/** The stack has not torn the connection down yet, which is what an
+ *  asynchronous disconnect looks like from the main loop. */
+inline void disconnectInFlight(uint16_t h) { conns[h].connected = true; }
 
 /** The peer disconnected, and the stack reported it. */
 inline void peerDisconnect(uint16_t h) {
