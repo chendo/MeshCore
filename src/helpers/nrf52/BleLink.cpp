@@ -600,6 +600,11 @@ uint8_t BleLink::numUp() const {
   return n;
 }
 
+bool BleLink::isUp(uint8_t idx) const {
+  if (idx == INBOUND_LINK) return _in_conn != BLE_CONN_HANDLE_INVALID;
+  return idx < MAX_LINKS && _links[idx].state == UP;
+}
+
 bool BleLink::getInboundAddr(ble_gap_addr_t& addr, uint32_t* rx_age_s,
                              uint32_t* queued) const {
   if (_in_conn == BLE_CONN_HANDLE_INVALID) return false;

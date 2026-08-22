@@ -125,6 +125,9 @@ public:
   bool takeAuthFailure(ble_gap_addr_t& addr);
 
   uint8_t numUp() const;
+  /** True while this link can carry a frame. INBOUND_LINK refers to the
+   *  inbound peer. */
+  bool isUp(uint8_t idx) const;
   /** The address of the inbound peer, if one is attached.
    *  @param rx_age_s  optional: seconds since the last frame arrived, or
    *                    0xFFFFFFFF if nothing ever has.
