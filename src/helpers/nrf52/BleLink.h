@@ -3,6 +3,20 @@
 #include <stdint.h>
 #include <bluefruit.h>
 
+/* Sweep the peripheral connections for a peer that dialled in and wrote
+   nothing. Set this to 0 in a build that also carries the BLE CLI.
+
+   The sweep cannot always tell a silent peer from a CLI client that is part
+   way through its pairing. A CLI session that is established is safe, because
+   its characteristics need MITM encryption and the sweep skips a connection
+   that is secured or bonded. A client that sits at the passkey prompt is not
+   secured yet, and it looks exactly like a peer that says nothing. The flag is
+   the honest answer to that: a build with both must choose which fault it
+   prefers. See sweepInbound() in the .cpp. */
+#ifndef BLE_LINK_SILENT_SWEEP
+#define BLE_LINK_SILENT_SWEEP 1
+#endif
+
 /**
  * @brief  Connection-oriented peer links, which carry the bridge frames.
  *
@@ -277,6 +291,18 @@ private:
   void noteAuthFailure(const ble_gap_addr_t& addr);
   /** Forget the inbound peer if its connection has gone. */
   void checkInbound();
+  /**
+   * @brief  Take one peripheral connection as the inbound peer.
+   *
+   * The first write reaches this, and so does the sweep below. One path, so a
+   * peer that never speaks meets the same rules as a peer that does.
+   *
+   * @param c  the connection, or nullptr when the stack does not report one.
+   * @returns  false when the peer is refused or the handle is held down.
+   */
+  bool adoptInbound(uint16_t conn, BLEConnection* c);
+  /** Find a peer that dialled in and has written nothing. See the .cpp. */
+  void sweepInbound();
 
   static void connect_cb(uint16_t conn);
   static void disconnect_cb(uint16_t conn, uint8_t reason);
