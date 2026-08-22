@@ -53,10 +53,12 @@ static const uint16_t MAX_CHUNK = 244;          // MTU 247 - 3 bytes of ATT over
 static uint16_t s_chunk = 20;                   // resolved in begin(), after the stack is up
 #define CHUNK s_chunk
 
-bool BleLink::begin(rx_handler_t handler, const ble_gap_addr_t& self_addr) {
+bool BleLink::begin(rx_handler_t handler, const ble_gap_addr_t& self_addr,
+                    allow_handler_t allow) {
   if (_running) return true;
   s_instance = this;
   _handler = handler;
+  _allow = allow;
   memcpy(&_self, &self_addr, sizeof(_self));
   memset(_links, 0, sizeof(_links));
 
@@ -102,10 +104,20 @@ void BleLink::resetLink(Link& l) {
 }
 
 void BleLink::resetInbound() {
+  /* Hold the handle for a moment. A disconnect is asynchronous, so a write
+     from the peer we just dropped still reaches onWritten(), and without this
+     record it is adopted again with a fresh authentication window. That is
+     exactly the squat that the drop was for. */
+  if (_in_conn != BLE_CONN_HANDLE_INVALID) {
+    _in_dropped_conn = _in_conn;
+    _in_dropped_ms = millis();
+  }
   _in_conn = BLE_CONN_HANDLE_INVALID;
   _in_txq_count = 0; _in_txq_head = 0; _in_tx_off = 0;
   _in_expect = _in_have = 0; _in_hdr_have = 0;
   _in_authed = false; _in_up_ms = 0;
+  /* The next peer must start its own silence timer, not inherit this one. */
+  _in_last_rx_ms = 0;
 }
 
 void BleLink::end() {
@@ -264,6 +276,15 @@ void BleLink::loop() {
     dropLink(INBOUND_LINK);
   }
 
+  /* The inbound peer gets the same silence limit as an outward link, and for
+     the same reason. There is exactly ONE inbound slot, so a peer that
+     authenticates and then goes quiet holds all of it, and no other peer can
+     dial us at all. */
+  if (_in_conn != BLE_CONN_HANDLE_INVALID && _in_last_rx_ms != 0
+      && (long)(now - _in_last_rx_ms) >= (long)LINK_IDLE_LIMIT_MS) {
+    dropLink(INBOUND_LINK);
+  }
+
   /* Push queued frames out as credits allow. Nothing blocks: whatever the
      SoftDevice does not take now resumes on the next pass. */
   for (uint8_t i = 0; i < MAX_LINKS; i++) {
@@ -417,9 +438,24 @@ void BleLink::onWritten(uint16_t conn, const uint8_t* data, uint16_t len) {
   /* A peer dialled US. Reassembled apart from the outward links: it has no Link
      slot, because we did not choose it and cannot dial it back. */
   if (_in_conn != conn) {
+    /* Refuse the handle that we dropped a moment ago. Its disconnect is still
+       in flight, and to adopt it again would grant another grace window. */
+    if (conn == _in_dropped_conn
+        && (long)(millis() - _in_dropped_ms) < (long)IN_DROP_HOLD_MS) return;
+
+    BLEConnection* c = Bluefruit.Connection(conn);
+    /* The deny list gates a peer that dials IN as well as one that we dial.
+       Without this the deny list stops nothing on this side: a peer whose
+       first frame failed the group tag simply connects again and takes the
+       single inbound slot back. */
+    if (_allow != nullptr && c != nullptr && !_allow(c->getPeerAddr())) {
+      c->disconnect();
+      return;
+    }
     _in_conn = conn;
     _in_expect = _in_have = 0; _in_hdr_have = 0;
     _in_authed = false;
+    _in_last_rx_ms = 0;                      // start of this peer's silence timer
     _in_up_ms = millis();                    // start of the authentication window
     _topology_changed = true;
   }
@@ -564,11 +600,20 @@ uint8_t BleLink::numUp() const {
   return n;
 }
 
-bool BleLink::getInboundAddr(ble_gap_addr_t& addr) const {
+bool BleLink::getInboundAddr(ble_gap_addr_t& addr, uint32_t* rx_age_s,
+                             uint32_t* queued) const {
   if (_in_conn == BLE_CONN_HANDLE_INVALID) return false;
   BLEConnection* c = Bluefruit.Connection(_in_conn);
   if (c == nullptr) return false;
   addr = c->getPeerAddr();
+  /* The same figure as getLink() reports, and for the same reason: counters
+     alone cannot tell a peer that carries traffic from one that went quiet an
+     hour ago. Signed, because the BLE event context writes _in_last_rx_ms. */
+  if (rx_age_s) {
+    *rx_age_s = (_in_last_rx_ms == 0) ? 0xFFFFFFFF
+              : (uint32_t)(((long)(millis() - _in_last_rx_ms)) / 1000);
+  }
+  if (queued) *queued = _in_txq_count;
   return true;
 }
 

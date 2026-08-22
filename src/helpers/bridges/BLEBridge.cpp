@@ -71,7 +71,7 @@ void BLEBridge::loop() {
       BRIDGE_DEBUG_PRINTLN("BLE: discovery failed to start, retrying later\n");
       return;
     }
-    _link.begin(link_rx_cb, self);
+    _link.begin(link_rx_cb, self, allow_cb);
     _transport_up = true;
     BRIDGE_DEBUG_PRINTLN("BLE: transport up, marker=0x%04X\n", (int)_codec.groupMarker());
   }
@@ -135,6 +135,19 @@ void BLEBridge::onBeacon(const ble_gap_addr_t& addr, int8_t rssi) {
     return;
   }
   _link.notePeer(addr);
+}
+
+bool BLEBridge::allow_cb(const ble_gap_addr_t& addr) {
+  if (_instance == nullptr) return true;
+  /* A peer that dials IN passes the same deny list as one that we dial. It is
+     refused for the whole deny period, so a stranger cannot fail the group tag
+     and come straight back to the single inbound slot. */
+  if (_instance->_deny.isDenied(addr.addr, millis())) {
+    _instance->_num_inbound_refused++;
+    BRIDGE_DEBUG_PRINTLN("BLE: inbound peer is denied, disconnecting\n");
+    return false;
+  }
+  return true;
 }
 
 void BLEBridge::link_rx_cb(const uint8_t* data, uint16_t len, uint8_t link_idx) {

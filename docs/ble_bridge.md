@@ -67,16 +67,29 @@ The marker is PUBLIC. Anyone in radio range can read it from a beacon and repeat
 it, so it filters and it does not authenticate. Proof of group membership is the
 group HMAC on the **first frame over the link**.
 
-A stranger can therefore make a node open a connection. It gets no data, and:
+A stranger can therefore make a node open a connection, and it can also dial the
+node itself. It gets no data, and the rules are the same in both directions:
 
 - a link whose first frame fails the group tag is dropped at once;
-- a link that sends nothing at all is dropped after 45 seconds;
-- either way the address goes on a deny list for 5 minutes.
+- a link that writes something and then never authenticates is dropped after 45
+  seconds;
+- a link that authenticates and then goes silent is dropped after 60 seconds;
+- either way the address goes on a deny list for 5 minutes, and that list is
+  checked both before the node dials out and before it adopts a peer that
+  dialled in.
 
 That deny list is what stops a repeat attacker from cycling the three central
-slots. What an attacker in radio range can still do is occupy a slot for a few
-seconds at a time, from a fresh address each time, and read the group marker.
-It cannot inject a packet into the mesh, and it cannot read the secret.
+slots and the one inbound slot. What an attacker in radio range can still do is
+occupy a slot for a few seconds at a time, from a fresh address each time, and
+read the group marker. It cannot inject a packet into the mesh, and it cannot
+read the secret.
+
+One gap remains. The bridge sees a peer that dialled in only on its FIRST write,
+because that write is the event it hooks. A peer that connects inward and then
+sends nothing at all is thus invisible to the bridge, and it holds the inbound
+peripheral slot for as long as the connection lives. The node keeps its CLI and
+DFU slot, and it keeps every outward link, so the cost is that no other peer can
+dial in until that connection ends.
 
 Only the node with the numerically lower BLE address dials. A pair therefore
 agrees on exactly one link, with no negotiation and no timers.
@@ -223,10 +236,18 @@ which the linker reserves whether or not this bridge is compiled in.
 
 ## Tests
 
-The BLE code needs a SoftDevice and cannot run on a host. What can be tested is
-in `BleBridgeFrame.h`, and `test/test_ble_bridge/` covers it: the frame layout
-and its tag, the beacon record and the group marker, the deny list, and the
-oversize guard with its counter.
+`test/test_ble_bridge/` covers two parts. `BleBridgeFrame.h` is header only and
+free of the BLE stack: the frame layout and its tag, the beacon record and the
+group marker, the deny list, and the oversize guard with its counter.
+
+`BleLink.cpp` builds against a Bluefruit stand-in in `test/mocks_ble_link/`, so
+the shipped source file is what runs. That covers the framing and the teardown
+paths: a header split across two writes, a truncated frame, a hunt that lands on
+a payload byte that looks like SYNC, a reconnect with a part-drained queue, and
+the deny list and the silence limit on the inbound peer.
+
+`BleStack`, `BleDiscovery` and `BLEBridge` itself still need a SoftDevice and
+have no host test.
 
 ```sh
 pio test -e native_ble
