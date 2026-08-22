@@ -19,14 +19,14 @@
 //
 // THE COST OF A SLOT. These figures come from RAK_3401_hydra (nRF52840,
 // 235,520 B RAM). We built the firmware at HYDRA_NUM_SLOTS=2 and again at 3:
-//   static (.bss)  +5,568 B for each chat slot. This is the ChatSlot object.
+//   static (.bss)  +5,640 B for each chat slot. This is the ChatSlot object.
 //                  The build reserves it whether the slot is enabled or not.
-//   heap           +2,296 B for each ENABLED chat slot. This is
-//                  8 x sizeof(mesh::Packet) (262 B) plus the three pool queues.
-//                  It is zero while the slot is disabled.
-//   flash          +192 B for each slot
+//   heap           +2,352 B for each ENABLED chat slot. This is
+//                  8 x sizeof(mesh::Packet) (262 B) plus 256 B for the three
+//                  pool queues. It is zero while the slot is disabled.
+//   flash          no measurable change for each slot
 // The total is about 7.9 KB, against about 20 KB for slot 0 (mesh 9,392 +
-// tables 1,296 + the 32-entry pool at about 9,250). Most of the 5,568 B is the
+// tables 1,296 + the 32-entry pool at about 9,250). Most of the 5,640 B is the
 // contact table of BaseChatMesh. So MAX_CONTACTS is the setting that matters if
 // the cost must come down more.
 
