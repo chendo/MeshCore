@@ -95,6 +95,10 @@ private:
   void handleSlotGet(int idx, uint32_t sender_timestamp, char* arg, char* reply, size_t reply_sz);
   bool setSlotPrivateKey(int idx, const char* hex, char* reply, size_t reply_sz);
   void reportPeers(char* reply, size_t reply_sz);
+#ifdef CLOCK_CONVERGE_MS
+  void loopClockConverge();
+  void reportClocks(char* reply, size_t reply_sz);
+#endif
   static const char* typeName(SlotType t);
   static void slotIdName(int idx, char* dest, size_t sz);
 
@@ -105,6 +109,51 @@ private:
 #endif
 #ifdef LORA_WATCHDOG_MS
   LoraWatchdog    _lora_wd;   // node-scoped: one for each board, not one for each slot
+#endif
+#ifdef CLOCK_CONVERGE_MS
+  /* CLOCK CONVERGENCE. The node steers its own clock towards what its
+     neighbours say the time is. The rules live in helpers/ClockPolicy.h as free
+     functions, and a host test covers every one of them. What is here is only
+     the plumbing: it reads the samples out of the observer, carries the counters
+     that the rules need, and writes the RTC.
+
+     It belongs to the NODE and not to a slot. There is one clock on this board
+     and several identities on it, so a slot that set the clock would set it for
+     every other slot as well. The observer is node-scoped for the same reason,
+     and it already holds a reading from every advert that this radio heard.
+
+     Defining CLOCK_CONVERGE_MS compiles the feature in and sets how often it
+     runs. It is still OFF until somebody types "clocks on", so a build that
+     carries it does not act on it by accident. */
+  /* How often the node looks while its clock is unset. A clock that nobody has
+     ever set makes the node invisible and not merely wrong: its adverts carry
+     timestamps from 2024 that every peer rejects as a replay. So it looks more
+     often in that state, because every round it stays there is a round off the
+     air. */
+  static const uint32_t CLOCK_CONVERGE_FAST_MS = 30UL * 1000UL;
+
+  /* A gap this large between what the clock reads and what it should read did
+     not come from a crystal. Something SET the clock: a person with "clock
+     sync" or "time", a client app, GPS or NTP. Convergence then stands down for
+     mesh::CLOCK_ADMIN_HOLD_MS.
+
+     Watching the clock catches every one of those paths. A callback on the CLI
+     would catch only the CLI, and it would tie examples/simple_repeater to
+     hydra, which nothing else does. 5s is far above the quantisation of a clock
+     that reads to the second and above the jitter of a hardware RTC against
+     millis(), and far below any set that a person would make. */
+  static const int32_t  CLOCK_EXTERNAL_SET_S = 5;
+
+  bool     _clock_converge = false;    // off until "clocks on"
+  uint32_t _clock_prev_ms = 0;         // millis() at the previous pass
+  uint32_t _clock_due_ms = 0;          // time owed before the next estimate
+  uint32_t _clock_since_move_ms = 0;   // feeds the slew allowance
+  uint32_t _clock_admin_hold_ms = 0;   // what is left of the 7-day admin hold
+  uint32_t _clock_expect_s = 0;        // what the clock read on the previous pass
+  bool     _clock_expect_ok = false;
+  uint32_t _clock_steps = 0, _clock_slews = 0, _clock_admin_sets = 0;
+  int32_t  _clock_last_adj_s = 0;
+  uint8_t  _clock_last_hold = 0;
 #endif
   HydraSlot*      _slots[HYDRA_NUM_SLOTS];
   SlotConfig      _cfg[HYDRA_NUM_SLOTS];   // the config. _slots[i]->type() is the live type.
