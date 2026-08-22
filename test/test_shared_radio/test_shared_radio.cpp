@@ -1588,3 +1588,132 @@ TEST(CrossSlotPriority, PriorityDefersButNeverRefusesSoAForcedSendStillGetsThrou
   EXPECT_TRUE(f.b.startSendRaw(msg, 3));
   EXPECT_EQ(1u, f.core.txWaits(TXWAIT_FORCED));
 }
+
+// ------------------------------------------------------------- clock sampler
+// The observer turns adverts into the readings that mesh::clockEstimate works
+// on, and it records the newest timestamp that this node has put on the air.
+// That mark is the replay floor: see MeshObserver::sentHighWater and
+// mesh::clockDecide.
+namespace {
+class TestClock : public mesh::RTCClock {
+  uint32_t _t;
+public:
+  explicit TestClock(uint32_t t) : _t(t) {}
+  uint32_t getCurrentTime() override { return _t; }
+  void setCurrentTime(uint32_t t) override { _t = t; }
+};
+
+const uint32_t NOW_S = 2000000000UL;   // any moment above mesh::CLOCK_SET_EPOCH
+
+// An advert that carries a timestamp, which the builder above leaves at zero.
+std::vector<uint8_t> stampedAdvert(std::vector<uint8_t> pub, uint32_t ts,
+                                   std::vector<std::vector<uint8_t>> hops = {}) {
+  std::vector<uint8_t> f = advert(pub, "N", 0, 0, hops, 2);
+  // [hdr][path_len][path][pub 32][ts 4] -- the timestamp follows the key
+  size_t o = 2 + hops.size() * 2 + 32;
+  for (int i = 0; i < 4; i++) f[o + i] = (uint8_t)((ts >> (8 * i)) & 0xFF);
+  return f;
+}
+}
+
+TEST(ClockSampler, EachPeerContributesOneReadingOfItsOwnClock) {
+  Fixture f;
+  TestClock clk(NOW_S);
+  f.core.observer().setClock(&clk);
+
+  f.deliver(stampedAdvert({0x11, 0x22, 0x33}, NOW_S + 40));
+  f.deliver(stampedAdvert({0x44, 0x55, 0x66}, NOW_S + 41));
+
+  mesh::ClockSample s[mesh::CLOCK_POLICY_MAX_SAMPLES];
+  int n = f.core.observer().clockSamples(s, mesh::CLOCK_POLICY_MAX_SAMPLES);
+  ASSERT_EQ(2, n);
+  EXPECT_EQ(0, s[0].hops) << "an empty path means we heard its own transmission";
+  EXPECT_EQ(40, s[0].offset_s);
+  EXPECT_EQ(41, s[1].offset_s);
+}
+
+TEST(ClockSampler, TheReadingIsRecomputedAgainstWhateverOurClockReadsNow) {
+  /* The ring holds what the peer SAID, never a difference from our clock. A
+     step of ours must therefore change the answer, because the old difference
+     would otherwise become a lie the moment convergence moved us. */
+  Fixture f;
+  TestClock clk(NOW_S);
+  f.core.observer().setClock(&clk);
+  f.deliver(stampedAdvert({0x11, 0x22, 0x33}, NOW_S + 40));
+
+  mesh::ClockSample s[4];
+  ASSERT_EQ(1, f.core.observer().clockSamples(s, 4));
+  EXPECT_EQ(40, s[0].offset_s);
+
+  clk.setCurrentTime(NOW_S + 30);            // convergence moved us 30s forward
+  ASSERT_EQ(1, f.core.observer().clockSamples(s, 4));
+  EXPECT_EQ(10, s[0].offset_s) << "the same reading, against the new clock";
+}
+
+TEST(ClockSampler, APeerWithNoClockOfItsOwnDoesNotVote) {
+  Fixture f;
+  TestClock clk(NOW_S);
+  f.core.observer().setClock(&clk);
+  // 15 May 2024: the VolatileRTCClock default, which is below CLOCK_SET_EPOCH.
+  f.deliver(stampedAdvert({0x11, 0x22, 0x33}, 1715770351UL));
+
+  mesh::ClockSample s[4];
+  EXPECT_EQ(0, f.core.observer().clockSamples(s, 4));
+}
+
+TEST(ClockSampler, PeersThatShareOneErrorCollapseOntoOneWeightedReading) {
+  /* In the 407-node survey a single group of 41 nodes held one offset. Counted
+     one by one, that group would have voted 41 times. */
+  Fixture f;
+  TestClock clk(NOW_S);
+  f.core.observer().setClock(&clk);
+  f.deliver(stampedAdvert({0x11, 0x22, 0x33}, NOW_S + 200));
+  f.deliver(stampedAdvert({0x44, 0x55, 0x66}, NOW_S + 200));
+  f.deliver(stampedAdvert({0x77, 0x88, 0x99}, NOW_S + 200));
+
+  mesh::ClockSample s[8];
+  ASSERT_EQ(1, f.core.observer().clockSamples(s, 8));
+  EXPECT_EQ(200, s[0].offset_s);
+  EXPECT_EQ(3, s[0].weight) << "one reading, carrying the size of the group";
+}
+
+TEST(ClockSampler, ARelayedAdvertIsSampledWithItsHopCount) {
+  Fixture f;
+  TestClock clk(NOW_S);
+  f.core.observer().setClock(&clk);
+  f.deliver(stampedAdvert({0x11, 0x22, 0x33}, NOW_S, {{0xAA, 0x01}, {0xBB, 0x02}}));
+
+  mesh::ClockSample s[4];
+  ASSERT_EQ(1, f.core.observer().clockSamples(s, 4));
+  EXPECT_EQ(2, s[0].hops) << "so the estimator can undo the journey and down-weight it";
+}
+
+TEST(ReplayFloor, TheObserverRecordsTheNewestTimestampWeHavePutOnTheAir) {
+  Fixture f;
+  f.core.setPortIdentity(f.ia, SELF_KEY);
+  EXPECT_EQ(0u, f.core.observer().sentHighWater()) << "nothing sent yet";
+
+  auto mine = stampedAdvert({0x30, 0x70, 0x30, 0x70}, NOW_S);
+  f.core.observer().observeTx(mine.data(), (int)mine.size(), 0);
+  EXPECT_EQ(NOW_S, f.core.observer().sentHighWater());
+
+  // A later advert raises the mark.
+  auto later = stampedAdvert({0x30, 0x70, 0x30, 0x70}, NOW_S + 600);
+  f.core.observer().observeTx(later.data(), (int)later.size(), 0);
+  EXPECT_EQ(NOW_S + 600, f.core.observer().sentHighWater());
+
+  /* An earlier one does not lower it. The mark is what peers hold for us, and a
+     peer never forgets the highest timestamp it has seen from this node. */
+  auto earlier = stampedAdvert({0x30, 0x70, 0x30, 0x70}, NOW_S + 60);
+  f.core.observer().observeTx(earlier.data(), (int)earlier.size(), 0);
+  EXPECT_EQ(NOW_S + 600, f.core.observer().sentHighWater());
+}
+
+TEST(ReplayFloor, AnAdvertFromSomebodyElseIsNotOurMark) {
+  Fixture f;
+  f.core.setPortIdentity(f.ia, SELF_KEY);
+  auto theirs = stampedAdvert({0x11, 0x22, 0x33}, NOW_S);
+  f.core.observer().observeTx(theirs.data(), (int)theirs.size(), 0);
+  EXPECT_EQ(0u, f.core.observer().sentHighWater())
+      << "only what WE originated is a mark against us";
+}

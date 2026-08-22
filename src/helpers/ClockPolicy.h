@@ -85,7 +85,7 @@ static const uint8_t  CLOCK_MIN_SOURCES = 3;
 /* An unset clock may act on two. There is nothing to protect: until the node
    leaves 15 May 2024 its adverts carry timestamps that the rest of the mesh
    rejects as replays, so the node is not merely wrong, it is invisible. Every
-   round spent waiting for a third source is a round off the air. */
+   round that the node waits for a third source is a round off the air. */
 static const uint8_t  CLOCK_UNSET_MIN_SOURCES = 2;
 
 /* Above this hop count two error terms are larger than the reading is worth.
@@ -193,9 +193,9 @@ struct ClockEstimate {
  *
  *   The result is that the node lands a few seconds BEHIND the consensus
  *   instead of on it. Every correction after that is therefore a FORWARD one,
- *   and forward is the safe direction: a clock that moves backwards stops being
- *   accepted by every peer it has already talked to, because their replay
- *   defences reject a timestamp that is not newer than the last one they saw.
+ *   and forward is the safe direction: every peer that a clock has already
+ *   talked to rejects it after it moves backwards, because their replay defences
+ *   refuse a timestamp that is not newer than the last one they saw.
  *   A node that approaches the true time from below never has to make that
  *   move. A node that aims at the median crosses it and steps back every time
  *   its crystal runs fast.
@@ -390,10 +390,10 @@ inline uint32_t clockApply(uint32_t now_s, int32_t adj_s) {
  * MeshCore rejects a packet whose sender_timestamp is not newer than the last
  * one that the receiver stored for that sender. BaseChatMesh does this to
  * adverts, against ContactInfo::last_advert_timestamp, and the servers do it to
- * logins and requests against ClientInfo::last_timestamp. Therefore a node that
- * moves its clock backwards stops being accepted by every peer that already
- * knows it, and it stays rejected until its clock climbs back past its own
- * previous high-water mark. At 60 seconds an hour, a 10-minute correction would
+ * logins and requests against ClientInfo::last_timestamp. Therefore every peer
+ * that already knows a node rejects that node after it moves its clock
+ * backwards, and the rejection continues until its clock climbs back past its
+ * own previous high-water mark. At 60 seconds an hour, a 10-minute correction would
  * cost 10 hours of partial invisibility.
  *
  * The fix is exact rather than cautious. The caller records the newest

@@ -34,6 +34,7 @@
 
 #include <Arduino.h>
 #include <MeshCore.h>
+#include "ClockPolicy.h"
 
 class MeshObserver {
 public:
@@ -81,39 +82,22 @@ public:
   // any node.
   static const uint32_t MIN_SANE_EPOCH = 1700000000UL;   // 2023-11-14
 
-  /* A clock reading below this value is not a wrong time. It is NO time. These
-     boards have no hardware RTC. Therefore every reboot returns them to the
-     built-in 15 May 2024 of VolatileRTCClock, and they hold that date until
-     something else sets them. 1 Jan 2025 is safely above that default and
-     below any true deployment. Therefore it separates "never set" from "set
-     and drifting", and the code does not need to know the build date of the
-     firmware.
-     This works in both directions. A node whose own clock is below this value
-     must not vote. One such neighbour is already on this mesh, and it reads
-     +71038395s. */
-  static const uint32_t CLOCK_SET_EPOCH = 1735689600UL;  // 2025-01-01
-  static const uint16_t HOP_DELAY_DEFAULT_MS = 1500;
+  /* mesh::CLOCK_SET_EPOCH separates "never set" from "set and drifting", and
+     ClockPolicy.h explains the value. It works in both directions: a node whose
+     own clock is below it must not vote. One such neighbour is already on this
+     mesh, and it reads +71038395s. */
+  static const uint16_t HOP_DELAY_DEFAULT_MS = mesh::CLOCK_HOP_DELAY_DEFAULT_MS;
   /* Below this number of measured pairs, the mean has too much noise to beat
      the computed default. Each pair carries the full spread of one random
      relay wait. */
   static const uint32_t HOP_DELAY_MIN_PAIRS = 8;
 
-  /* The clock consensus. See clockConsensus(). The thresholds come from a
-     survey of 407 nodes on a true regional mesh:
-       - the median offset was -12s and the MAD was 7s. But the mean was -46s
-         and the range was -3533..+1239. Therefore you cannot use any estimate
-         that is based on the mean.
-       - 21% of the nodes were outliers by 3*MAD. The estimate did not change
-         when the code discarded them.
-       - the extreme values did not come from single bad clocks. They came from
-         whole GROUPS that shared one offset (-227s x6, -211s x5, +335s x4).
-         These are sub-networks that agreed with each other and were wrong
-         together.
-       - 10 nodes reported rates that are physically impossible. The largest
-         was 58485 s/day. */
+  /* The largest rate that a crystal can produce. Ten nodes in the 407-node
+     survey reported rates above it, the largest at 58485 s/day. A rate that
+     high means that something SETS that clock, so the clock does not drift and
+     its present value says nothing about the true time. */
   static const int32_t  MAX_SANE_DRIFT_S_PER_DAY = 50;
   static const uint32_t CLOCK_VOTE_MAX_AGE_MS = 60UL * 60UL * 1000UL;   // 1 hour
-  static const uint8_t  CLOCK_MIN_SOURCES = 3;
 
   /* The clock samples use their own ring, not the peer table. The code gives a
      peer slot only to a node within two hops (see noteAdvert). That is the
@@ -123,11 +107,6 @@ public:
      a better shape for this work. What matters is a recent spread of readings,
      not the history of each node. */
   static const uint8_t  CLOCK_SAMPLES = 24;
-  /* Above this hop count, two error terms are larger than the value of the
-     reading. They are the accumulated propagation correction, and the
-     uncertainty in the constant that the code uses to make that correction. */
-  static const uint8_t  MAX_CLOCK_HOPS = 8;
-
   /* This structure stores what the OTHER node said. It never stores the
      difference from our own clock. A difference has a meaning only against the
      clock that measured it. Therefore, at the moment a person steps our clock,
@@ -137,7 +116,7 @@ public:
      because the code computes it again against the present reading of our
      clock. A clock set does not change millis(). Therefore the elapsed-time
      correction also stays valid across a clock set. */
-  struct ClockSample {
+  struct ClockReading {
     uint8_t  pub4[4];
     uint32_t their_ts;       // the reading of their clock when the advert was stamped
     uint32_t ms;             // millis() when we heard it
@@ -151,42 +130,39 @@ public:
      abstains. It does not reject the sample, because a clock that runs fast
      becomes an outlier soon enough. */
   static const uint32_t DRIFT_MIN_SPAN_MS = 2UL * 60UL * 60UL * 1000UL;
-  /* A minimum value for the outlier threshold. A mesh that already agrees to
-     within a second must not reject almost every sample for a 1s error. */
-  static const int32_t  CLOCK_CLIP_FLOOR_S = 2;
-
-  struct ClockConsensus {
-    bool     valid;
-    int32_t  offset_s;    // the seconds to ADD to our clock to join the consensus
-    uint8_t  n_seen;      // the peers that gave a usable reading
-    uint8_t  n_used;      // the readings that remain after outlier rejection
-    uint8_t  agree_pct;   // n_used * 100 / n_seen: the fraction that remains
-    uint8_t  n_zero_hop;  // how many of those the node heard directly (for reports only)
-    uint16_t hop_delay_ms;// the per-hop correction that the code applied
-    /* The spread of the readings that remain. WARNING: agree_pct on its own is
-       NOT a measure of confidence. Take a population that splits equally
-       between two values 300s apart. The clipping removes no node at all, so
-       the code reports 100% agreement on a median that no node holds. Any code
-       that acts on offset_s must also check spread_s. */
-    int32_t  spread_s;
-  };
 
   /**
-   * @brief  The clock error that the neighbourhood attributes to us.
+   * @brief  Hand the present readings to the clock estimator.
    *
-   * The result is the median of the per-peer offsets, after the code discards
-   * the outliers by median absolute deviation. The design makes the readings
-   * zero-hop, because a relayed advert measures the propagation delay and not
-   * the skew. The code also filters the readings by age, and by whether the
-   * apparent rate of the peer is physically possible. It then collapses the
-   * peers that report an identical offset. In the survey, one group of 41
-   * nodes shared a single offset. Without the collapse, that group would have
-   * voted 41 times.
+   * This is the boundary between the part that needs hardware and the part that
+   * does not. Everything that needs the ring, millis() or our own clock happens
+   * here. The function filters the readings by age, by whether the clock of the
+   * peer is set at all, and by whether the apparent rate of that peer is
+   * physically possible. It then ages each reading forward and subtracts it
+   * from our clock AT THIS MOMENT. Peers that report an identical corrected
+   * offset collapse onto one sample that carries the size of the group as its
+   * weight, because in the survey one group of 41 nodes held a single offset,
+   * and counted one by one that group would have voted 41 times.
    *
-   * This function only reports. The caller decides whether to act on the
-   * result.
+   * The statistics then happen in mesh::clockEstimate, which needs none of the
+   * above and which a host test covers. See helpers/ClockPolicy.h.
+   *
+   * \param  out  an array of at least `max` samples
+   * \param  max  how many samples the array holds
+   * \returns  how many samples the function wrote
    */
-  ClockConsensus clockConsensus(uint8_t min_sources = CLOCK_MIN_SOURCES) const;
+  int clockSamples(mesh::ClockSample* out, int max) const;
+
+  /**
+   * @brief  The newest timestamp that this node has put on the air.
+   *
+   * Returns 0 while the node has sent nothing. This is the REPLAY FLOOR. A peer
+   * drops an advert whose timestamp is not newer than the mark that the peer
+   * already holds for us, so a clock that goes below this value takes the node
+   * off the air for everybody who already knows it. mesh::clockDecide refuses
+   * to cross it.
+   */
+  uint32_t sentHighWater() const { return _sent_high_s; }
 
   /**
    * @brief  The measured one-way propagation delay per relay hop, in
@@ -359,12 +335,16 @@ private:
      different on framing. */
   bool parseAdvert(const uint8_t* frame, int len,
                    const uint8_t*& pub, uint8_t& hops, uint32_t& their_ts) const;
+  /* The same parse, without the self filter. observeTx needs it, because the
+     one advert that observeTx cares about is OUR OWN. */
+  bool parseAdvertFrame(const uint8_t* frame, int len,
+                        const uint8_t*& pub, uint8_t& hops, uint32_t& their_ts) const;
   int  selfIndex(const uint8_t* hash, uint8_t width) const;   // -1 if it is not ours
   bool isSelf(const uint8_t* hash, uint8_t width) const { return selfIndex(hash, width) >= 0; }
 
   PeerEntry _peers[MAX_PEERS];
 
-  ClockSample _clock_samples[CLOCK_SAMPLES];
+  ClockReading _clock_samples[CLOCK_SAMPLES];
   uint8_t     _num_clock_samples = 0;
   void noteClockSample(const uint8_t* pub, uint8_t hops, uint32_t their_ts);
 
@@ -394,6 +374,7 @@ private:
   int     _num_self = 0;
 
   mesh::RTCClock* _clock = nullptr;
+  uint32_t _sent_high_s = 0;   // see sentHighWater()
 
   // The recent flood transmits that wait for a confirmation. A relayed copy can
   // need some time to return. Therefore this is a time window, not one slot.
