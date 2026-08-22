@@ -28,6 +28,10 @@ void initVariant() {
   pinMode(PIN_TXCO, OUTPUT);
   digitalWrite(PIN_TXCO, HIGH);
 
+  // Release the GPS from reset, and keep it released.
+  pinMode(PIN_GPS_REINIT, OUTPUT);
+  digitalWrite(PIN_GPS_REINIT, HIGH);
+
   // shutdown gps
   pinMode(PIN_GPS_STANDBY, OUTPUT);
   digitalWrite(PIN_GPS_STANDBY, LOW);
