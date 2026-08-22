@@ -219,6 +219,23 @@ SlotEnableResult HydraNode::startSlot(int idx) {
   _core.setPortActive(idx, true);
   _core.setPortName(idx, typeName(_cfg[idx].type));
 
+#if HYDRA_NUM_CHAT_SLOTS > 0
+  /* The diagnostic bot needs three things that no identity owns: the radio, for
+     the airtime of a received frame at the coding rate of its sender; the peer
+     table, which watches the antenna and not an identity; and the coding rate
+     that this node transmits at, which the prefs of slot 0 hold (decision 8).
+     The last one is a pointer, so `set cr` changes what a ping reply says with
+     no further wiring.
+
+     The ACL is the gate for `peers` (decision E). A room slot has its own ACL.
+     A chat slot has none, and then nobody is an admin and `peers` always
+     refuses. */
+  ChatSlot& cs = _chat[idx - 1];
+  cs.mesh().diag().attach(&cs.port(), &_core.observer(), &_slot0.prefs()->cr);
+  cs.mesh().diag().setAuth(cs.room() ? &cs.room()->acl : nullptr);
+  cs.mesh().diag().setEnabled(_cfg[idx].diag);
+#endif
+
   Serial.printf("hydra: slot %d (%s) \"%s\" id ", idx, typeName(_slots[idx]->type()),
                 _cfg[idx].name);
   mesh::Utils::printHex(Serial, _slots[idx]->identity().pub_key, PUB_KEY_SIZE);
@@ -322,6 +339,7 @@ void HydraNode::loadSlotConfig() {
     StrHelper::strncpy(_cfg[i].name, name, sizeof(_cfg[i].name));
     _cfg[i].advert_mins = rec[1];
     _cfg[i].flood = rec[2] != 0;
+    _cfg[i].diag = rec[3] != 0;   // a v2 file from before the bot holds 0 here
     _cfg[i].type = slotTypeFromRecord(rec[0], _cfg[i].name);
   }
   f.close();
@@ -340,8 +358,12 @@ void HydraNode::saveSlotConfig() {
   uint8_t hdr[2] = { 'H', 2 };
   f.write(hdr, 2);
   for (int i = 1; i < HYDRA_NUM_SLOTS; i++) {
+    // Byte 3 was a spare that v2 always wrote as 0. The diagnostic bot takes
+    // it. An older file therefore reads back as "the bot is off", which is the
+    // default, so the record needs no new version.
     uint8_t rec[4] = { (uint8_t)_cfg[i].type, _cfg[i].advert_mins,
-                       (uint8_t)(_cfg[i].flood ? 1 : 0), 0 };
+                       (uint8_t)(_cfg[i].flood ? 1 : 0),
+                       (uint8_t)(_cfg[i].diag ? 1 : 0) };
     char name[SLOT_NAME_MAX];
     memset(name, 0, sizeof(name));
     StrHelper::strncpy(name, _cfg[i].name, sizeof(name));
@@ -360,10 +382,11 @@ void HydraNode::formatSlotTable(char* reply, size_t reply_sz) {
     char key[9] = "-";
     if (live) mesh::Utils::toHex(key, _slots[i]->identity().pub_key, 4);
     const char* nm = (i == 0) ? _slot0.name() : _cfg[i].name;
-    int w = snprintf(reply + n, reply_sz - n, " [%d]%s%s \"%s\" %s rx=%u tx=%u;", i,
+    int w = snprintf(reply + n, reply_sz - n, " [%d]%s%s \"%s\" %s rx=%u tx=%u%s;", i,
                      typeName(_cfg[i].type), live ? "" : "(down)",
                      nm[0] ? nm : "(unnamed)", key,
-                     (unsigned)_core.portRxCount(i), (unsigned)_core.portTxCount(i));
+                     (unsigned)_core.portRxCount(i), (unsigned)_core.portTxCount(i),
+                     _cfg[i].diag ? " diag" : "");
     if (w < 0) break;
     n += w;
   }
@@ -627,6 +650,18 @@ void HydraNode::handleSlotSet(int idx, uint32_t sender_timestamp, char* arg,
     snprintf(reply, reply_sz, "OK - slot %d flood advert %s", idx, _cfg[idx].flood ? "on" : "off");
     return;
   }
+  if (strncmp(arg, "diag ", 5) == 0) {
+    // The diagnostic bot of decision 12. It answers a DIRECT text message and
+    // nothing else, so no packet can make more than this one node transmit. It
+    // is off until an operator turns it on.
+    _cfg[idx].diag = strncmp(arg + 5, "on", 2) == 0;
+    saveSlotConfig();
+#if HYDRA_NUM_CHAT_SLOTS > 0
+    _chat[idx - 1].mesh().diag().setEnabled(_cfg[idx].diag);
+#endif
+    snprintf(reply, reply_sz, "OK - slot %d diag bot %s", idx, _cfg[idx].diag ? "on" : "off");
+    return;
+  }
   StrHelper::strncpy(reply, "ERR: unknown setting", reply_sz);
 }
 
@@ -642,6 +677,8 @@ void HydraNode::handleSlotGet(int idx, uint32_t sender_timestamp, char* arg,
     snprintf(reply, reply_sz, "> %d", (int)_cfg[idx].advert_mins);
   } else if (strcmp(arg, "flood.advert") == 0) {
     snprintf(reply, reply_sz, "> %s", _cfg[idx].flood ? "on" : "off");
+  } else if (strcmp(arg, "diag") == 0) {
+    snprintf(reply, reply_sz, "> %s", _cfg[idx].diag ? "on" : "off");
   } else if (strcmp(arg, "public.key") == 0) {
     if (!_core.portActive(idx)) { StrHelper::strncpy(reply, "ERR: slot not running", reply_sz); return; }
     reply[0] = '>'; reply[1] = ' ';
