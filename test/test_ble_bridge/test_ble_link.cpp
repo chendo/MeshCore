@@ -150,3 +150,41 @@ TEST_F(BleLinkTest, aPayloadByteThatLooksLikeSyncDoesNotBecomeAFrame) {
   ASSERT_EQ(g_rx.size(), 1u);
   EXPECT_EQ(g_rx[0].data, good);
 }
+
+/* ---- Teardown ----------------------------------------------------------- */
+
+TEST_F(BleLinkTest, aReconnectDoesNotResumeAPartlyDrainedQueue) {
+  bringUpLink0();
+
+  std::vector<uint8_t> payload = payloadOf(64);
+  ASSERT_EQ(link.send(payload.data(), (uint16_t)payload.size()), 1);
+
+  /* Credits run out part way through the frame, which is ordinary. */
+  BleMock::credits = 10;
+  link.loop();
+  ASSERT_EQ(BleMock::sink[0].size(), 10u);
+
+  /* The peer goes quiet and the idle check drops the link. The same pass then
+     dials again, because the backoff has long expired. */
+  BleMock::advance(61000);
+  link.loop();
+
+  ble_gap_addr_t a;
+  bool up;
+  int8_t rssi;
+  uint32_t sent, recv, drops, queued = 99;
+  ASSERT_TRUE(link.getLink(0, a, up, rssi, sent, recv, drops, nullptr, &queued));
+  EXPECT_FALSE(up);
+  EXPECT_EQ(queued, 0u);                    // the frame belongs to the old link
+
+  /* The peer comes back. Nothing may go out, because nothing is queued. A frame
+     that resumed from its old offset would put a headerless tail on the wire,
+     and a tail that carries a plausible SYNC and length builds a frame that
+     fails the group tag. That count is what tells a foreign secret from a
+     framing fault, so it must stay honest. */
+  BleMock::clearSinks();
+  BleMock::credits = -1;
+  BleMock::completeDial();
+  link.loop();
+  EXPECT_TRUE(BleMock::sink[0].empty());
+}

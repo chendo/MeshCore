@@ -92,6 +92,22 @@ bool BleLink::begin(rx_handler_t handler, const ble_gap_addr_t& self_addr) {
   return true;
 }
 
+void BleLink::resetLink(Link& l) {
+  l.state = IDLE;
+  l.conn = BLE_CONN_HANDLE_INVALID;
+  l.last_rx_ms = 0;
+  l.txq_count = 0; l.txq_head = 0; l.tx_off = 0;
+  l.rx_expect = l.rx_have = 0; l.rx_hdr_have = 0;
+  l.authed = false; l.up_ms = 0;
+}
+
+void BleLink::resetInbound() {
+  _in_conn = BLE_CONN_HANDLE_INVALID;
+  _in_txq_count = 0; _in_txq_head = 0; _in_tx_off = 0;
+  _in_expect = _in_have = 0; _in_hdr_have = 0;
+  _in_authed = false; _in_up_ms = 0;
+}
+
 void BleLink::end() {
   if (!_running) return;
   _running = false;
@@ -108,21 +124,15 @@ void BleLink::end() {
       BLEConnection* c = Bluefruit.Connection(l.conn);
       if (c != nullptr) c->disconnect();
     }
-    l.state = EMPTY;
-    l.conn = BLE_CONN_HANDLE_INVALID;
-    l.txq_count = 0; l.txq_head = 0; l.tx_off = 0;
-    l.rx_expect = l.rx_have = 0; l.rx_hdr_have = 0;
-    l.authed = false; l.up_ms = 0;
+    resetLink(l);
+    l.state = EMPTY;                         // the slot is free for another peer
   }
 
   if (_in_conn != BLE_CONN_HANDLE_INVALID) {
     BLEConnection* c = Bluefruit.Connection(_in_conn);
     if (c != nullptr) c->disconnect();
-    _in_conn = BLE_CONN_HANDLE_INVALID;
   }
-  _in_txq_count = 0; _in_txq_head = 0; _in_tx_off = 0;
-  _in_expect = _in_have = 0; _in_hdr_have = 0;
-  _in_authed = false; _in_up_ms = 0;
+  resetInbound();
   _auth_fail_count = 0; _auth_fail_head = 0;
   _topology_changed = true;                  // the caller must arm the scanner again
 }
@@ -179,10 +189,7 @@ void BleLink::dropLink(uint8_t idx) {
     if (_in_conn == BLE_CONN_HANDLE_INVALID) return;
     BLEConnection* c = Bluefruit.Connection(_in_conn);
     if (c != nullptr) c->disconnect();
-    _in_conn = BLE_CONN_HANDLE_INVALID;
-    _in_txq_count = 0; _in_txq_head = 0; _in_tx_off = 0;
-    _in_expect = _in_have = 0; _in_hdr_have = 0;
-    _in_authed = false; _in_up_ms = 0;
+    resetInbound();
     _topology_changed = true;
     return;
   }
@@ -192,11 +199,7 @@ void BleLink::dropLink(uint8_t idx) {
   BLEConnection* c = Bluefruit.Connection(l.conn);
   if (c != nullptr) c->disconnect();
   l.unauthed_drops++;
-  l.state = IDLE;
-  l.conn = BLE_CONN_HANDLE_INVALID;
-  l.last_rx_ms = 0;
-  l.txq_count = 0; l.txq_head = 0; l.tx_off = 0;
-  l.rx_expect = l.rx_have = 0; l.rx_hdr_have = 0;
+  resetLink(l);
   /* Back off hard, and do not dial again at once. A peer that cannot
      authenticate now will not authenticate in two seconds either. */
   l.backoff_ms = BACKOFF_MAX_MS;
@@ -211,10 +214,7 @@ void BleLink::checkInbound() {
   /* The peer went away. Forget it, or numUp() over-counts for ever and every
      notify() goes to a handle that no longer exists. The source of this port
      never cleared the handle, because nothing else looked at it. */
-  _in_conn = BLE_CONN_HANDLE_INVALID;
-  _in_txq_count = 0; _in_txq_head = 0; _in_tx_off = 0;
-  _in_expect = _in_have = 0; _in_hdr_have = 0;
-  _in_authed = false; _in_up_ms = 0;
+  resetInbound();
   _topology_changed = true;
 }
 
@@ -239,9 +239,7 @@ void BleLink::loop() {
     BLEConnection* c = Bluefruit.Connection(l.conn);
     if (c != nullptr) c->disconnect();
     l.drops++;
-    l.state = IDLE;
-    l.conn = BLE_CONN_HANDLE_INVALID;
-    l.last_rx_ms = 0;
+    resetLink(l);
   }
 
   /* Prove group membership, or lose the slot.
@@ -340,9 +338,7 @@ void BleLink::onDisconnected(uint16_t conn, uint8_t reason) {
   Link& l = _links[idx];
   if (l.state == UP) l.drops++;
   _topology_changed = true;
-  l.state = IDLE;
-  l.conn = BLE_CONN_HANDLE_INVALID;
-  l.rx_expect = l.rx_have = 0; l.rx_hdr_have = 0;
+  resetLink(l);
   (void)reason;                              // reported through getLink's counters
 }
 
