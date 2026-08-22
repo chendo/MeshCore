@@ -14,8 +14,14 @@
 // POSTS ARE IN RAM ONLY (decision G). One flash write for each post gives the
 // ~1.6 s block of the loop and the wear problem that the ACL work exists to
 // avoid. By decision, a reboot loses the posts. MAX_UNSYNCED_POSTS is a
-// delivery window for late clients. It is not a history. A larger value does
-// not give a new member a backlog.
+// delivery buffer for late clients. It is not a history. A larger value does
+// not give a new member a backlog. RoomSync.h says why.
+//
+// This object also holds the working state of the protocol: the reply buffer,
+// the peer-match table, the round-robin cursor and the telemetry encoder. They
+// live here and not in the mesh object for two reasons. A chat slot then pays
+// nothing for them. And RoomStore::heapCost() then reports the true cost of a
+// room to the node RAM reserve.
 //
 // The code allocates everything here on the heap when you ENABLE the slot. It
 // frees it when you disable the slot. This matches DeferredPacketManager. A
@@ -23,41 +29,50 @@
 // the node RAM reserve floor useful. To enable a room is the moment when the
 // code asks the heap for the memory.
 
+#include "RoomSync.h"
 #include <helpers/ClientACL.h>
 #include <helpers/IdentityStore.h>
+#include <helpers/SensorManager.h>
 #include <Mesh.h>
-
-#ifndef MAX_UNSYNCED_POSTS
-  #define MAX_UNSYNCED_POSTS  32
-#endif
-
-#define MAX_POST_TEXT_LEN  (160 - 9)
-
-// This has the same shape as PostInfo in examples/simple_room_server. We
-// declare it again and do not include that header. That header defines a class
-// MyMesh, and slot 0 already has one.
-struct PostInfo {
-  mesh::Identity author;
-  uint32_t post_timestamp;   // by OUR clock
-  char text[MAX_POST_TEXT_LEN + 1];
-};
 
 // A v1 record holds the pubkey, the permissions, the out-path and the sync
 // point. The code calculates the shared secret again at each load. So a slot
 // whose private key changed gets secrets that work. There is no old copy on the
 // disk to disagree with them.
+//
+// v2 adds the settings of the room before the records: the room password and
+// the read-only flag. A v1 file still loads, and it gives the default for both.
 #define ROOM_ACL_MAGIC_0  'R'
 #define ROOM_ACL_MAGIC_1  1
+#define ROOM_ACL_MAGIC_2  2
+
+#define ROOM_PASSWORD_LEN  16
 
 class RoomStore {
 public:
   ClientACL acl;
-  PostInfo  posts[MAX_UNSYNCED_POSTS];
-  int       next_post_idx;
-  uint16_t  num_posted;
+  PostRing  ring;
 
-  RoomStore() : next_post_idx(0), num_posted(0) {
-    memset(posts, 0, sizeof(posts));
+  // ---- the settings of the room ---------------------------------------------
+  // A client that sends this password joins with read and write rights. An
+  // EMPTY password matches the empty string that a client sends when it has no
+  // password. So a room with no password set is OPEN. That is the behaviour of
+  // examples/simple_room_server, and this port keeps it.
+  char    guest_password[ROOM_PASSWORD_LEN];
+  uint8_t allow_read_only;   // admit a wrong password as a reader
+
+  // ---- the working state of the protocol ------------------------------------
+  uint8_t  reply_data[MAX_PACKET_PAYLOAD];
+  int      matching_peer_indexes[MAX_CLIENTS];
+  unsigned long next_push;
+  int      next_client_idx;   // the round-robin cursor over the ACL
+  bool     acl_dirty;         // the slot turns this into one delayed flash write
+  CayenneLPP telemetry;
+
+  RoomStore() : allow_read_only(0), next_push(0), next_client_idx(0), acl_dirty(false),
+                telemetry(MAX_PACKET_PAYLOAD - 4) {
+    guest_password[0] = 0;
+    memset(matching_peer_indexes, 0, sizeof(matching_peer_indexes));
   }
 
   static size_t heapCost() { return sizeof(RoomStore); }
@@ -73,7 +88,15 @@ public:
   #endif
     if (!f) return;
     uint8_t hdr[2];
-    if (f.read(hdr, 2) == 2 && hdr[0] == ROOM_ACL_MAGIC_0 && hdr[1] == ROOM_ACL_MAGIC_1) {
+    if (f.read(hdr, 2) == 2 && hdr[0] == ROOM_ACL_MAGIC_0
+        && (hdr[1] == ROOM_ACL_MAGIC_1 || hdr[1] == ROOM_ACL_MAGIC_2)) {
+      if (hdr[1] >= ROOM_ACL_MAGIC_2) {
+        if (f.read((uint8_t*)guest_password, ROOM_PASSWORD_LEN) != ROOM_PASSWORD_LEN) {
+          guest_password[0] = 0;
+        }
+        guest_password[ROOM_PASSWORD_LEN - 1] = 0;
+        if (f.read(&allow_read_only, 1) != 1) allow_read_only = 0;
+      }
       for (;;) {
         uint8_t pub[PUB_KEY_SIZE], perms, path_len, path[MAX_PATH_SIZE];
         uint32_t sync_since;
@@ -107,8 +130,10 @@ public:
     File f = fs->open(file, "w", true);
   #endif
     if (!f) return false;
-    uint8_t hdr[2] = { ROOM_ACL_MAGIC_0, ROOM_ACL_MAGIC_1 };
+    uint8_t hdr[2] = { ROOM_ACL_MAGIC_0, ROOM_ACL_MAGIC_2 };
     f.write(hdr, 2);
+    f.write((const uint8_t*)guest_password, ROOM_PASSWORD_LEN);
+    f.write(&allow_read_only, 1);
     for (int i = 0; i < acl.getNumClients(); i++) {
       ClientInfo* c = acl.getClientByIdx(i);
       if (c->permissions == 0) continue;   // deleted / guest
