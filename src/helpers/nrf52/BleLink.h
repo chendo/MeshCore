@@ -232,6 +232,21 @@ private:
                   unsigned long& started_ms, uint32_t& resyncs,
                   uint32_t& recv, unsigned long& last_rx_ms,
                   uint8_t idx, const uint8_t* data, uint16_t len);
+  /**
+   * @brief  Return one outward link to IDLE with every buffer empty.
+   *
+   * Every teardown path calls this, so a new path cannot forget a field. Two
+   * of the three paths used to leave the TX queue behind. A part-sent frame
+   * then resumed from tx_off on the next connection and put a headerless tail
+   * on the wire; a tail that carries a plausible SYNC and length builds a
+   * frame that fails the group tag, and that count is what separates a foreign
+   * secret from a framing fault.
+   *
+   * The caller keeps whatever it needs beyond this, such as the backoff.
+   */
+  void resetLink(Link& l);
+  /** The same for the inbound peer, which has no Link slot. */
+  void resetInbound();
   int findByConn(uint16_t conn) const;
   bool enqueue(Link& l, const uint8_t* data, uint16_t len);
   void drain(Link& l, uint8_t idx);
