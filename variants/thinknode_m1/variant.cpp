@@ -20,8 +20,10 @@ void initVariant() {
   pinMode(PIN_BUTTON1, INPUT_PULLUP);
   pinMode(PIN_BUTTON2, INPUT_PULLUP);
 
-  // No LED setup here. The only LED on this board is pin 13, and
-  // ThinkNodeM1Board sets that one up as the LoRa TX indicator.
+  pinMode(LED_RED, OUTPUT);
+  pinMode(LED_GREEN, OUTPUT);
+  pinMode(LED_BLUE, OUTPUT);
+  digitalWrite(LED_BLUE, HIGH);
 
   pinMode(PIN_TXCO, OUTPUT);
   digitalWrite(PIN_TXCO, HIGH);

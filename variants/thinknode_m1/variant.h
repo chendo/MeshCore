@@ -60,26 +60,16 @@
 
 ////////////////////////////////////////////////////////////////////////////////
 // Builtin LEDs
-//
-// This board has one LED, on pin 13. It belongs to ThinkNodeM1Board, which
-// drives it active HIGH as the LoRa TX indicator (-D P_LORA_TX_LED=13 in
-// platformio.ini).
-//
-// PIN_STATUS_LED, PIN_LED and LED_PIN are deliberately not defined. There is
-// no second LED for them to point at, and the values that used to be here
-// (38, 36, 14) are pins this same file assigns to PIN_SPI1_MISO / DISP_MISO,
-// PIN_GPS_PPS and PIN_NEOPIXEL.
-//
-// LED_BLUE, LED_BUILTIN and LED_STATE_ON still have to be defined, because the
-// framework refers to them unconditionally: Bluefruit writes to LED_BLUE for
-// its BLE activity blink, InternalFileSystem flashes LED_BUILTIN on every
-// flash cache flush, and the core's ledOn()/ledOff() use LED_STATE_ON. Both
-// pins are -1, which digitalWrite() ignores, so neither indicator drives
-// anything. That is how the other boards in this tree switch those off.
 
-#define LED_BLUE                (-1)            // Prevents Bluefruit flashing an unrelated pin
-#define LED_BUILTIN             (-1)            // Prevents InternalFileSystem flashing an unrelated pin
-#define LED_STATE_ON            HIGH            // The LED on pin 13 lights when driven HIGH
+#define LED_RED                 (38)
+#define LED_GREEN               (36)
+#define LED_BLUE                (14)
+
+#define PIN_STATUS_LED          LED_GREEN
+#define LED_BUILTIN             LED_GREEN
+#define PIN_LED                 LED_BUILTIN
+#define LED_PIN                 LED_BUILTIN
+#define LED_STATE_ON            LOW
 
 #define PIN_NEOPIXEL            (14)
 #define NEOPIXEL_NUM            (2)
