@@ -1,0 +1,1713 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Documentation for the open source MeshCore firmware">
+      
+      
+      
+        <link rel="canonical" href="https://meshcore-dev.github.io/meshcore/hydra/">
+      
+      
+        <link rel="prev" href="../faq/">
+      
+      
+        <link rel="next" href="../kiss_modem_protocol/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>MeshCore-Hydra - MeshCore Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../_stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#meshcore-hydra" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="MeshCore Docs" class="md-header__button md-logo" aria-label="MeshCore Docs" data-md-component="logo">
+      
+  <img src="../_assets/meshcore.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MeshCore Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              MeshCore-Hydra
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/meshcore-dev/meshcore/" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    meshcore-dev/meshcore
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="MeshCore Docs" class="md-nav__button md-logo" aria-label="MeshCore Docs" data-md-component="logo">
+      
+  <img src="../_assets/meshcore.svg" alt="logo">
+
+    </a>
+    MeshCore Docs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/meshcore-dev/meshcore/" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    meshcore-dev/meshcore
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Introduction
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ble_bridge/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    BLE bridge
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli_commands/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../companion_protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion Protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Local Documentation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Frequently Asked Questions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MeshCore-Hydra
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MeshCore-Hydra
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#status-and-what-you-can-trust" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Status, and what you can trust
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#two-upstream-bug-fixes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two upstream bug fixes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-link-metrics-in-upstream-files" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The link metrics, in upstream files
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#work-that-keeps-a-node-alive" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Work that keeps a node alive
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Work that keeps a node alive">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-node-protects-its-own-boot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The node protects its own boot
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-lora-radio-watchdog" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The LoRa radio watchdog
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-status-led" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The status LED
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sharedradio" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SharedRadio
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-hydra-node-role" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The hydra node role
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#meshobserver" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MeshObserver
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-bluetooth-bridge" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Bluetooth bridge
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#build-results" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Build results
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Build results">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-cost-against-upstream" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The cost against upstream
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-cost-of-a-chat-slot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The cost of a chat slot
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-cost-of-the-packet-trace" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The cost of the packet trace
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-relationship-with-upstream" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The relationship with upstream
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#one-new-module-that-no-firmware-uses-yet" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One new module that no firmware uses yet
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kiss_modem_protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MeshCore KISS Modem Protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../nrf52_power_management/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nRF52 Power Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../number_allocations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Number Allocations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../packet_format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Packet Format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../payloads/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Payload Format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../qr_codes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    QR Codes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../stats_binary_frames/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Stats Binary Frame Structures
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../terminal_chat_cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Terminal Chat CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#status-and-what-you-can-trust" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Status, and what you can trust
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#two-upstream-bug-fixes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two upstream bug fixes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-link-metrics-in-upstream-files" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The link metrics, in upstream files
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#work-that-keeps-a-node-alive" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Work that keeps a node alive
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Work that keeps a node alive">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-node-protects-its-own-boot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The node protects its own boot
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-lora-radio-watchdog" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The LoRa radio watchdog
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-status-led" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The status LED
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sharedradio" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SharedRadio
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-hydra-node-role" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The hydra node role
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#meshobserver" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MeshObserver
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-bluetooth-bridge" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Bluetooth bridge
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#build-results" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Build results
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Build results">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-cost-against-upstream" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The cost against upstream
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-cost-of-a-chat-slot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The cost of a chat slot
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-cost-of-the-packet-trace" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The cost of the packet trace
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-relationship-with-upstream" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The relationship with upstream
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#one-new-module-that-no-firmware-uses-yet" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One new module that no firmware uses yet
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/meshcore-dev/meshcore/edit/main/docs/hydra.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="meshcore-hydra">MeshCore-Hydra</h1>
+<p>This page describes everything that MeshCore-Hydra adds to MeshCore. The
+<a href="../README.md">README</a> gives the short version and the CLI reference.</p>
+<p>The base is upstream <code>v1.17.1</code> (<code>d9296435</code>).</p>
+<hr />
+<h2 id="status-and-what-you-can-trust">Status, and what you can trust</h2>
+<p>Read this part first.</p>
+<p><strong>No firmware from this tree has run on real hardware. Not one time.</strong> Every claim on
+this page is a build result or a host test against a mock. "The build passes" and "we
+tested it" are two different claims, and this page keeps them apart. <code>SharedRadio</code> has
+90 host test cases that drive a mock <code>mesh::Radio</code>. The arbiter has never driven a real
+SX1262. Do not make a remote repeater your first target.</p>
+<p><strong>The features are nRF52 and RAK3401 only.</strong> <code>LoopWatchdog</code> and <code>I2CBusRecovery</code> are
+nRF52 code. The Bluetooth bridge needs the SoftDevice. <code>StatusLed</code> and <code>LoraWatchdog</code>
+are portable, but only RAK3401 envs turn them on. There is no hydra env and no Bluetooth
+bridge env for the ThinkNode M5. The one claim for that board is in the build table
+below: an unmodified upstream target still builds against this tree.</p>
+<p><strong>The room server is not complete.</strong> A room slot gets its own identity, its own ACL and
+its own post buffer, and it adverts as a room. The room protocol itself is not written.
+That protocol delivers the posts, syncs the clients and retries the pushes. A chat slot
+boots, adverts and collects contacts. It answers no messages yet.</p>
+<p><strong>Some data has no command that reports it.</strong> The <code>peers</code> command draws the peer table.
+The radio driver holds a receive-failure count for each cause. The packet trace records
+each receive error with its RadioLib code. No command prints either of those two. That
+work is still open.</p>
+<hr />
+<h2 id="two-upstream-bug-fixes">Two upstream bug fixes</h2>
+<p>Both are plain upstream bugs. Both sit on their own branch on top of <code>v1.17.1</code>, one
+change each, and are ready to send as pull requests.</p>
+<p><strong>A packet pool with no lock</strong> (<code>fix/packet-pool-locking</code>). Two FreeRTOS priorities
+drive <code>StaticPoolPacketManager</code> on nRF52: the Arduino loop at <code>TASK_PRIO_LOW</code>, and the
+Bluefruit BLE task at <code>TASK_PRIO_HIGH</code>. Nothing synchronised them. <code>add()</code> tested
+<code>_num == _size</code>. That test is a latch. One lost update pushes <code>_num</code> past <code>_size</code>, the
+test never matches again, and every later <code>add()</code> writes past the end of three heap
+arrays for the rest of the boot. The fix adds a nested <code>PacketQueueLock</code> around
+<code>countBefore</code>, <code>get</code>, <code>itemAt</code>, <code>removeByIdx</code> and <code>add</code>, changes the test to <code>&gt;=</code>, and
+checks the bounds in <code>removeByIdx</code>. The lock uses <code>taskENTER_CRITICAL</code> on nRF52 and does
+nothing elsewhere. The bug affects anyone who runs BLE and the mesh together.</p>
+<p><strong>A flash write on each login</strong> (<code>fix/acl-flash-writes</code>). Each login with a password
+reached the contacts write path. A repeat login by an admin already in the ACL reached
+it too. A flash write holds the main loop for about 1.6 s while the SoftDevice
+arbitrates. That, and not mesh traffic, caused a worst-case loop gap of about 2 s on two
+repeaters in the field. The fix reads <code>was_known</code> and <code>prev_perms</code> before the code
+overwrites the fields, and marks the ACL dirty only for a new client or for a changed
+permission. The cost is stated: the code no longer pushes <code>last_timestamp</code> to flash on
+each login, so its replay protection can go back to the last stored value across a
+reboot. That guarantee was already weak, because the write was lazy. A permission change
+still goes to flash immediately.</p>
+<hr />
+<h2 id="the-link-metrics-in-upstream-files">The link metrics, in upstream files</h2>
+<p><code>src/Dispatcher.h</code> and <code>src/Packet.h</code> are <strong>not</strong> untouched, and neither are
+<code>src/Dispatcher.cpp</code> and <code>src/Packet.cpp</code>. Each gained a small addition, on purpose, and
+all four are headed for one upstream pull request.</p>
+<p><code>Packet.h</code> gains two link-metric fields, <code>_rssi</code> (16 bit) and <code>_cr</code>, beside the <code>_snr</code>
+that upstream already had. The widest field comes first, so all three fit in the two
+bytes of tail padding that the struct already had. Another order costs 4 bytes. The two
+new fields are local receive data. <code>writeTo()</code> does not encode them and <code>readFrom()</code>
+does not read them. They stay at zero for a packet that this node builds itself. The
+accessors are <code>getRSSI()</code> and <code>getCodingRate()</code>.</p>
+<p><code>Packet.cpp</code> sets the three fields to zero in the constructor, which is what makes the
+sentence above true.</p>
+<p><code>Dispatcher.h</code> holds the <code>mesh::Radio</code> interface, and that interface gains two virtuals.
+Each one has a default body, so every <code>mesh::Radio</code> subclass that exists still compiles.
+<code>getLastRxCodingRate()</code> returns the coding rate of the last frame that the radio decoded.
+It returns 0 by default, which means "unknown". <code>getEstAirtimeForCR()</code> prices the airtime
+at the coding rate of the sender. It returns our own figure by default.
+<code>CustomSX1262Wrapper.h</code> implements both of them for the SX1262.</p>
+<p>Why the coding rate matters: in explicit-header mode each frame carries its own rate,
+which is the choice of the sender and does not have to match ours. A frame at 4/8 holds
+the channel 60% longer than the same bytes at 4/5.</p>
+<p><code>Dispatcher.cpp</code> reads the three values in <code>checkRecv()</code>, in one place, before anything
+else touches the radio. The modem latches them only until it decodes the next frame. It
+also prices <code>rx_air_time</code> at the coding rate of the sender, because that is the time that
+the frame held the channel.</p>
+<p><code>src/Mesh.h</code> and <code>src/MeshCore.h</code> are identical to <code>v1.17.1</code>.</p>
+<hr />
+<h2 id="work-that-keeps-a-node-alive">Work that keeps a node alive</h2>
+<h3 id="the-node-protects-its-own-boot">The node protects its own boot</h3>
+<p>A repeater on a site can become a brick that nobody can recover. There are three ways.
+All three share one cause: nothing watched the node before the main loop ran.</p>
+<ul>
+<li><strong><code>LoopWatchdog</code> arms first.</strong> <code>setup()</code> arms it before <code>the_mesh.begin()</code>. Everything
+  before that point could wait forever: <code>radio_init()</code>, the filesystem mount, and the
+  I2C spins behind <code>display.begin()</code> and the RTC probe. A stop in any of them leaves no
+  BLE, no LoRa and no CLI. <code>setup()</code> gets a loose limit of 120 s. The tight run-time
+  limit applies only after the loop runs one time.</li>
+<li><strong><code>I2CBusRecovery</code> frees a wedged bus.</strong> A reset in the middle of a read can leave a
+  slave device that holds SDA low. The TWIM driver of the Adafruit core polls
+  <code>EVENTS_STOPPED</code> with no timeout and no escape (<code>Wire_nRF52.cpp:175</code>, <code>:241</code>). That
+  slave then stops the CPU on the first transfer of <strong>each later boot</strong>. The recovery
+  code clocks the slave out.</li>
+<li><strong><code>halt()</code> reboots.</strong> It held a bare <code>while(1)</code> before. The code reaches it when
+  <code>radio_init()</code> fails, which is usually temporary. A weak battery is one cause. A clean
+  reboot recovers the node much more often than a stop does.</li>
+</ul>
+<p>This work deliberately does <strong>not</strong> use the nRF52 hardware watchdog. You cannot stop
+that watchdog once it starts, and it survives a soft reset. It would keep the count
+through a BLE firmware update of about 200 s, on hardware whose only remote route in is
+that update.</p>
+<p>The feed and the change from the boot limit to the run-time limit live in <code>main.cpp</code>,
+and not in <code>MyMesh</code>. A node with several mesh instances thus gets one watchdog, and not
+one for each instance.</p>
+<h3 id="the-lora-radio-watchdog">The LoRa radio watchdog</h3>
+<p>From the outside, a quiet band and a dead radio look the same. Repeaters have been found
+with a transceiver that sent nothing and received nothing for more than an hour. The
+configuration was correct and a reboot did not repair it. You can tell the two apart
+only if the node makes its own traffic. <code>LoraWatchdog</code> does that, in stages:</p>
+<pre><code>15 min with no airtime  -&gt;  send one zero-hop advert
+30 s grace              -&gt;  did the airtime move?  the radio is alive
+                        -&gt;  no: run radio_init() again, then restore the
+                                frequency, bandwidth, spreading factor, coding
+                                rate, TX power, RX gain and FEM gains
+30 s grace              -&gt;  did the airtime move?  the radio is alive
+                        -&gt;  no: write the ACL to flash, then reboot
+</code></pre>
+<p>The restore matters. A bare <code>radio_init()</code> leaves the driver on its default frequency,
+and a node that is silently off band is worse than the fault that it repaired. The
+watchdog checks one time every 30 s. Every elapsed-time comparison is signed. An unpaced
+retry and an unsigned elapsed-time test have each already cost a node.</p>
+<p>The watchdog is <strong>node scoped</strong>. A per-identity watchdog reasons from the airtime of its
+own <code>Dispatcher</code>, which under a shared radio is one identity's share of the traffic. It
+can also reboot the whole board. So the module takes its three actions — probe, reinit
+and reboot — as injected functions, and the node supplies one of each. The
+<code>LORA_WATCHDOG_MS</code> flag both turns the feature on and sets the idle time before a probe.
+It is set to 15 minutes on <code>RAK_3401_repeater</code>, <code>RAK_3401_repeater_bridge_ble</code> and
+<code>RAK_3401_hydra</code>.</p>
+<h3 id="the-status-led">The status LED</h3>
+<p>The RAK3401 has exactly two LEDs, green and blue. It has no red LED. Rather than mix a
+colour that the board cannot make, the code uses the two axes that it does have. <strong>The
+colour is the radio. The brightness is the direction.</strong></p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>dim (receive)</th>
+<th>bright (transmit)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>green</td>
+<td>LoRa RX</td>
+<td>LoRa TX</td>
+</tr>
+<tr>
+<td>blue</td>
+<td>bridge RX</td>
+<td>bridge TX</td>
+</tr>
+</tbody>
+</table>
+<p>Both LEDs go dim together one time every 5 s as a heartbeat. The brightness is true
+hardware PWM (<code>analogWrite</code>), so the levels do not change with how often <code>loop()</code> runs.
+The <code>WITH_STATUS_LED</code> flag turns it on.</p>
+<hr />
+<h2 id="sharedradio">SharedRadio</h2>
+<p><code>src/helpers/SharedRadio.{h,cpp}</code>, 1,175 lines, 90 host test cases plus 8 more on a
+second env.</p>
+<p>Several <code>mesh::Mesh</code> instances — separate identities, each with its own keys, prefs and
+dispatcher — on one board with one physical LoRa radio. <code>SharedRadioCore</code> owns the real
+driver. Each mesh gets a <code>RadioPort</code>, which <strong>is</strong> a <code>mesh::Radio</code>, and the core
+arbitrates between the ports. The limit is 8 ports.</p>
+<ul>
+<li><strong>RX fan-out.</strong> The modem holds exactly one frame, so the core empties the radio the
+  moment a frame lands. It puts the frame in a short queue and gives it one time to each
+  port that listens. Each identity sees all of the traffic. Each identity then decides on
+  its own whether the frame is for it.</li>
+<li><strong>One transmit at a time.</strong> The core refuses <code>startSendRaw()</code> from a sibling, and
+  <code>isReceiving()</code> reads busy for that sibling. The stock CAD and back-off path therefore
+  defers the sibling with no change to <code>Dispatcher</code>. A transmit
+  that never completes is force-released, because <code>pump()</code> does not touch the radio
+  while a send is in flight. A wedged send would otherwise take the whole board off air.</li>
+<li><strong>A pooled duty-cycle budget.</strong> <code>tx_budget_ms</code> lives in <code>Dispatcher</code>, and <strong>each
+  <code>Mesh</code> instance owns one</strong>. N identities that each believe that they hold the whole
+  duty cycle let the node transmit at N times its share. The pool now lives in
+  <code>SharedRadioCore</code>, which is the only thing that sees every transmit. The
+  <code>airtime_factor</code> of slot 0 sets the size of that pool. One test fails if anything ever
+  over-draws the pooled budget.</li>
+<li><strong>TX wait counters.</strong> Eight counters cover each path that defers a send: the pooled
+  budget is empty, a sibling held the transmitter, the port yielded to a higher
+  priority, the driver refused, the port forced the send through, and the three
+  different conditions that all read as a busy channel — a preamble or header interrupt,
+  an RSSI above the noise floor, and a hardware CAD result. A node that cannot get a word
+  in used to look the same as a node on a quiet band. Read the counters with
+  <code>stats-txwait</code>.</li>
+<li><strong>Loopback.</strong> One antenna is half duplex, so two identities on the same board cannot
+  hear each other over the air. Slot 0 could therefore never repeat for slot 1. With
+  loopback on, the core also gives each transmitted frame to the sibling ports as a
+  received frame, and never back to the sender. Each identity then has the experience of
+  a second physical node in the same room. Hydra turns loopback on.</li>
+<li><strong>Cross-slot priority</strong>, set for each port and not fixed in the arbiter, so the policy
+  belongs to the caller. Hydra gives slot 0 priority 0 and gives the rest priority 1. The
+  mesh depends on the repeater. It does not depend on chat.</li>
+<li><strong>Reconciled collision settings.</strong> Three dispatchers that each push their own
+  <code>cad_enabled</code> and <code>interference_threshold</code> at one radio would let an identity with CAD
+  off turn CAD off for all of the others. The core reconciles the settings instead.</li>
+</ul>
+<p>The arbiter sits <strong>below</strong> <code>mesh::Radio</code>. It does not teach <code>Mesh</code> about several
+identities. <code>mesh::Radio</code> is already the seam between a <code>Dispatcher</code> and its
+transceiver, and the transceiver is the only thing that the identities contend for. It
+is enough to implement that one interface.</p>
+<hr />
+<h2 id="the-hydra-node-role">The hydra node role</h2>
+<p><code>examples/hydra/</code>, 1,898 lines across 10 files. One board, one LoRa radio, N mesh
+identities.</p>
+<pre><code>HydraNode
+├── board, radio driver, RTC, RNG, filesystem
+├── SharedRadioCore ── one RadioPort for each slot
+├── node modules: LoopWatchdog, LoraWatchdog, StatusLed, I2CBusRecovery, MeshObserver
+└── slots[HYDRA_NUM_SLOTS]
+      slot 0    : repeater — always on
+      slot 1..N : chat | room | off
+</code></pre>
+<p>Slot 0 runs the <strong>same <code>simple_repeater</code> <code>MyMesh</code> that this tree ships</strong>. It is not a
+fork of it. <code>MyMesh</code> already takes a <code>mesh::Radio&amp;</code>, so the reuse is to hand it a
+<code>RadioPort</code> in place of <code>radio_driver</code>. The build compiles that directory's <code>MyMesh.cpp</code>
+and puts the directory on the include path. To upgrade a <code>simple_repeater</code> node
+therefore costs nothing: slot 0 keeps the <code>_main</code> identity key, so <code>prefs.json</code>,
+the ACL and the region map carry over. Flash hydra over a repeater and it comes back as
+the same node with slots 1 and above off.</p>
+<p>Slots 1 and above are much smaller than slot 0: a packet pool of 8 against 32, and a
+dedup table of 32 hashes against the 160 of <code>SimpleMeshTables</code>. <code>MAX_CONTACTS</code> is 16,
+against the 350 of the stock RAK3401 companion env. A chat identity is an end point and
+forwards nothing, because slot 0 already forwards everything that this radio hears. Two
+identities that both forwarded the same flood would put two copies of it on one antenna.</p>
+<p>Slot objects are static, and every port registers with the arbiter at boot whether the
+slot is on or off. The port index thus equals the slot index for the life of the boot.
+The packet pool is the only part on the heap, and <code>begin()</code> allocates it. A slot that is
+off costs no heap. A slot that you enable after months of uptime asks the heap for one
+block, rather than lose to fragmentation piece by piece.</p>
+<p><code>HYDRA_RAM_RESERVE</code> (24,576 B) is a node floor. <code>RamFloor</code> pins the reserve before a
+slot allocates, so a slot that starts has kept the floor intact. The node refuses a slot
+that cannot keep it. It refuses that slot now, and does not drop packets at 3 a.m.</p>
+<p>The slot config lives at <code>/hydra_slots</code>. Each failure path lands on "a plain repeater
+with the chat slots off": an absent file returns early, a bad <code>'H',2</code> magic keeps the
+defaults, a short read keeps what it got, and an unknown slot type becomes <code>SLOT_OFF</code>
+rather than a different type.</p>
+<p>Build flags in <code>variants/rak3401/platformio.ini</code> configure hydra: <code>HYDRA_NUM_SLOTS</code>
+(1 to 8), <code>HYDRA_CHAT_POOL</code>, <code>HYDRA_CHAT_HASHES</code>, <code>HYDRA_RAM_RESERVE</code>, <code>MAX_CONTACTS</code> and
+<code>MAX_CONNECTIONS</code>. <code>HYDRA_NAME_PREFIX</code> has one use only: it names a slot that a version 1
+config file carried with no name. It does not name a new slot. A new slot has no name
+until the operator sets one.</p>
+<hr />
+<h2 id="meshobserver">MeshObserver</h2>
+<p><code>src/helpers/MeshObserver.{h,cpp}</code>, 953 lines. It reports link topology, not traffic
+volume. It knows nothing about identities, radios or arbitration. The caller feeds it
+raw frames and it reports what it saw. It therefore works on a hydra node, where
+<code>SharedRadioCore</code> feeds it, and it would work on a plain single-identity repeater, where
+a receive hook would feed it. Today only the hydra build feeds it.</p>
+<p>Each forwarder adds its own hash to the end of the path of a packet
+(<code>Mesh::routeRecvPacket</code>). That makes two facts recoverable. RF links are asymmetric, so
+the two facts are genuinely different:</p>
+<ul>
+<li>the <strong>last</strong> entry in a path transmitted the frame that we received, so <strong>we can hear
+  it</strong>, and the SNR and RSSI of this frame describe that link;</li>
+<li>the entry <strong>directly after one of ours</strong> received our transmission and relayed it, so
+  <strong>it can hear us</strong>.</li>
+</ul>
+<p>An entry in the middle of a path says nothing about its own link to us, and the code
+never reads it that way. The originator of a packet chooses the hash width, so the same
+node appears at one byte and at two. A match at one byte is a coincidence one time in
+256. The code counts it separately, never calls it proof, and attributes it to a known
+wider peer only when exactly one candidate exists. The peer table holds 48 entries.</p>
+<p>Identity comes from adverts: a pubkey prefix, a name and a location. A path carries only
+truncated hashes, so a node stays anonymous until one of its adverts reaches us. An
+advert heard at zero hops also measures that node's clock directly against ours.</p>
+<p><code>examples/hydra/PeerReport.h</code> draws the table for the <code>peers</code> command. It belongs to the
+hydra example, and not to the observer. It is a separate, host-testable file, because a
+fault in the format would destroy the two facts that the table exists to show, and
+nothing would report the fault.</p>
+<hr />
+<h2 id="the-bluetooth-bridge">The Bluetooth bridge</h2>
+<p><code>src/helpers/nrf52/Ble{Stack,Discovery,Link}.{h,cpp}</code> and
+<code>src/helpers/bridges/BLEBridge.{h,cpp}</code> with <code>BleBridgeFrame.h</code>, 1,647 plus 902 lines.</p>
+<p>It joins two nRF52840 repeaters over a Bluetooth connection, so a packet that one node
+hears on its LoRa band goes out again on the other band. It is the nRF52 counterpart to
+the ESP-NOW bridge, for boards that have no WiFi.</p>
+<p>The transport is a connection, not a broadcast. An earlier experiment carried datagrams
+over BLE 5 extended adverts and could not be made reliable: one advert lands about half
+of the time, and three to five copies move the loss from 49% to 3.4% and never to zero,
+because nothing acknowledges anything. A connection acknowledges each packet and sends
+it again. A frame on the link is up to 256 bytes, so a full MeshCore packet fits in one.</p>
+<p>For the wire format, the group marker, the deny list, the settings and the threat model,
+see <strong><a href="../ble_bridge/">ble_bridge.md</a></strong>. This page does not repeat them.</p>
+<p><code>RAK_3401_repeater_bridge_ble</code> is the only env that enables the bridge.</p>
+<hr />
+<h2 id="build-results">Build results</h2>
+<p>Measured on this tree at commit <code>8214ec1d</code>. The host is aarch64 Linux with the toolchain
+override that the README describes, so the nRF52 sizes differ by a few percent from the
+official release artifacts.</p>
+<table>
+<thead>
+<tr>
+<th>env</th>
+<th>result</th>
+<th style="text-align: right;">flash</th>
+<th style="text-align: right;">RAM</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RAK_3401_repeater</code></td>
+<td>builds</td>
+<td style="text-align: right;">380,092 B (46.6% of 815,104)</td>
+<td style="text-align: right;">33,048 B (14.0% of 235,520)</td>
+</tr>
+<tr>
+<td><code>RAK_3401_repeater_bridge_ble</code></td>
+<td>builds</td>
+<td style="text-align: right;">394,744 B (48.4%)</td>
+<td style="text-align: right;">41,184 B (17.5%)</td>
+</tr>
+<tr>
+<td><code>RAK_3401_hydra</code> (3 slots)</td>
+<td>builds</td>
+<td style="text-align: right;">389,916 B (47.8%)</td>
+<td style="text-align: right;">54,544 B (23.2%)</td>
+</tr>
+<tr>
+<td><code>RAK_3401_hydra_debug</code> (packet trace on)</td>
+<td>builds</td>
+<td style="text-align: right;">392,540 B (48.2%)</td>
+<td style="text-align: right;">65,496 B (27.8%)</td>
+</tr>
+<tr>
+<td><code>ThinkNode_M5_Repeater</code></td>
+<td>builds</td>
+<td style="text-align: right;">1,125,785 B (85.9% of 1,310,720)</td>
+<td style="text-align: right;">60,856 B (11.6% of 524,288)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>What the M5 row means, and what it does not.</strong> <code>ThinkNode_M5_Repeater</code> is an
+unmodified upstream target, and that is the whole claim: it still builds cleanly against
+our tree. There is no M5 work here, no hydra env for the M5, and none of the features
+above run on it.</p>
+<p><strong>A build that passes is not a test on hardware.</strong> No firmware from this tree has gone
+onto a board.</p>
+<h3 id="the-cost-against-upstream">The cost against upstream</h3>
+<p>Upstream <code>v1.17.1</code> (<code>d9296435</code>) built from its own tree on the same host, in the same
+env:</p>
+<table>
+<thead>
+<tr>
+<th><code>RAK_3401_repeater</code></th>
+<th style="text-align: right;">upstream</th>
+<th style="text-align: right;">this fork</th>
+<th style="text-align: right;">delta</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>flash</td>
+<td style="text-align: right;">376,780 B</td>
+<td style="text-align: right;">380,092 B</td>
+<td style="text-align: right;"><strong>+3,312 B</strong></td>
+</tr>
+<tr>
+<td>RAM</td>
+<td style="text-align: right;">32,928 B</td>
+<td style="text-align: right;">33,048 B</td>
+<td style="text-align: right;"><strong>+120 B</strong></td>
+</tr>
+</tbody>
+</table>
+<h3 id="the-cost-of-a-chat-slot">The cost of a chat slot</h3>
+<p>Measured by a build of <code>RAK_3401_hydra</code> at <code>HYDRA_NUM_SLOTS=2</code> and again at 3:</p>
+<table>
+<thead>
+<tr>
+<th>for each chat slot</th>
+<th style="text-align: right;">cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>static (<code>.bss</code>), reserved whether the slot is on or off</td>
+<td style="text-align: right;">+5,640 B</td>
+</tr>
+<tr>
+<td>flash</td>
+<td style="text-align: right;">none that the build can measure (−16 B)</td>
+</tr>
+<tr>
+<td>heap, only while the slot is <strong>on</strong></td>
+<td style="text-align: right;">2,352 B (8 × <code>sizeof(mesh::Packet)</code> = 262, plus 256)</td>
+</tr>
+</tbody>
+</table>
+<p>A room slot also allocates a <code>RoomStore</code> on the heap, which holds the ACL and the post
+buffer.</p>
+<p>Most of the 5,640 B is the contact table of <code>BaseChatMesh</code>, so <code>MAX_CONTACTS</code> is the
+dial that matters if that figure has to come down.</p>
+<h3 id="the-cost-of-the-packet-trace">The cost of the packet trace</h3>
+<p>The diagnostic packet trace costs <strong>10,952 B of RAM and 2,624 B of flash</strong> at 48 entries
+of 200 raw bytes. It is off unless a build asks for it. <code>RAK_3401_hydra_debug</code> asks for
+it. Compare that with the whole cost of hydra: <code>RAK_3401_hydra</code> at 3 slots uses 21,496 B
+of RAM more than <code>RAK_3401_repeater</code>, and the two chat slots hold 11,280 B of that.</p>
+<hr />
+<h2 id="tests">Tests</h2>
+<pre><code class="language-bash">pio test -e native -e native_ble -e native_radio -e native_multi \
+         -e native_multi_notrace -e native_kiss_modem
+</code></pre>
+<p><strong>277 cases, and all of them pass.</strong> 229 are new here. 48 are upstream's.</p>
+<table>
+<thead>
+<tr>
+<th>suite</th>
+<th>env</th>
+<th style="text-align: right;">cases</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>test_shared_radio</code></td>
+<td><code>native_multi</code></td>
+<td style="text-align: right;">90</td>
+</tr>
+<tr>
+<td><code>test_hydra_slots</code></td>
+<td><code>native_multi</code></td>
+<td style="text-align: right;">53</td>
+</tr>
+<tr>
+<td><code>test_lora_watchdog</code></td>
+<td><code>native_multi</code></td>
+<td style="text-align: right;">18</td>
+</tr>
+<tr>
+<td><code>test_ble_bridge</code></td>
+<td><code>native_ble</code></td>
+<td style="text-align: right;">18</td>
+</tr>
+<tr>
+<td><code>test_radio_wrapper</code></td>
+<td><code>native_radio</code></td>
+<td style="text-align: right;">17</td>
+</tr>
+<tr>
+<td><code>test_mux</code></td>
+<td><code>native_multi</code></td>
+<td style="text-align: right;">14</td>
+</tr>
+<tr>
+<td><code>test_packet</code></td>
+<td><code>native</code></td>
+<td style="text-align: right;">8</td>
+</tr>
+<tr>
+<td><code>test_shared_radio_notrace</code></td>
+<td><code>native_multi_notrace</code></td>
+<td style="text-align: right;">8</td>
+</tr>
+<tr>
+<td><code>test_bridge</code></td>
+<td><code>native</code></td>
+<td style="text-align: right;">3</td>
+</tr>
+</tbody>
+</table>
+<p><code>test_shared_radio_notrace</code> needs its own env, because a second binary is the only way
+to exercise the off state of a compile-time flag. <code>native_ble</code> supplies a real SHA-256
+in place of the deliberately fake one that the other host tests share, because the
+bridge frame carries an HMAC tag. The Bluetooth code itself needs the SoftDevice and
+cannot run on a host.</p>
+<p>Every test runs against a mock <code>mesh::Radio</code> and mock <code>Arduino</code> headers. This is the
+only real safety net that the fork has, and it is worth a plain statement of what it
+covers: the logic of the arbiter, and not its behaviour on hardware.</p>
+<hr />
+<h2 id="the-relationship-with-upstream">The relationship with upstream</h2>
+<p>This fork is meant to be <strong>upstream-eligible</strong>. That is a constraint that shapes the
+code. It is not a policy statement.</p>
+<ul>
+<li><strong>New behaviour arrives as new files plus a build flag</strong>, and never as a changed
+  default. The flags include <code>LOOP_WATCHDOG_MS</code>, <code>LORA_WATCHDOG_MS</code>, <code>WITH_STATUS_LED</code>,
+  <code>BRIDGE_CLASS</code>, <code>PKT_TRACE_ENTRIES</code> and the <code>HYDRA_*</code> family.</li>
+<li><strong>Anything that truly needs a core change becomes its own small upstream pull request
+  first</strong>, rather than a fork delta that we carry. The additions to <code>Dispatcher.h</code> and
+  <code>Packet.h</code> are on that route now.</li>
+<li><strong>We rebase onto upstream from time to time</strong>, and not only at pull-request time. The
+  point of the constraints above is that the rebase stays close to free.</li>
+</ul>
+<p>The full diff against <code>v1.17.1</code> is 111 files, +12,862 and −390 lines. New files hold
+11,577 of the added lines: 31 source files hold 7,322, tests and mocks hold 4,022, and
+<code>docs/ble_bridge.md</code> holds 233. That leaves 1,285 lines added to files that already
+existed. Much of that 1,285 is a rewrite of the comments across the tree into Simplified
+Technical English, and not new behaviour.</p>
+<p>This fork changes 20 upstream source files. They fall into four groups.</p>
+<p><strong>The link metrics.</strong> <code>src/Dispatcher.{h,cpp}</code>, <code>src/Packet.{h,cpp}</code>,
+<code>src/helpers/radiolib/RadioLibWrappers.{h,cpp}</code> and
+<code>src/helpers/radiolib/CustomSX1262Wrapper.h</code>. The wrapper files also count the receive
+failures by cause. <code>src/Mesh.h</code> and <code>src/MeshCore.h</code> are unchanged.</p>
+<p><strong>The two bug fixes.</strong> <code>src/helpers/StaticPoolPacketManager.{h,cpp}</code> holds the pool lock.
+The ACL flash-write fix is in <code>examples/simple_repeater/MyMesh.cpp</code>.</p>
+<p><strong>The choice of a bridge.</strong> <code>src/helpers/AbstractBridge.h</code>, <code>src/helpers/CommonCLI.{h,cpp}</code>,
+<code>src/helpers/bridges/BridgeBase.h</code>, <code>src/helpers/bridges/RS232Bridge.{h,cpp}</code> and
+<code>src/helpers/bridges/ESPNowBridge.{h,cpp}</code>. The <code>platformio.ini</code> of each bridged variant
+changes with them. A build now names its bridge with <code>BRIDGE_CLASS</code>, in the way that it
+already named its radio and its display. This is more than a macro rename: the
+<code>CommonCLICallbacks</code> interface lost <code>setBridgeState()</code> and <code>restartBridge()</code> and gained
+one <code>getBridge()</code>.</p>
+<p><strong>The repeater example.</strong> <code>examples/simple_repeater/</code> — <code>MyMesh.{h,cpp}</code> and <code>main.cpp</code>,
+178 added lines and 42 removed. Beside the ACL fix, these wire up the watchdogs and the
+LED, and move the state machine of the LoRa watchdog out into its own module. Hydra
+itself does not need those changes. Slot 0 reuses <code>MyMesh</code> as it stands.</p>
+<hr />
+<h2 id="one-new-module-that-no-firmware-uses-yet">One new module that no firmware uses yet</h2>
+<p><code>src/helpers/esp32/MuxSerialInterface.h</code>, 173 lines, 14 host test cases. It lets a second
+local client — a web UI or a bot — drive the app protocol of a companion identity over
+the same serial interface that the phone app uses. It is ESP32 code, it is header only,
+and <strong>no build env compiles it</strong>. Only <code>test_mux</code> exercises it. It is counted in the
+figures above.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.action.edit", "content.code.copy", "search.highlight", "search.suggest"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
