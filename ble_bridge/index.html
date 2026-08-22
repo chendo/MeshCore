@@ -1075,7 +1075,7 @@ though the two radios sat next to each other.</p>
 on a narrow and fast one, where traffic and adverts must flow between them with
 no second radio and no internet link.</p>
 <p>This is the nRF52 counterpart to the ESP-NOW bridge. A board such as the RAK3401
-has no WiFi, so ESP-NOW is unavailable to it.</p>
+or the Elecrow ThinkNode M1 has no WiFi, so ESP-NOW is unavailable to it.</p>
 <p><strong>nRF52840 only.</strong> An ESP32 repeater cannot join a BLE bridge group.</p>
 <hr />
 <h2 id="how-it-works">How it works</h2>
@@ -1151,8 +1151,8 @@ group HMAC on the <strong>first frame over the link</strong>.</p>
 node itself. It gets no data, and the rules are the same in both directions:</p>
 <ul>
 <li>a link whose first frame fails the group tag is dropped at once;</li>
-<li>a link that writes something and then never authenticates is dropped after 45
-  seconds;</li>
+<li>a link that never authenticates is dropped after 45 seconds, whether it wrote
+  something or nothing at all;</li>
 <li>a link that authenticates and then goes silent is dropped after 60 seconds;</li>
 <li>either way the address goes on a deny list for 5 minutes, and that list is
   checked both before the node dials out and before it adopts a peer that
@@ -1163,12 +1163,27 @@ slots and the one inbound slot. What an attacker in radio range can still do is
 occupy a slot for a few seconds at a time, from a fresh address each time, and
 read the group marker. It cannot inject a packet into the mesh, and it cannot
 read the secret.</p>
-<p>One gap remains. The bridge sees a peer that dialled in only on its FIRST write,
-because that write is the event it hooks. A peer that connects inward and then
-sends nothing at all is thus invisible to the bridge, and it holds the inbound
-peripheral slot for as long as the connection lives. The node keeps its CLI and
-DFU slot, and it keeps every outward link, so the cost is that no other peer can
-dial in until that connection ends.</p>
+<p>The second rule used to have a hole. The bridge saw a peer that dialled in only
+on its FIRST write, because that write was the event it hooked. A peer that
+connected inward and then sent nothing was invisible, so it was never adopted,
+never timed out and never denied, and it held the inbound peripheral slot for as
+long as the connection lived. <code>BleLink::loop()</code> now sweeps the peripheral
+connections on every main pass and adopts a peer that has written nothing. The
+authentication grace, the idle limit and the deny list then all reach it.</p>
+<p>The sweep is a poll, and it registers NO Bluefruit callback.
+<code>Periph.setConnectCallback</code> is a single slot that <code>SerialBLEInterface</code> already
+holds, and a second owner would take it from the first in silence.
+<code>Bluefruit.Periph.connected(handle)</code> reports the role and the liveness of one
+connection together, so an outward link of our own never matches the sweep.</p>
+<p>One restriction remains, and it is a restriction and not a hole. The sweep skips
+a connection that is secured or bonded. The CLI and DFU both need MITM
+encryption before they carry a byte, and a bridge peer never pairs, so that test
+is exact for a CLI session in use. It is not exact for a CLI client that sits at
+the passkey prompt: that client is not secured yet, and the sweep cannot tell it
+from a peer that says nothing. A build that carries the bridge AND the BLE CLI
+must therefore set <code>-D BLE_LINK_SILENT_SWEEP=0</code>. Such a build keeps the old
+fault: a silent inbound peer holds the slot until its connection ends. No
+shipped env carries both today.</p>
 <p>Only the node with the numerically lower BLE address dials. A pair therefore
 agrees on exactly one link, with no negotiation and no timers.</p>
 <h3 id="the-frame">The frame</h3>
@@ -1193,7 +1208,11 @@ notices a radio that went away and not a peer that stopped to talk.</p>
 <h2 id="quickstart">Quickstart</h2>
 <h3 id="1-build-and-flash-both-nodes">1. Build and flash both nodes</h3>
 <pre><code class="language-sh">pio run -e RAK_3401_repeater_bridge_ble -t upload
+pio run -e ThinkNode_M1_repeater_bridge_ble -t upload   # the ThinkNode M1
 </code></pre>
+<p>Both envs belong to this fork and are defined in <code>variants/hydra_rak3401</code> and
+<code>variants/hydra_m1</code>. The board definitions under <code>variants/rak3401</code> and
+<code>variants/thinknode_m1</code> are upstream's and carry no configuration of ours.</p>
 <p>Both ends must run the same build. The framing is part of the firmware.</p>
 <h3 id="2-set-a-shared-secret-and-do-this-first">2. Set a shared secret, and do this first</h3>
 <p>Every node in a bridge group shares one secret. It keys the HMAC over each
@@ -1268,6 +1287,10 @@ repeater status reply is <code>0x04</code>; <code>0x01</code> is UART and <code>
 <td>Outward links. 1 is enough for a two-node bridge.</td>
 </tr>
 <tr>
+<td><code>BLE_LINK_SILENT_SWEEP</code></td>
+<td>Reclaims the inbound slot from a peer that connects and writes nothing. On by default. Set it to <strong>0</strong> in a build that also carries the BLE CLI.</td>
+</tr>
+<tr>
 <td><code>LOOP_WATCHDOG_MS</code></td>
 <td>Reboots the node if the main loop stalls this long.</td>
 </tr>
@@ -1300,7 +1323,7 @@ node falls back to a non-connectable beacon, so it stays visible even though it
 cannot be connected to.</p>
 <hr />
 <h2 id="cost">Cost</h2>
-<p>Measured against <code>RAK_3401_repeater</code> on the same tree:</p>
+<p>Measured against <code>RAK_3401_repeater_hardened</code> on the same tree:</p>
 <table>
 <thead>
 <tr>
@@ -1311,19 +1334,47 @@ cannot be connected to.</p>
 </thead>
 <tbody>
 <tr>
-<td><code>RAK_3401_repeater</code></td>
+<td><code>RAK_3401_repeater_hardened</code></td>
 <td>380,092</td>
 <td>33,048</td>
 </tr>
 <tr>
 <td><code>RAK_3401_repeater_bridge_ble</code></td>
-<td>395,592</td>
+<td>395,848</td>
 <td>41,200</td>
 </tr>
 <tr>
 <td><strong>Cost of the bridge</strong></td>
-<td><strong>+15,500</strong></td>
+<td><strong>+15,756</strong></td>
 <td><strong>+8,152</strong></td>
+</tr>
+</tbody>
+</table>
+<p>The same pair on the ThinkNode M1, which carries the same nRF52840 and the same
+SoftDevice:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Flash</th>
+<th>RAM</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ThinkNode_M1_repeater_hardened</code></td>
+<td>304,848</td>
+<td>30,768</td>
+</tr>
+<tr>
+<td><code>ThinkNode_M1_repeater_bridge_ble</code></td>
+<td>320,412</td>
+<td>38,904</td>
+</tr>
+<tr>
+<td><strong>Cost of the bridge</strong></td>
+<td><strong>+15,564</strong></td>
+<td><strong>+8,136</strong></td>
 </tr>
 </tbody>
 </table>
@@ -1341,7 +1392,11 @@ group marker, the deny list, and the oversize guard with its counter.</p>
 the shipped source file is what runs. That covers the framing and the teardown
 paths: a header split across two writes, a truncated frame, a hunt that lands on
 a payload byte that looks like SYNC, a reconnect with a part-drained queue, and
-the deny list and the silence limit on the inbound peer.</p>
+the deny list and the silence limit on the inbound peer. The stand-in also
+presents a peripheral connection, so the sweep has cases of its own: a peer that
+writes nothing loses the slot and reaches the deny list, a peer that writes in
+time keeps it, a peer dropped for silence is not adopted again at once, and a
+paired connection is left to the CLI.</p>
 <p><code>BleStack</code>, <code>BleDiscovery</code> and <code>BLEBridge</code> itself still need a SoftDevice and
 have no host test.</p>
 <pre><code class="language-sh">pio test -e native_ble
