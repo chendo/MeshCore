@@ -38,17 +38,24 @@ reads the path of each packet and builds a map of which node hears which node.
 The project uses PlatformIO.
 
 ```bash
-pio run -e RAK_3401_repeater             # repeater, watchdogs, status LED
+pio run -e RAK_3401_repeater_hardened    # repeater, watchdogs, status LED
 pio run -e RAK_3401_hydra                # multi-identity node, 3 slots
 pio run -e RAK_3401_repeater_bridge_ble  # repeater with a Bluetooth bridge
 
-pio run -e ThinkNode_M1_repeater             # the same, on a ThinkNode M1
+pio run -e ThinkNode_M1_repeater_hardened    # the same, on a ThinkNode M1
 pio run -e ThinkNode_M1_hydra
 pio run -e ThinkNode_M1_repeater_bridge_ble
 
-pio run -e ThinkNode_M5_Repeater         # repeater with the LoRa watchdog
-pio run -e ThinkNode_M5_hydra            # multi-identity node, 5 slots
+pio run -e ThinkNode_M5_Repeater_hardened  # repeater with the LoRa watchdog
+pio run -e ThinkNode_M5_hydra              # multi-identity node, 5 slots
 ```
+
+Every env above is this fork's, and each one lives in its own variant directory:
+`variants/hydra_rak3401`, `variants/hydra_m1` and `variants/hydra_m5`. The `_hardened`
+envs are the stock repeaters plus the watchdogs, and the status LED where the board has
+one; they extend the upstream env, so an upstream change to it reaches them. Nothing
+under `variants/rak3401`, `variants/thinknode_m1` or `variants/thinknode_m5` carries a
+build configuration of ours.
 
 To flash a board, connect it over USB and add the upload target:
 
@@ -62,9 +69,8 @@ The M1 has no status LED env, because it has one LED that this firmware can own;
 has none either, because its LEDs sit behind an I2C expander. The M5 has no Bluetooth
 bridge env, because that bridge needs the SoftDevice of an nRF52. `docs/hydra.md`
 explains both. This fork adds one more env, `RAK_3401_hydra_debug`, which turns the
-packet trace on. The other firmware envs are upstream's. This tree changes only how a
-bridged env names its bridge class, and it adds the LoRa watchdog to
-`ThinkNode_M5_Repeater`.
+packet trace on. The other firmware envs are upstream's, and this tree leaves them
+alone apart from one repo-wide change: how a bridged env names its bridge class.
 
 On an aarch64 Linux host, the pinned ARM toolchain has no package. Write a
 `platformio.local.ini` file with one section for each env that you build:

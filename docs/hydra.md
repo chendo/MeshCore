@@ -165,10 +165,13 @@ own `Dispatcher`, which under a shared radio is one identity's share of the traf
 can also reboot the whole board. So the module takes its three actions — probe, reinit
 and reboot — as injected functions, and the node supplies one of each. The
 `LORA_WATCHDOG_MS` flag both turns the feature on and sets the idle time before a probe.
-It is set to 15 minutes on `RAK_3401_repeater`, `RAK_3401_repeater_bridge_ble`,
-`RAK_3401_hydra`, `ThinkNode_M1_repeater`, `ThinkNode_M1_repeater_bridge_ble`,
-`ThinkNode_M1_hydra`, `ThinkNode_M5_Repeater` and `ThinkNode_M5_hydra`. The module holds
-no nRF52 code, so the M5 runs the same watchdog that the nRF52 boards run.
+It is set to 15 minutes on `RAK_3401_repeater_hardened`, `RAK_3401_repeater_bridge_ble`,
+`RAK_3401_hydra`, `ThinkNode_M1_repeater_hardened`, `ThinkNode_M1_repeater_bridge_ble`,
+`ThinkNode_M1_hydra`, `ThinkNode_M5_Repeater_hardened` and `ThinkNode_M5_hydra`. The
+module holds no nRF52 code, so the M5 runs the same watchdog that the nRF52 boards run.
+Every one of those envs is defined in `variants/hydra_rak3401`, `variants/hydra_m1` or
+`variants/hydra_m5`; the `_hardened` envs extend the stock repeater env of the board and
+add the watchdogs to it, so upstream's own envs stay untouched.
 
 ### The status LED
 
@@ -361,7 +364,7 @@ For the wire format, the group marker, the deny list, the settings and the threa
 see **[ble_bridge.md](ble_bridge.md)**. This page does not repeat them.
 
 `RAK_3401_repeater_bridge_ble` and `ThinkNode_M1_repeater_bridge_ble` are the envs that
-enable the bridge. Both boards carry an nRF52840 with s140 6.1.1 and link against
+enable the bridge, defined in `variants/hydra_rak3401` and `variants/hydra_m1`. Both boards carry an nRF52840 with s140 6.1.1 and link against
 `boards/nrf52840_s140_v6.ld`, so the SoftDevice gets the same 24 KB at RAM origin
 `0x20006000` on each, and each env asks for the same 2 peripheral and 2 central slots.
 `BleStack::ensure()` still finds the true ceiling at boot and steps down to what fits, so
@@ -379,22 +382,27 @@ on the M5.
 
 | env | result | flash | RAM |
 |---|---|---:|---:|
-| `RAK_3401_repeater` | builds | 380,092 B (46.6% of 815,104) | 33,048 B (14.0% of 235,520) |
+| `RAK_3401_repeater_hardened` | builds | 380,092 B (46.6% of 815,104) | 33,048 B (14.0% of 235,520) |
 | `RAK_3401_repeater_bridge_ble` | builds | 395,848 B (48.6%) | 41,200 B (17.5%) |
-| `RAK_3401_hydra` (3 slots) | builds | 389,916 B (47.8%) | 54,544 B (23.2%) |
-| `RAK_3401_hydra_debug` (packet trace on) | builds | 392,540 B (48.2%) | 65,496 B (27.8%) |
-| `ThinkNode_M1_repeater` | builds | 304,864 B (37.4% of 815,104) | 30,768 B (13.1% of 235,520) |
-| `ThinkNode_M1_repeater_bridge_ble` | builds | 320,428 B (39.3%) | 38,904 B (16.5%) |
-| `ThinkNode_M1_hydra` (3 slots) | builds | 329,952 B (40.5%) | 52,504 B (22.3%) |
-| `ThinkNode_M5_Repeater` | builds | 1,126,361 B (85.9% of 1,310,720) | 60,912 B (11.6% of 524,288) |
-| `ThinkNode_M5_hydra` (5 slots) | builds | 1,125,169 B (57.2% of 1,966,080) | 104,280 B (19.9%) |
+| `RAK_3401_hydra` (3 slots) | builds | 392,876 B (48.2%) | 54,600 B (23.2%) |
+| `RAK_3401_hydra_debug` (packet trace on) | builds | 395,500 B (48.5%) | 65,544 B (27.8%) |
+| `ThinkNode_M1_repeater_hardened` | builds | 304,848 B (37.4% of 815,104) | 30,768 B (13.1% of 235,520) |
+| `ThinkNode_M1_repeater_bridge_ble` | builds | 320,412 B (39.3%) | 38,904 B (16.5%) |
+| `ThinkNode_M1_hydra` (3 slots) | builds | 330,128 B (40.5%) | 52,512 B (22.3%) |
+| `ThinkNode_M5_Repeater_hardened` | builds | 1,126,385 B (85.9% of 1,310,720) | 60,912 B (11.6% of 524,288) |
+| `ThinkNode_M5_hydra` (5 slots) | builds | 1,125,249 B (57.2% of 1,966,080) | 104,288 B (19.9%) |
+
+The ESP32 image embeds the `.pio/libdeps/<env>/...` path of each third-party source that
+uses `__FILE__`, so an M5 flash figure moves by a few bytes when an env is renamed.
+`ThinkNode_M5_Repeater_hardened` is 24 B larger than the same build under a 21-character
+name for that reason alone.
 
 The M1 rows sit below the RAK3401 rows because those envs drive no display and pull in
 no sensor drivers. The M5 rows are far larger than either, because that image carries the
 ESP32 WiFi stack for the over-the-air update endpoint.
 
-**The M5 partition table.** `ThinkNode_M5_Repeater` keeps the stock table for a 4 MB part
-and fills 85.9% of its 1,310,720 B OTA slot. `ThinkNode_M5_hydra` moves to
+**The M5 partition table.** `ThinkNode_M5_Repeater_hardened` keeps the stock table for a
+4 MB part and fills 85.9% of its 1,310,720 B OTA slot. `ThinkNode_M5_hydra` moves to
 `min_spiffs.csv`, a stock table of the platform that four other variants in this tree
 already use. It gives each OTA slot 1,966,080 B and leaves 131,072 B of SPIFFS, which is
 far more than the identities, the preferences, the ACLs and `/hydra_slots` need.
@@ -411,7 +419,7 @@ onto a board.
 Upstream `v1.17.1` (`d9296435`) built from its own tree on the same host, in the same
 env:
 
-| `RAK_3401_repeater` | upstream | this fork | delta |
+| RAK3401 repeater | upstream `RAK_3401_repeater` | this fork `RAK_3401_repeater_hardened` | delta |
 |---|---:|---:|---:|
 | flash | 376,780 B | 380,092 B | **+3,312 B** |
 | RAM | 32,928 B | 33,048 B | **+120 B** |
@@ -448,7 +456,8 @@ its own advert schedule to one half-duplex antenna.
 The diagnostic packet trace costs **10,952 B of RAM and 2,624 B of flash** at 48 entries
 of 200 raw bytes. It is off unless a build asks for it. `RAK_3401_hydra_debug` asks for
 it. Compare that with the whole cost of hydra: `RAK_3401_hydra` at 3 slots uses 21,496 B
-of RAM more than `RAK_3401_repeater`, and the two chat slots hold 11,280 B of that.
+of RAM more than `RAK_3401_repeater_hardened`, and the two chat slots hold 11,280 B of
+that.
 
 ---
 
