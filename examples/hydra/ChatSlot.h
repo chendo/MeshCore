@@ -40,6 +40,17 @@
   #define HYDRA_CHAT_ADVERT_MINS  60
 #endif
 
+// The first advert of a slot waits 8 s for the radio to settle. Every slot on
+// the board starts in the same pass of setup(), so that one delay puts all of
+// them on the air together. This window spreads that first advert by key, in
+// the same way as nextAdvertDelay spreads every advert after it.
+#ifndef HYDRA_ADVERT_START_MS
+  #define HYDRA_ADVERT_START_MS      8000
+#endif
+#ifndef HYDRA_ADVERT_START_SPREAD_MS
+  #define HYDRA_ADVERT_START_SPREAD_MS  30000
+#endif
+
 class ChatMesh : public BaseChatMesh {
   char _name[SLOT_NAME_MAX];
   unsigned long _next_advert;
@@ -105,7 +116,12 @@ public:
     if (flood) sendFlood(pkt, delay_millis); else sendZeroHop(pkt, delay_millis);
     // Decision C. The interval starts when you enable the slot. So the slot
     // announces itself at that moment. It does not wait for the first cycle.
-    _next_advert = _advert_mins ? futureMillis((int)(_advert_mins * 60000UL)) : 0;
+    // nextAdvertDelay then holds this slot at its own point of the cycle, so
+    // the identities of one board do not transmit together. It returns 0 only
+    // for an interval of 0, which is the setting for "never advert".
+    uint32_t d = nextAdvertDelay((uint32_t)_ms->getMillis(), _advert_mins, self_id.pub_key, PUB_KEY_SIZE,
+                                 getRNG()->nextInt(0, HYDRA_ADVERT_JITTER_MS));
+    _next_advert = d ? futureMillis((int)d) : 0;
   }
 
   void loop() {
@@ -192,7 +208,9 @@ public:
     _mesh.begin();
     _type = type;
     _begun = true;
-    _mesh.advertise(8000, _mesh.floodAdvert());
+    _mesh.advertise(HYDRA_ADVERT_START_MS +
+                    advertPhaseWithin(HYDRA_ADVERT_START_SPREAD_MS, _mesh.self_id.pub_key, PUB_KEY_SIZE),
+                    _mesh.floodAdvert());
     return true;
   }
 
