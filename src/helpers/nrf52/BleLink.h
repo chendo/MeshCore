@@ -34,6 +34,11 @@ public:
    *  not echo a frame straight back to its source. */
   typedef void (*rx_handler_t)(const uint8_t* data, uint16_t len, uint8_t link_idx);
 
+  /** Asked before we adopt a peer that dialled IN. The bridge owns the deny
+   *  list, so BleLink asks rather than keeping a list of its own.
+   *  @returns false to refuse the peer, which is then disconnected. */
+  typedef bool (*allow_handler_t)(const ble_gap_addr_t& addr);
+
   /* Outward links. Bounded by the central slots that the SoftDevice granted,
      which on a RAK3401 came to three. See BleStack. */
   static const uint8_t MAX_LINKS = 3;
@@ -51,8 +56,10 @@ public:
   /**
    * @param handler    called from the BLE event context. Keep it short.
    * @param self_addr  our own BLE address, for the tie-break below.
+   * @param allow      optional: asked before a peer that dialled in is adopted.
    */
-  bool begin(rx_handler_t handler, const ble_gap_addr_t& self_addr);
+  bool begin(rx_handler_t handler, const ble_gap_addr_t& self_addr,
+             allow_handler_t allow = nullptr);
 
   /** Drive connection attempts, the idle check and the transmit queues. Call
    *  this from the main loop. */
@@ -118,8 +125,15 @@ public:
   bool takeAuthFailure(ble_gap_addr_t& addr);
 
   uint8_t numUp() const;
-  /** The address of the inbound peer, if one is attached. */
-  bool getInboundAddr(ble_gap_addr_t& addr) const;
+  /** True while this link can carry a frame. INBOUND_LINK refers to the
+   *  inbound peer. */
+  bool isUp(uint8_t idx) const;
+  /** The address of the inbound peer, if one is attached.
+   *  @param rx_age_s  optional: seconds since the last frame arrived, or
+   *                    0xFFFFFFFF if nothing ever has.
+   *  @param queued     optional: frames still waiting in its TX queue. */
+  bool getInboundAddr(ble_gap_addr_t& addr, uint32_t* rx_age_s = nullptr,
+                      uint32_t* queued = nullptr) const;
   /** @param rx_age_s  optional: seconds since the last frame arrived, or
    *                    0xFFFFFFFF if nothing ever has.
    *  @param queued     optional: frames still waiting in this link's TX queue. */
@@ -213,6 +227,14 @@ private:
   static const uint32_t AUTH_GRACE_MS = 45000;
 
   static const uint32_t LINK_IDLE_LIMIT_MS = 60000;
+
+  /* How long a connection handle stays refused after we dropped it. A
+     disconnect is asynchronous, so a write from the peer we just dropped can
+     still arrive and would otherwise buy it a new authentication window. Two
+     seconds covers the disconnect and stays well below the interval at which
+     the SoftDevice would give the same handle to somebody else. */
+  static const uint32_t IN_DROP_HOLD_MS = 2000;
+
   static const uint16_t BACKOFF_MIN_MS = 2000;
   static const uint16_t BACKOFF_MAX_MS = 60000;
 
@@ -232,6 +254,21 @@ private:
                   unsigned long& started_ms, uint32_t& resyncs,
                   uint32_t& recv, unsigned long& last_rx_ms,
                   uint8_t idx, const uint8_t* data, uint16_t len);
+  /**
+   * @brief  Return one outward link to IDLE with every buffer empty.
+   *
+   * Every teardown path calls this, so a new path cannot forget a field. Two
+   * of the three paths used to leave the TX queue behind. A part-sent frame
+   * then resumed from tx_off on the next connection and put a headerless tail
+   * on the wire; a tail that carries a plausible SYNC and length builds a
+   * frame that fails the group tag, and that count is what separates a foreign
+   * secret from a framing fault.
+   *
+   * The caller keeps whatever it needs beyond this, such as the backoff.
+   */
+  void resetLink(Link& l);
+  /** The same for the inbound peer, which has no Link slot. */
+  void resetInbound();
   int findByConn(uint16_t conn) const;
   bool enqueue(Link& l, const uint8_t* data, uint16_t len);
   void drain(Link& l, uint8_t idx);
@@ -249,6 +286,7 @@ private:
   Link _links[MAX_LINKS];
   ble_gap_addr_t _self;
   rx_handler_t _handler = nullptr;
+  allow_handler_t _allow = nullptr;
   bool _running = false;
   bool _topology_changed = false;
 
@@ -259,6 +297,9 @@ private:
      slot is left for a peer that dials us. That is enough, because a peer that
      we cannot accept is dialled BY us instead. */
   uint16_t _in_conn = BLE_CONN_HANDLE_INVALID;
+  /* The handle we dropped last, and when. See IN_DROP_HOLD_MS. */
+  uint16_t _in_dropped_conn = BLE_CONN_HANDLE_INVALID;
+  unsigned long _in_dropped_ms = 0;
   uint16_t _in_expect = 0, _in_have = 0;
   uint8_t _in_buf[MAX_FRAME];
   uint8_t _in_hdr[3];

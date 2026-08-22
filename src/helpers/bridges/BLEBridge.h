@@ -48,13 +48,19 @@
  * not authenticate. The proof of group membership is the group HMAC on the
  * FIRST frame over the link.
  *
- * A stranger can therefore make us open a connection. It gets no data, and:
+ * A stranger can therefore make us open a connection, and it can dial us. The
+ * rules are the same both ways. It gets no data, and:
  *  - a link whose first frame fails the tag is dropped at once;
- *  - a link that sends nothing at all is dropped after BleLink::AUTH_GRACE_MS;
- *  - either way the address goes on the deny list for BleDenyList::DENY_MS.
+ *  - a link that writes and never authenticates is dropped after
+ *    BleLink::AUTH_GRACE_MS, and one that authenticates and then goes silent
+ *    after BleLink::LINK_IDLE_LIMIT_MS;
+ *  - either way the address goes on the deny list for BleDenyList::DENY_MS,
+ *    which gates a dial out and an inbound adoption alike.
  *
  * That deny list is load-bearing. There are only three central slots on a
- * RAK3401 (BleLink::MAX_LINKS), so slot exhaustion is a real denial of service.
+ * RAK3401 (BleLink::MAX_LINKS) and one inbound slot, so slot exhaustion is a
+ * real denial of service. See docs/ble_bridge.md for the one gap that is left:
+ * a peer that connects inward and writes nothing is invisible to the bridge.
  *
  * Configuration:
  *  - put ${bridge.ble} in the env's build_flags, and the .cpp files in its
@@ -93,6 +99,12 @@ public:
                    uint32_t& sent, uint32_t& recv, uint32_t& drops,
                    uint32_t* rx_age_s = nullptr, uint32_t* queued = nullptr) const {
     return _link.getLink(i, a, up, rssi, sent, recv, drops, rx_age_s, queued);
+  }
+  /** The peer that dialled IN, which holds no outward slot and so appears in no
+   *  getLinkInfo() index. */
+  bool getInboundInfo(ble_gap_addr_t& a, uint32_t* rx_age_s = nullptr,
+                      uint32_t* queued = nullptr) const {
+    return _link.getInboundAddr(a, rx_age_s, queued);
   }
 
   uint32_t numRxOk() const { return _num_rx_ok; }
@@ -133,7 +145,10 @@ public:
 
   /* Deny list. */
   uint32_t numDenied() const { return _deny.numAdded(); }
+  /** Beacons from a denied address that we did not dial. */
   uint32_t numDialsRefused() const { return _num_dials_refused; }
+  /** Peers that dialled IN from a denied address and were disconnected. */
+  uint32_t numInboundRefused() const { return _num_inbound_refused; }
 
   /** The group marker in our beacon, for the CLI. */
   uint16_t groupMarker() const { return _codec.groupMarker(); }
@@ -182,8 +197,11 @@ private:
 
   static void link_rx_cb(const uint8_t* data, uint16_t len, uint8_t link_idx);
   static void beacon_cb(const ble_gap_addr_t& addr, int8_t rssi);
+  static bool allow_cb(const ble_gap_addr_t& addr);
   void onLinkFrame(const uint8_t* data, uint16_t len, uint8_t link_idx);
   void onBeacon(const ble_gap_addr_t& addr, int8_t rssi);
+  /** @returns false to refuse a peer that dialled in. */
+  bool onInboundAdopt(const ble_gap_addr_t& addr);
   void sendHeartbeat();
   /** Map a link index onto a LinkStamp slot. */
   LinkStamp* stampFor(uint8_t link_idx);
@@ -214,4 +232,5 @@ private:
   uint32_t _num_sent = 0;
   uint32_t _num_tx_no_link = 0;
   uint32_t _num_dials_refused = 0;
+  uint32_t _num_inbound_refused = 0;
 };
