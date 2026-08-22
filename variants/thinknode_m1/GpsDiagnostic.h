@@ -326,23 +326,17 @@ static inline void gps_diag_boot_block(bool gps_active, bool switch_state_at_boo
   GpsSwitchFinding finding = gps_diag_switch_finding(gps_diag_history);
   gps_diag_last_finding = finding;
   int en = digitalRead(GPS_EN);
-  int rst = digitalRead(GPS_RESET);
+  int rst = digitalRead(PIN_GPS_REINIT);
 
   Serial.println();
   Serial.println("--- GPS DIAGNOSTIC: ThinkNode M1 ---");
-  Serial.printf("pins: switch=P%d gps_en=P%d gps_reset=P%d pwr_en=P%d uart_rx=P%d uart_tx=P%d\n",
-                PIN_GPS_SWITCH, GPS_EN, GPS_RESET, PIN_PWR_EN, PIN_SERIAL1_RX, PIN_SERIAL1_TX);
+  Serial.printf("pins: switch=P%d gps_en=P%d gps_reinit=P%d pwr_en=P%d uart_rx=P%d uart_tx=P%d\n",
+                PIN_GPS_SWITCH, GPS_EN, PIN_GPS_REINIT, PIN_PWR_EN, PIN_SERIAL1_RX, PIN_SERIAL1_TX);
   Serial.printf("uart: our rx P%d is the GPS tx. our tx P%d is the GPS rx. Serial1 runs at 9600 baud.\n",
                 PIN_SERIAL1_RX, PIN_SERIAL1_TX);
-#if defined(SX126X_POWER_EN) && (GPS_RESET == SX126X_POWER_EN)
-  // The block drops out on its own once the two pins stop colliding.
-  Serial.printf("WARNING: P%d is GPS_RESET, and it is also SX126X_POWER_EN. One pin has two jobs.\n",
-                GPS_RESET);
-  Serial.printf("         board.begin() drives P%d HIGH for the radio, so the GPS reset is always released.\n",
-                GPS_RESET);
-  Serial.printf("         stop_gps() drives P%d LOW. That also removes power from the LoRa radio.\n",
-                GPS_RESET);
-#endif
+  Serial.printf("radio: SX126X_POWER_EN is P%d. It must stay HIGH.\n", SX126X_POWER_EN);
+  Serial.printf("       initVariant() drives P%d HIGH, and no other code writes to it.\n",
+                PIN_GPS_REINIT);
   Serial.println();
   Serial.println("OBSERVED, this position only:");
   Serial.printf("  switch P%d: no-pull=%d (%d of %d samples HIGH)  pull-up=%d  pull-down=%d\n",
@@ -357,9 +351,8 @@ static inline void gps_diag_boot_block(bool gps_active, bool switch_state_at_boo
   Serial.printf("  gps_en P%d: level=%d, active level is %s, so GPS power is %s.\n",
                 GPS_EN, en, GPS_EN_ACTIVE == HIGH ? "HIGH" : "LOW",
                 en == GPS_EN_ACTIVE ? "ON" : "OFF");
-  Serial.printf("  gps_reset P%d: level=%d, active level is %s, so GPS reset is %s.\n",
-                GPS_RESET, rst, GPS_RESET_ACTIVE == HIGH ? "HIGH" : "LOW",
-                rst == GPS_RESET_ACTIVE ? "ASSERTED" : "RELEASED");
+  Serial.printf("  gps_reinit P%d: level=%d, so the GPS reset is %s. A LOW of 100 ms resets the module.\n",
+                PIN_GPS_REINIT, rst, rst == LOW ? "ASSERTED" : "RELEASED");
   Serial.printf("  pwr_en P%d: level=%d (initVariant drives it HIGH for the peripheral rail).\n",
                 PIN_PWR_EN, digitalRead(PIN_PWR_EN));
   Serial.printf("  boot: the code read the switch as %s, so start_gps() %s. gps_active=%d.\n",
@@ -420,16 +413,16 @@ static inline void gps_diag_status_line(GpsSerialTap& tap, LocationProvider& loc
   GpsPinProbe sw = gps_diag_probe_pin(PIN_GPS_SWITCH, 4);
   gps_diag_history_add(gps_diag_history, sw);
   int en = digitalRead(GPS_EN);
-  int rst = digitalRead(GPS_RESET);
+  int rst = digitalRead(PIN_GPS_REINIT);
   const char* last = tap.lastSentence();
 
-  Serial.printf("[gps] t=%lus sw=%d(up=%d,dn=%d,rec=%d) seen=%s en=%d:%s rst=%d:%s active=%d "
+  Serial.printf("[gps] t=%lus sw=%d(up=%d,dn=%d,rec=%d) seen=%s en=%d:%s reinit=%d:%s active=%d "
                 "rx=%luB total=%luB nmea=%lu sats=%ld fix=%s last=%s\n",
                 (unsigned long)(millis() / 1000),
                 sw.no_pull, sw.pull_up, sw.pull_down, sw.recover,
                 gps_diag_levels_text(gps_diag_history.levels_seen),
                 en, en == GPS_EN_ACTIVE ? "ON" : "OFF",
-                rst, rst == GPS_RESET_ACTIVE ? "ASSERTED" : "RELEASED",
+                rst, rst == LOW ? "ASSERTED" : "RELEASED",
                 gps_active ? 1 : 0,
                 (unsigned long) tap.takeBytes(),
                 (unsigned long) tap.totalBytes(),

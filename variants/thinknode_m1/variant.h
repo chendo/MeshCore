@@ -137,7 +137,12 @@ extern const int SCK;
 #define PIN_GPS_RX              (40)
 #define PIN_GPS_TX              (41)
 #define GPS_EN                  (34)
-#define PIN_GPS_RESET           (37)
+// P1.05 is the REINIT input of the L76K. A LOW of more than 100 ms resets the
+// module, thus initVariant() drives the pin HIGH and no other code touches it.
+//
+// Do not give this pin to PIN_GPS_RESET. MicroNMEALocationProvider drives its
+// reset pin LOW when the GPS stops.
+#define PIN_GPS_REINIT          (37)
 #define PIN_GPS_PPS             (36)
 #define PIN_GPS_STANDBY         (34)
 #define PIN_GPS_SWITCH          (33)
