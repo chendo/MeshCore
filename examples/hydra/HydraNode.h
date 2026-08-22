@@ -55,6 +55,7 @@ struct SlotConfig {
   SlotType type;
   uint8_t  advert_mins;   // 0 = never advert again
   bool     flood;         // flood the regular advert, and do not send it zero-hop
+  bool     diag;          // the diagnostic bot answers ping/trace/peers. Off by default.
   char     name[SLOT_NAME_MAX];
 };
 

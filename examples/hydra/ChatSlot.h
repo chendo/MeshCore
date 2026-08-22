@@ -17,6 +17,7 @@
 // written. That protocol is the delivery of posts, the sync of clients and the
 // retry of pushes. The function onCommandDataRecv is still empty.
 
+#include "DiagBot.h"
 #include "HydraSlot.h"
 #include "RoomStore.h"
 #include "SlotMeshTables.h"
@@ -46,6 +47,7 @@ class ChatMesh : public BaseChatMesh {
   uint8_t _advert_mins;
   bool _flood;
   uint8_t _adv_type;
+  DiagBot _diag;   // off until `slot N set diag on`; see DiagBot.h
 
 protected:
   float getAirtimeBudgetFactor() const override { return 1.0f; }
@@ -59,7 +61,7 @@ protected:
   void onDiscoveredContact(ContactInfo& c, bool is_new, uint8_t path_len, const uint8_t* path) override {}
   void onContactPathUpdated(const ContactInfo& c) override {}
   ContactInfo* processAck(const uint8_t* data) override { return NULL; }
-  void onMessageRecv(const ContactInfo& from, mesh::Packet* pkt, uint32_t ts, const char* text) override {}
+  void onMessageRecv(const ContactInfo& from, mesh::Packet* pkt, uint32_t ts, const char* text) override { _diag.onText(*this, from, pkt, ts, text); }
   void onCommandDataRecv(const ContactInfo& from, mesh::Packet* pkt, uint32_t ts, const char* text) override {}
   void onSignedMessageRecv(const ContactInfo& from, mesh::Packet* pkt, uint32_t ts, const uint8_t* prefix, const char* text) override {}
   void onChannelMessageRecv(const mesh::GroupChannel& ch, mesh::Packet* pkt, uint32_t ts, const char* text) override {}
@@ -70,6 +72,7 @@ protected:
     return 12000 + (air_ms * 4 + 500) * ((path_len & 63) + 1);
   }
   void onSendTimeout() override {}
+  void onTraceRecv(mesh::Packet* pkt, uint32_t tag, uint32_t auth, uint8_t flags, const uint8_t* snrs, const uint8_t* hashes, uint8_t path_len) override { _diag.onTraceResult(*this, pkt, tag, auth, flags, snrs, hashes, path_len); }
 
 public:
   ChatMesh(mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng,
@@ -87,6 +90,7 @@ public:
   void setNodeName(const char* n) { StrHelper::strncpy(_name, n, sizeof(_name)); }
   void setAdvertType(uint8_t t) { _adv_type = t; }
   bool hasPendingWork() const { return _mgr->getOutboundTotal() > 0; }
+  DiagBot& diag() { return _diag; }
 
   uint8_t advertMins() const { return _advert_mins; }
   void setAdvertMins(uint8_t m) { _advert_mins = m; }
