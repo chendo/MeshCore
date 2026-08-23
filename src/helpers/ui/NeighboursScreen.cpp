@@ -3,9 +3,14 @@
 #include <stdio.h>
 #include <string.h>
 
-// The three header lines: our name, the radio config, then the column labels
-// with a rule above them. Row 0 of the table sits one pitch below the labels.
+/* Four header lines, every one of them a whole pitch apart: our name, the radio
+   config, a rule, then the column labels. Row 0 of the table follows one pitch
+   below. Everything lands on the same grid on purpose -- the first version
+   computed the rule and the labels with their own little offsets, which held
+   together at a pitch of 11 and collapsed at 6, drawing the column labels one
+   unit from the first peer row. */
 static const int TITLE_Y = 2;
+static const int HDR_LINES = 4;
 
 /* Format a quarter-dB mean as tenths, without pulling in float printf.
    The mean is taken FIRST so the multiply can never overflow: a quarter-dB
@@ -42,7 +47,7 @@ static void fmtLabel(char* out, size_t n, const NeighbourRow& p) {
 }
 
 int NeighboursScreen::rowCapacity(DisplayDriver& display) const {
-  int first = TITLE_Y + _pitch * 3;      // name, config, column labels
+  int first = TITLE_Y + _pitch * HDR_LINES;   // name, config, rule, column labels
   int rows = (display.height() - first) / _pitch;
   return rows < 0 ? 0 : rows;
 }
@@ -110,20 +115,28 @@ int NeighboursScreen::render(DisplayDriver& display) {
   const int x_snr = x_rx  - w_rx  - gap;
   const int name_w = x_snr - w_snr - gap;
 
-  // A hairline rule reads as a divider at a fraction of the height a blank
-  // row would cost, and rows are the scarce resource here.
-  const int rule_y = TITLE_Y + _pitch * 2 + 2;
-  display.fillRect(0, rule_y, W, 1);
-
-  const int hdr_y = rule_y + 3;
+  /* The divider is drawn as TEXT, not with fillRect. In GxEPDDisplay,
+     setCursor() adds EINK_Y_OFFSET and a font baseline correction while
+     fillRect() adds neither, so the two live in coordinate spaces 15.6px apart:
+     a rect placed relative to a text baseline lands on top of the text. Using a
+     row of dashes keeps the divider in the same space as everything around it
+     and makes the screen immune to that difference on every driver. */
+  const int dash_w = display.getTextWidth("-");
+  int dashes = dash_w > 0 ? W / dash_w : 0;
+  if (dashes > (int)sizeof(tmp) - 1) dashes = (int)sizeof(tmp) - 1;
+  for (int i = 0; i < dashes; i++) tmp[i] = '-';
+  tmp[dashes > 0 ? dashes : 0] = 0;
   display.setColor(UIColor::secondary_txt);
+  display.drawTextLeftAlign(0, TITLE_Y + _pitch * 2, tmp);
+
+  const int hdr_y = TITLE_Y + _pitch * 3;
   display.drawTextLeftAlign(0, hdr_y, "NAME");
   display.drawTextRightAlign(x_snr, hdr_y, "SNR");
   display.drawTextRightAlign(x_rx,  hdr_y, "RX");
   display.drawTextRightAlign(x_fwd, hdr_y, "FWD");
   display.setColor(UIColor::primary_txt);
 
-  int y = TITLE_Y + _pitch * 3;
+  int y = TITLE_Y + _pitch * HDR_LINES;
   for (int i = 0; i < shown; i++, y += _pitch) {
     NeighbourRow p;
     if (!_src.getNeighbour(i, p)) break;
@@ -143,7 +156,7 @@ int NeighboursScreen::render(DisplayDriver& display) {
 
   if (have == 0) {
     display.setColor(UIColor::secondary_txt);
-    display.drawTextCentered(W / 2, TITLE_Y + _pitch * 4, "no neighbours");
+    display.drawTextCentered(W / 2, TITLE_Y + _pitch * HDR_LINES, "no neighbours");
   }
 
   display.endFrame();
