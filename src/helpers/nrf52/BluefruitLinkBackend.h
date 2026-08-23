@@ -98,6 +98,17 @@ public:
 
   static bool dial(const BleAddr& addr) { return Bluefruit.Central.connect(&addr); }
 
+  /** Abandon a connect that never completed.
+   *
+   *  Nothing to do here. The SoftDevice reports every connect attempt through
+   *  the central connect callback, success or failure, so a dial on this
+   *  backend always ends and BleLink's timeout never has to reach for this.
+   *  It exists because the ESP32 backend does need it: NimBLE can leave a
+   *  connect outstanding for ever, and an outstanding connect blocks the
+   *  scanner. Bluefruit offers no stopConnecting(), so say so honestly rather
+   *  than pretend the attempt was cancelled. */
+  static bool cancelDial() { return false; }
+
   /** Find our service on an outward link and subscribe to it. */
   static bool discoverLink(uint8_t idx, uint16_t conn);
 
