@@ -163,6 +163,7 @@ class NeighboursModule : public AppModule {
   char _subtitle[28];
   unsigned long _next_render;
   bool _ok;
+  uint32_t _frames;
 
   void formatRadio(const NodePrefs* p) {
     /* Integer formatting on purpose. Pulling %f into the link costs a few KB
@@ -180,7 +181,7 @@ public:
          panel is 20 columns by 9 lines, which is five peers and seven
          characters of name -- not a table. The compact font makes it 33 by 25,
          and 6 units of pitch spends the drawable height on 16 peer rows. */
-      _screen(_neighbours, NULL, NULL, 6, 5000, 0), _next_render(0), _ok(false) {
+      _screen(_neighbours, NULL, NULL, 6, 5000, 0), _next_render(0), _ok(false), _frames(0) {
     _subtitle[0] = 0;
   }
 
@@ -189,6 +190,13 @@ public:
   void onSetup() override {
     _ok = display.begin();
     if (!_ok) return;
+    /* begin() only brings the panel up: it sets _init and leaves _isOn false,
+       and isOn() is what gates every draw. Without this the screen stays blank
+       for ever and nothing anywhere reports an error. UITask does the same at
+       startup. On the M5 turnOn() only flips the flag (BACKLIGHT_BTN is set, so
+       the expander branch compiles out); on the M1 it also raises
+       DISP_BACKLIGHT, whose pinMode begin() has already done. */
+    display.turnOn();
     NodePrefs* p = hydra.repeater().prefs();
     _screen.setTitle(p->node_name);
     formatRadio(p);
@@ -204,7 +212,17 @@ public:
     formatRadio(hydra.repeater().prefs());
     _neighbours.refresh(now);
     _next_render = now + _screen.render(display);
+    _frames++;
   }
+
+  /* Answers "why is the panel blank?" without needing eyes on the glass, which
+     is the only way this was diagnosable at all. */
+  void status(char* reply, size_t sz) {
+    snprintf(reply, sz, "screen: begin=%d on=%d frames=%u rows=%d/%d cap=%d",
+             _ok ? 1 : 0, display.isOn() ? 1 : 0, (unsigned)_frames,
+             _neighbours.numNeighbours(), _obsPeers(), _screen.rowCapacity(display));
+  }
+  int _obsPeers() const { return hydra.radio().observer().numPeers(); }
 };
 static NeighboursModule neighbours_module;
 #endif
@@ -250,6 +268,12 @@ static void dispatch(uint32_t sender, char* cmd, char* reply, size_t reply_sz) {
   if (strcmp(cmd, "wifi off") == 0) {
     wifi_console.setCredentials("", "");
     StrHelper::strncpy(reply, "OK - wifi off and forgotten", reply_sz);
+    return;
+  }
+#endif
+#ifdef DISPLAY_CLASS
+  if (strcmp(cmd, "screen") == 0) {
+    neighbours_module.status(reply, reply_sz);
     return;
   }
 #endif

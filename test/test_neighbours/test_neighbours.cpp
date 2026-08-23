@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <vector>
+#include <algorithm>
 #include <string>
 
 #include <Arduino.h>
@@ -37,6 +38,7 @@ public:
   std::vector<Draw> texts;
   int cur_x = 0, cur_y = 0;
   int frames = 0;
+  int rects = 0;
   /* Character width in DISPLAY UNITS, which is not panel pixels. The M5 scales
      its 128-unit space onto a 200px panel, so the compact font's 6px cell is
      3.84 units, not 6. Getting this wrong is what makes a layout that measures
@@ -49,12 +51,12 @@ public:
   void turnOn() override { }
   void turnOff() override { }
   void clear() override { }
-  void startFrame(ColorVal bkg = UIColor::window_bkg) override { texts.clear(); frames++; }
+  void startFrame(ColorVal bkg = UIColor::window_bkg) override { texts.clear(); rects = 0; frames++; }
   void setTextSize(int sz) override { }
   void setColor(ColorVal c) override { }
   void setCursor(int x, int y) override { cur_x = x; cur_y = y; }
   void print(const char* str) override { texts.push_back({cur_x, cur_y, str}); }
-  void fillRect(int x, int y, int w, int h) override { }
+  void fillRect(int x, int y, int w, int h) override { rects++; }
   void drawRect(int x, int y, int w, int h) override { }
   void drawXbm(int x, int y, const uint8_t* b, int w, int h) override { }
   uint16_t getTextWidth(const char* s) override { return (uint16_t)(strlen(s) * char_w); }
@@ -205,10 +207,10 @@ protected:
 TEST_F(ScreenTest, RowCapacityLeavesRoomForTheHeader) {
   ObserverNeighbours n(o.obs);
   NeighboursScreen s(n, "NODE", "915.0", 11);
-  // 128 tall, 2 + 3*11 = 35 of header, 11 per row.
-  EXPECT_EQ((128 - 35) / 11, s.rowCapacity(d));
+  // 128 tall, 2 + 4*11 = 46 of header (name, config, rule, labels), 11 per row.
+  EXPECT_EQ((128 - 46) / 11, s.rowCapacity(d));
   FakeDisplay small(128, 64);
-  EXPECT_EQ((64 - 35) / 11, s.rowCapacity(small));
+  EXPECT_EQ((64 - 46) / 11, s.rowCapacity(small));
 }
 
 TEST_F(ScreenTest, DrawsOneRowPerNeighbourWithHeaders) {
@@ -284,9 +286,11 @@ TEST_F(ScreenTest, ColumnsAreRightAlignedAndDoNotOverlapTheName) {
   for (auto& t : d.texts) if (t.s == "FWD" && t.x == x_fwd_label) found = true;
   EXPECT_TRUE(found) << "FWD must be flush with the right edge";
 
-  // Every name is drawn at x=0 and nothing else is.
+  // Only the title, the divider, the NAME label and the names sit at x=0.
   for (auto& t : d.texts) {
-    if (t.x == 0) EXPECT_TRUE(t.s == "NAME" || t.s == "1101" || t.s == "N") << t.s;
+    if (t.x != 0) continue;
+    bool rule = t.s.size() > 1 && t.s.find_first_not_of('-') == std::string::npos;
+    EXPECT_TRUE(rule || t.s == "NAME" || t.s == "1101" || t.s == "N") << t.s;
   }
 }
 
@@ -307,12 +311,69 @@ TEST(CompactGeometry, TheM5FitsAUsableNumberOfPeers) {
   // 6 panel px / 1.5625 scale = 3.84 units per character, rounded to 4.
   FakeDisplay m5(128, 118, 4);
   NeighboursScreen s(n, "VIC-NorthcoteNW-EDG-01", "915.075 BW125 SF9 CR5", 6, 5000, 0);
-  EXPECT_EQ(16, s.rowCapacity(m5)) << "the compact font must buy back peer rows";
+  EXPECT_EQ(15, s.rowCapacity(m5)) << "the compact font must buy back peer rows";
 
   s.render(m5);
   // A full node name has to survive at this density; that was the whole point.
   EXPECT_TRUE(m5.has("VIC-NorthcoteNW-EDG-01"));
-  EXPECT_TRUE(m5.has("+4")) << "the truncation badge, 20 neighbours into 16 rows";
+  EXPECT_TRUE(m5.has("+5")) << "the truncation badge, 20 neighbours into 15 rows";
+}
+
+/* The bug this pins: at a pitch of 11 the header block's hand-rolled offsets
+   happened to clear each other, and at 6 they did not -- the column labels were
+   drawn ONE unit above the first peer row, so the two printed on top of one
+   another on the glass. Nothing in the geometry tests noticed, because they
+   only ever asked how many rows fit. Assert the thing that was actually wrong:
+   no two text lines may sit closer together than one pitch. */
+TEST(Layout, NoTwoLinesAreCloserThanOnePitch) {
+  for (int pitch : {5, 6, 8, 11}) {
+    Obs o;
+    g_fake_millis = 10000;
+    for (uint8_t i = 0; i < 6; i++) {
+      o.rx(floodWithPath({{(uint8_t)(0x50 + i), 0x02}}, 2), (int8_t)(30 - i));
+    }
+    ObserverNeighbours n(o.obs);
+    n.refresh(g_fake_millis);
+
+    FakeDisplay d(128, 118, 4);
+    NeighboursScreen s(n, "VIC-NorthcoteNW-EDG-01", "915.075 BW125 SF9 CR5", pitch, 5000, 0);
+    s.render(d);
+
+    std::vector<int> ys;
+    for (auto& t : d.texts) ys.push_back(t.y);
+    std::sort(ys.begin(), ys.end());
+    ys.erase(std::unique(ys.begin(), ys.end()), ys.end());
+    ASSERT_GT(ys.size(), 3u) << "pitch " << pitch << ": expected header plus rows";
+    for (size_t i = 1; i < ys.size(); i++) {
+      EXPECT_GE(ys[i] - ys[i-1], pitch)
+          << "pitch " << pitch << ": lines at y=" << ys[i-1] << " and y=" << ys[i]
+          << " would overlap on the glass";
+    }
+    EXPECT_LE(ys.back(), 118) << "pitch " << pitch << ": last line runs off the panel";
+  }
+}
+
+/* The divider must be text. GxEPDDisplay's setCursor() adds EINK_Y_OFFSET and a
+   baseline correction while fillRect() adds neither, so a rect positioned
+   against a text baseline lands 15.6px away from where it was meant to go --
+   which is how the rule ended up struck through the column labels. */
+TEST(Layout, TheDividerIsDrawnAsTextNotAsARect) {
+  Obs o;
+  g_fake_millis = 10000;
+  o.rx(floodWithPath({{0x11, 0x01}}, 2), 20);
+  ObserverNeighbours n(o.obs);
+  n.refresh(g_fake_millis);
+
+  FakeDisplay d(128, 118, 4);
+  NeighboursScreen s(n, "N", "cfg", 6, 5000, 0);
+  s.render(d);
+  EXPECT_EQ(0, d.rects) << "no rect may be positioned against a text baseline";
+
+  bool rule = false;
+  for (auto& t : d.texts) {
+    if (t.s.size() > 4 && t.s.find_first_not_of('-') == std::string::npos) rule = true;
+  }
+  EXPECT_TRUE(rule) << "the divider row of dashes must be drawn";
 }
 
 int main(int argc, char** argv) {
