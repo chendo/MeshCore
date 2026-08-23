@@ -7,6 +7,22 @@
   #include <helpers/StatusLed.h>
   static StatusLed status_led;
 #endif
+/* WiFi is a property of the board, not of the build. Every ESP32 part hydra
+   runs on has a radio, so the console is compiled in wherever the hardware can
+   carry it, and starts itself when an SSID has been configured. The nRF52
+   boards have no WiFi, so this whole block vanishes there. */
+#if defined(ESP32)
+  #define WITH_WIFI_CONSOLE 1
+#endif
+
+#ifdef WITH_WIFI_CONSOLE
+  #include <helpers/esp32/WifiConsole.h>
+  static WifiConsole wifi_console;
+  /* Not 0. CommonCLI reads sender_timestamp == 0 as "typed on the attached
+     cable" and only then exports a private key. A LAN socket has not earned
+     that, so TCP input is tagged as remote. */
+  #define WIFI_CONSOLE_SENDER 1
+#endif
 #ifdef NRF52_PLATFORM
   #include <helpers/nrf52/I2CBusRecovery.h>
 #endif
@@ -32,6 +48,35 @@
 #endif
 
 static char command[160];
+
+/* Both consoles funnel through here. WiFi is owned by main.cpp, not HydraNode:
+   the node has no business knowing about a transport that only exists on one
+   of the three chip families it runs on. */
+static void dispatch(uint32_t sender, char* cmd, char* reply, size_t reply_sz) {
+#ifdef WITH_WIFI_CONSOLE
+  if (memcmp(cmd, "set wifi.ssid ", 14) == 0) {
+    wifi_console.setCredentials(&cmd[14], "");   // ssid change clears the key
+    StrHelper::strncpy(reply, "OK - set wifi.pwd next", reply_sz);
+    return;
+  }
+  if (memcmp(cmd, "set wifi.pwd ", 13) == 0) {
+    // rest of line verbatim: a passphrase may contain spaces
+    wifi_console.setCredentials(wifi_console.ssid(), &cmd[13]);
+    StrHelper::strncpy(reply, "OK - joining", reply_sz);
+    return;
+  }
+  if (strcmp(cmd, "get wifi") == 0 || strcmp(cmd, "wifi") == 0) {
+    wifi_console.status(reply, reply_sz);
+    return;
+  }
+  if (strcmp(cmd, "wifi off") == 0) {
+    wifi_console.setCredentials("", "");
+    StrHelper::strncpy(reply, "OK - wifi off and forgotten", reply_sz);
+    return;
+  }
+#endif
+  hydra.handleCommand(sender, cmd, reply, reply_sz);
+}
 
 static void halt() {
   Serial.println("HALT: radio init failed, rebooting");
@@ -92,6 +137,12 @@ void setup() {
 #endif
 
   command[0] = 0;
+#ifdef WITH_WIFI_CONSOLE
+  #ifdef WIFI_NTP_SERVER
+    wifi_console.enableNtp(WIFI_NTP_SERVER);
+  #endif
+  wifi_console.begin();      // reads NVS; idle if no SSID has been set
+#endif
   board.onBootComplete();
 }
 
@@ -113,10 +164,20 @@ void loop() {
     command[len - 1] = 0;
     char reply[160];   // the MyMesh CLI writes up to this size. Do not make it smaller.
     reply[0] = 0;
-    hydra.handleCommand(0, command, reply, sizeof(reply));   // 0 = serial console
+    dispatch(0, command, reply, sizeof(reply));   // 0 = serial console
     if (reply[0]) { Serial.print("  -> "); Serial.println(reply); }
     command[0] = 0;
   }
+
+#ifdef WITH_WIFI_CONSOLE
+  wifi_console.loop();
+  if (const char* line = wifi_console.takeLine()) {
+    char wreply[160];
+    wreply[0] = 0;
+    dispatch(WIFI_CONSOLE_SENDER, (char*)line, wreply, sizeof(wreply));
+    if (wreply[0]) wifi_console.reply(wreply);
+  }
+#endif
 
 #ifdef LOOP_WATCHDOG_MS
   LoopWatchdog::feed();
