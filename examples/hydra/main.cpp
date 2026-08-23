@@ -22,6 +22,28 @@
      cable" and only then exports a private key. A LAN socket has not earned
      that, so TCP input is tagged as remote. */
   #define WIFI_CONSOLE_SENDER 1
+/* THE BLE COMPANION FACADE. It makes this node answerable by the MeshCore
+   phone app, so that an operator beside the board can administer every
+   identity on it and spend no LoRa airtime. The same link carries the text
+   CLI. See examples/hydra/HydraCompanion.h.
+
+   A build that turns this on must NOT also build the BLE bridge. There is one
+   BLE stack on the board, and the bridge owns it. */
+#ifdef WITH_COMPANION_BLE
+  #ifdef NRF52_PLATFORM
+    #include <helpers/nrf52/SerialBLEInterface.h>
+  #elif defined(ESP32)
+    #include <helpers/esp32/SerialBLEInterface.h>
+  #else
+    #error "WITH_COMPANION_BLE needs a SerialBLEInterface for this platform"
+  #endif
+  #include "HydraCompanion.h"
+  #ifndef BLE_NAME_PREFIX
+    #define BLE_NAME_PREFIX "MeshCore-"
+  #endif
+  static SerialBLEInterface     companion_ble;
+  static HydraCompanionHost     companion_host;
+  static companion::CompanionFacade companion_facade(companion_ble, companion_host);
 #endif
 #ifdef NRF52_PLATFORM
   #include <helpers/nrf52/I2CBusRecovery.h>
@@ -129,6 +151,14 @@ void setup() {
   hydra.begin(fs);
   WDOG_FEED();
 
+#ifdef WITH_COMPANION_BLE
+  // The name of slot 0 is the BLE device name. begin() may rewrite the buffer
+  // when the name is "@@MAC", which is why it takes a writable string.
+  companion_ble.begin(BLE_NAME_PREFIX, hydra.repeater().prefs()->node_name, BLE_PIN_CODE);
+  companion_ble.enable();
+  WDOG_FEED();
+#endif
+
 #if WITH_STATUS_LED
   // The colour shows the radio and the brightness shows the direction. Green
   // is LoRa. Dim is receive. Bright is transmit. Every slot shares the LED,
@@ -192,6 +222,10 @@ void loop() {
 
   hydra.loop();          // every slot, then the arbiter. The order is important.
 
+#ifdef WITH_COMPANION_BLE
+  companion_facade.loop();
+#endif
+
 #if WITH_STATUS_LED
   status_led.loop();
 #endif
@@ -202,6 +236,10 @@ void loop() {
   // slot. The node must not sleep when only slot 0 is idle. That would stop the
   // sends of the chat slots. It would stop them for as long as the repeater had
   // nothing to say.
+  // A node that sleeps while a phone is attached drops the connection.
+#ifdef WITH_COMPANION_BLE
+  if (companion_ble.isConnected()) return;
+#endif
   if (hydra.repeater().prefs()->powersaving_enabled && !hydra.hasPendingWork()) {
 #if defined(NRF52_PLATFORM)
     board.sleep(0);   // the nRF ignores the seconds. It wakes on LoRa or a timer.
