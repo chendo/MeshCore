@@ -171,6 +171,14 @@ void BleLink::checkInbound() {
 
 void BleLink::loop() {
   if (!_running) return;
+
+  /* Let the backend deliver anything it had to hold. A stack whose events
+     arrive on a task that must not block cannot run GATT discovery from its own
+     connect callback, so it queues the event and hands it over here instead,
+     where a blocking call costs only a slow loop pass. The nRF52 backend has
+     nothing to hold and this compiles away. */
+  Backend::poll();
+
   unsigned long now = millis();
 
   checkInbound();
@@ -410,8 +418,8 @@ bool BleLink::adoptInbound(uint16_t conn) {
    tried. loop() already runs on every main pass, so a poll costs one short
    walk over the connection handles and owes nothing to anybody.
 
-   isPeripheral() is role AND liveness in one call, so an outward link of our
-   own can never match here.
+   peripheralConnAt() reports only a connection on which we hold the PERIPHERAL
+   role and which is live, so an outward link of our own can never match here.
 
    A secured or bonded connection belongs to the CLI or to DFU. Both need MITM
    encryption before they carry a byte, and a bridge peer never pairs, so this
@@ -420,8 +428,9 @@ void BleLink::sweepInbound() {
 #if BLE_LINK_SILENT_SWEEP
   if (_in_conn != Backend::NO_CONN) return;    // the slot is already ours
 
-  for (uint16_t h = 0; h < Backend::MAX_CONN_HANDLES; h++) {
-    if (!Backend::isPeripheral(h)) continue;
+  for (uint8_t i = 0; i < Backend::SWEEP_SLOTS; i++) {
+    uint16_t h = Backend::peripheralConnAt(i);
+    if (h == Backend::NO_CONN) continue;
     if (!Backend::exists(h)) continue;
     if (Backend::paired(h)) continue;                 // the CLI, or DFU
     if (adoptInbound(h)) return;
@@ -557,7 +566,7 @@ void BleLink::drainInbound() {
     while (_in_tx_off < total) {
       uint16_t rem = (uint16_t)(total - _in_tx_off);
       uint16_t take = rem < cap ? rem : cap;
-      if (!Backend::notifyInbound(&b[_in_tx_off], take)) return;  // no credit; resume next pass
+      if (!Backend::notifyInbound(_in_conn, &b[_in_tx_off], take)) return;  // no credit
       _in_tx_off = (uint16_t)(_in_tx_off + take);
     }
     _in_txq_head = (uint8_t)((_in_txq_head + 1) % TXQ_DEPTH);

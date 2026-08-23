@@ -94,6 +94,6 @@ uint16_t BluefruitLinkBackend::writeLink(uint8_t idx, const uint8_t* data, uint1
   return s_cchr[idx].write(data, len);
 }
 
-bool BluefruitLinkBackend::notifyInbound(const uint8_t* data, uint16_t len) {
-  return s_chr.notify(data, len);
+bool BluefruitLinkBackend::notifyInbound(uint16_t conn, const uint8_t* data, uint16_t len) {
+  return s_chr.notify(conn, data, len);
 }

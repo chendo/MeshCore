@@ -95,6 +95,53 @@ protected:
   BleLink link;
 };
 
+/* ---- Which end dials ---------------------------------------------------- */
+
+/* A pair must agree on exactly ONE link, with no negotiation and no timers, and
+   both ends have to reach the same answer from the address alone. This is now
+   also the rule that an nRF52 node and an ESP32 node settle between themselves,
+   and neither can see how the other decided. */
+
+TEST_F(BleLinkTest, onlyTheHigherAddressIsDialled) {
+  link.notePeer(addrEndingIn(0x02));           // above ours, which ends 0x01
+  link.loop();
+  EXPECT_EQ(BleMock::dials, 1u);
+  EXPECT_EQ(memcmp(BleMock::dial_addr.addr, addrEndingIn(0x02).addr, 6), 0);
+}
+
+TEST_F(BleLinkTest, aPeerBelowUsIsLeftToDialUs) {
+  link.notePeer(addrEndingIn(0x00));           // below ours; it is the one that dials
+  link.loop();
+  EXPECT_EQ(BleMock::dials, 0u);
+  /* And it takes no slot while it waits, because a slot held for a peer that
+     will never be dialled is one of only three thrown away. */
+  ble_gap_addr_t a; bool up; int8_t rssi; uint32_t sent, recv, drops;
+  EXPECT_FALSE(link.getLink(0, a, up, rssi, sent, recv, drops));
+}
+
+TEST_F(BleLinkTest, theComparisonRunsFromTheMostSignificantByte) {
+  /* Addresses are little-endian on the air, so addr[5] is the byte a person
+     reads first. Ours ends 0x01 and is 0x10,0x11,0x12,0x13,0x14 below that.
+     This peer sorts BELOW us on its top byte and far above us on every byte
+     under it: a comparison that ran the other way would dial it. */
+  ble_gap_addr_t peer;
+  memset(&peer, 0, sizeof(peer));
+  for (uint8_t i = 0; i < 5; i++) peer.addr[i] = 0xFF;
+  peer.addr[5] = 0x00;
+
+  link.notePeer(peer);
+  link.loop();
+  EXPECT_EQ(BleMock::dials, 0u);
+}
+
+TEST_F(BleLinkTest, aPeerAlreadyKnownDoesNotTakeASecondSlot) {
+  link.notePeer(peer_addr());
+  link.notePeer(peer_addr());
+  link.notePeer(peer_addr());
+  link.loop();
+  EXPECT_EQ(BleMock::dials, 1u);
+}
+
 /* ---- Reassembly --------------------------------------------------------- */
 
 TEST_F(BleLinkTest, aHeaderSplitAcrossTwoWritesStillMakesAFrame) {
@@ -313,6 +360,26 @@ TEST_F(BleLinkTest, aPeerThatIsNotDeniedIsAdopted) {
   EXPECT_TRUE(link.getInboundAddr(a));
   EXPECT_EQ(g_refused, 0u);
   EXPECT_EQ(g_rx.size(), 1u);
+}
+
+TEST_F(BleLinkTest, aFrameForTheInboundPeerGoesToThatPeerAlone) {
+  /* A second peripheral connection that is not our peer: a phone that connected
+     and subscribed to whatever it found. The frame is named by connection, so
+     nothing reaches it. NimBLE's notify-to-all path ignores subscription state
+     entirely, which is why the connection and not the subscription is what
+     decides. */
+  uint16_t stranger = BleMock::openConn(addrEndingIn(0x66));
+  uint16_t peer = bringUpInbound(inbound_addr());
+  link.markAuthed(BleLink::INBOUND_LINK);
+
+  BleMock::clearSinks();
+  std::vector<uint8_t> payload = payloadOf(24, 11);
+  ASSERT_EQ(link.send(payload.data(), (uint16_t)payload.size()), 1);
+  link.loop();
+
+  EXPECT_EQ(BleMock::last_notify_conn, peer);
+  EXPECT_NE(BleMock::last_notify_conn, stranger);
+  EXPECT_EQ(BleMock::sink[BleMock::INBOUND_SINK], framed(payload));
 }
 
 /* ---- A peer that connects and says nothing ------------------------------ */

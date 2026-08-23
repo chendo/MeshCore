@@ -63,6 +63,10 @@ inline int credits = -1;
 /* Everything that went out, in order, for each sink. */
 inline std::vector<uint8_t> sink[MAX_SINKS];
 
+/* The connection that the last notify() named. BLE_CONN_HANDLE_INVALID when
+   nothing has been notified. */
+inline uint16_t last_notify_conn = 0xFFFF;
+
 /* GATT discovery on an outward link. A test sets this false to model a peer
    that connects but carries none of our service. */
 inline bool discover_ok = true;
@@ -135,10 +139,16 @@ public:
   }
   void begin() {}
   /* The real notify() reports only a bool, so BleLink keeps every notify to one
-     packet. Model that: a partial take is a refusal and nothing goes out. */
-  bool notify(const void* data, uint16_t len) {
+     packet. Model that: a partial take is a refusal and nothing goes out.
+
+     Named by connection, because BleLink notifies the peer it adopted and not
+     every subscriber. A handle that is not live takes nothing, which is what
+     the real one does. */
+  bool notify(uint16_t conn_hdl, const void* data, uint16_t len) {
+    if (conn_hdl >= BleMock::MAX_CONNS || !BleMock::conns[conn_hdl].connected) return false;
     if (BleMock::credits >= 0 && BleMock::credits < (int)len) return false;
     if (BleMock::credits >= 0) BleMock::credits -= len;
+    BleMock::last_notify_conn = conn_hdl;
     const uint8_t* p = (const uint8_t*)data;
     std::vector<uint8_t>& s = BleMock::sink[BleMock::INBOUND_SINK];
     s.insert(s.end(), p, p + len);
@@ -224,6 +234,7 @@ namespace BleMock {
 inline void reset() {
   now_ms = 1000;                       // not 0: BleLink reads 0 as "never"
   credits = -1;
+  last_notify_conn = BLE_CONN_HANDLE_INVALID;
   discover_ok = true;
   connect_ok = true;
   dials = 0;
