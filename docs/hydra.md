@@ -188,13 +188,18 @@ Both LEDs go dim together one time every 5 s as a heartbeat. The brightness is t
 hardware PWM (`analogWrite`), so the levels do not change with how often `loop()` runs.
 The `WITH_STATUS_LED` flag turns it on.
 
-**Neither ThinkNode board turns it on, and each has its own reason.** The M1 has one LED
-that this firmware can own: the green LED on P0.13, which `ThinkNodeM1Board` already
-lights for each LoRa transmit. Its other LED is the red charge indicator on P1.04, and
-the charger blinks that one in hardware. One LED cannot carry two axes. The `LED_RED`,
-`LED_GREEN`, `LED_BLUE` and `LED_STATE_ON` values in `variants/thinknode_m1/variant.h`
-come from a Seeed template, and they collide with `PIN_SPI1_MISO`, `PIN_GPS_PPS` and
-`PIN_NEOPIXEL` in that same file, so a status LED must not be built on them.
+**Neither ThinkNode board turns it on, and each has its own reason.** The M1 has exactly
+two LEDs, and **no green one**: blue on P0.13 and red on P1.04. `StatusLed` wants a blue
+and a green pair, so it does not fit. Both M1 LEDs are also already spoken for. Blue is
+the LoRa transmit indicator that `ThinkNodeM1Board` drives, and Bluefruit blinks the same
+pin while it advertises. Red is the product-status LED, and the charger drives it in
+hardware -- steady when on, fast flash while charging, slow flash on low battery.
+
+This is worth revisiting. Until the pin-37 and LED patches landed, the values in
+`variants/thinknode_m1/variant.h` were a verbatim copy of `variants/lilygo_techo/`: they
+named a green LED that does not exist, put `LED_RED` on `PIN_SPI1_MISO`, and set
+`LED_STATE_ON` to the T-Echo's active-low polarity, so every LED on this board ran
+inverted.
 
 The M5 puts its LEDs behind a PCA9557 I2C expander, and `ThinknodeM5Board` reaches them
 with `expander.digitalWrite()`. `StatusLed` calls `pinMode()` and `analogWrite()` on a
