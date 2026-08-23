@@ -2,7 +2,7 @@
 
 #include <vector>
 
-#include "helpers/nrf52/BleLink.h"
+#include "helpers/bridges/BleLink.h"
 
 // BleLink itself, built against the Bluefruit stand-in in test/mocks_ble_link,
 // so the shipped BleLink.cpp is what runs here. The framing is where the faults

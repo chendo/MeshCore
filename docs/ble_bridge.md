@@ -12,21 +12,39 @@ no second radio and no internet link.
 This is the nRF52 counterpart to the ESP-NOW bridge. A board such as the RAK3401
 or the Elecrow ThinkNode M1 has no WiFi, so ESP-NOW is unavailable to it.
 
-**nRF52840 only.** An ESP32 repeater cannot join a BLE bridge group.
+**nRF52840 and ESP32.** Both families run the same bridge and interoperate,
+which matters because BLE is the only radio both carry: an nRF52 node has no
+WiFi and so cannot reach the ESP-NOW bridge, and this is the only transport that
+joins an nRF52 node to an ESP32 one.
 
 ---
 
 ## How it works
 
-Three layers, each in its own file under `src/helpers/`:
+Layers, each in its own file under `src/helpers/`. The top three are shared by
+every board; the bottom two are the transport, and the build picks one.
 
 | Layer | File | Job |
 |---|---|---|
-| Stack | `nrf52/BleStack.{h,cpp}` | Starts the SoftDevice with the connection roles that a bridge needs, and steps down the buffer tier before it gives up a connection slot. |
-| Discovery | `nrf52/BleDiscovery.{h,cpp}` | Advertises a beacon that names the group, and scans for the same beacon from other nodes. |
-| Link | `nrf52/BleLink.{h,cpp}` | Opens the connection and carries the frames. |
 | Bridge | `bridges/BLEBridge.{h,cpp}` | Builds and checks the frames, and hands packets to the mesh. |
 | Frame | `bridges/BleBridgeFrame.h` | The wire format, the group marker and the deny list. Header only, so the host tests run it. |
+| Link | `bridges/BleLink.{h,cpp}` | The framing, the SYNC hunt, reassembly, the transmit queues, the authentication grace, the idle limit and the silent-peer sweep. Names no BLE stack. |
+| Link backend | `nrf52/BluefruitLinkBackend.{h,cpp}` · `esp32/NimBleLinkBackend.{h,cpp}` | Every call into a BLE stack that the link needs: connections, GATT, dialling out. |
+| Discovery | `nrf52/BleDiscovery.{h,cpp}` · `esp32/NimBleDiscovery.{h,cpp}` | Starts the stack, advertises a beacon that names the group, and scans for the same beacon from other nodes. |
+| Stack (nRF52) | `nrf52/BleStack.{h,cpp}` | Starts the SoftDevice with the connection roles that a bridge needs, and steps down the buffer tier before it gives up a connection slot. |
+
+`BleLink` is one implementation for both families. That is not tidiness: the two
+ends of a mixed bridge must agree on the framing to the byte, and one source
+file is the only way to be sure they do. The host tests in
+`test/test_ble_bridge/` therefore cover both backends' link behaviour at once.
+
+The backend and the discovery class are named by build flags, the same way a
+radio or a display is:
+
+```ini
+${bridge.ble_bluefruit}    ; nRF52: SoftDevice, through Adafruit Bluefruit
+${bridge.ble_nimble}       ; ESP32: NimBLE
+```
 
 ### The transport is a connection, not a broadcast
 

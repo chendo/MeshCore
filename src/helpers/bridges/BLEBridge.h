@@ -2,9 +2,20 @@
 
 #include "MeshCore.h"
 #include "helpers/bridges/BleBridgeFrame.h"
+#include "helpers/bridges/BleLink.h"
 #include "helpers/bridges/BridgeBase.h"
-#include "helpers/nrf52/BleDiscovery.h"
-#include "helpers/nrf52/BleLink.h"
+
+/* The discovery layer, chosen at build time. BleDiscovery drives the SoftDevice
+   advertising set on nRF52; NimBleDiscovery drives the NimBLE advertiser and
+   scanner on ESP32. Both present the same beacon on the air. The link backend
+   is selected the same way, in BleLink.h. See platformio.ini [bridge]. */
+#ifndef BLE_DISCOVERY_HEADER
+  #define BLE_DISCOVERY_HEADER "helpers/nrf52/BleDiscovery.h"
+#endif
+#ifndef BLE_DISCOVERY_CLASS
+  #define BLE_DISCOVERY_CLASS BleDiscovery
+#endif
+#include BLE_DISCOVERY_HEADER
 
 /** Declares the `bridge.secret` CLI setting; see CommonCLI. */
 #define BRIDGE_HAS_SECRET 1
@@ -28,16 +39,22 @@
 /**
  * @brief  Carries mesh packets between nRF52 nodes over BLE peer links.
  *
- * The nRF52 counterpart to ESPNowBridge. A board such as the RAK3401 has no
- * WiFi, so ESP-NOW is unavailable. Two co-located nodes that run this bridge
- * with the same `bridge.secret` share their traffic over a BLE connection, and
- * they spend no LoRa hop to do it.
+ * The counterpart to ESPNowBridge for a board that cannot reach it. A RAK3401
+ * or a ThinkNode M1 has no WiFi, so ESP-NOW is unavailable there. Two
+ * co-located nodes that run this bridge with the same `bridge.secret` share
+ * their traffic over a BLE connection, and they spend no LoRa hop to do it.
  *
  * Three parts, each in its own file:
- *  - BleStack starts the SoftDevice with the roles that a bridge needs.
- *  - BleDiscovery advertises a beacon that names our group, and scans for the
- *    same beacon from other nodes.
- *  - BleLink opens the connection and carries the frames.
+ *  - the discovery class starts the BLE stack with the roles that a bridge
+ *    needs, advertises a beacon that names our group, and scans for the same
+ *    beacon from other nodes.
+ *  - BleLink opens the connection and carries the frames, over the transport
+ *    backend that the build selected.
+ *
+ * Both ESP32 and nRF52 nodes run this bridge, and they interoperate: the frame,
+ * the beacon record, the group marker, the GATT UUIDs and every timer are the
+ * same on both. BLE is the only radio that both families carry, so this is the
+ * only transport that joins them.
  *
  * See BleBridgeFrame.h for the wire format, and for why the frame is plaintext
  * with a truncated HMAC rather than obfuscated.
@@ -70,9 +87,10 @@
  *    in the group. A different secret is what keeps two neighbouring groups
  *    apart.
  *
- * This bridge owns the BLE stack on its build. It drives advertising set 0
- * directly, so do not compile a BLE CLI or companion interface into the same
- * env. See BleDiscovery.
+ * This bridge owns the BLE stack on its build. On nRF52 it drives advertising
+ * set 0 directly, and on ESP32 it owns the single NimBLE advertiser, so do not
+ * compile a BLE CLI or companion interface into the same env. On ESP32 the two
+ * host stacks cannot even coexist in one binary. See the discovery class.
  */
 class BLEBridge : public BridgeBase {
 public:
@@ -96,14 +114,14 @@ public:
 
   /** Established peer links, including an inbound one. */
   uint8_t numLinks() const { return _link.numUp(); }
-  bool getLinkInfo(uint8_t i, ble_gap_addr_t& a, bool& up, int8_t& rssi,
+  bool getLinkInfo(uint8_t i, BleAddr& a, bool& up, int8_t& rssi,
                    uint32_t& sent, uint32_t& recv, uint32_t& drops,
                    uint32_t* rx_age_s = nullptr, uint32_t* queued = nullptr) const {
     return _link.getLink(i, a, up, rssi, sent, recv, drops, rx_age_s, queued);
   }
   /** The peer that dialled IN, which holds no outward slot and so appears in no
    *  getLinkInfo() index. */
-  bool getInboundInfo(ble_gap_addr_t& a, uint32_t* rx_age_s = nullptr,
+  bool getInboundInfo(BleAddr& a, uint32_t* rx_age_s = nullptr,
                       uint32_t* queued = nullptr) const {
     return _link.getInboundAddr(a, rx_age_s, queued);
   }
@@ -197,17 +215,17 @@ private:
   static BLEBridge *_instance;
 
   static void link_rx_cb(const uint8_t* data, uint16_t len, uint8_t link_idx);
-  static void beacon_cb(const ble_gap_addr_t& addr, int8_t rssi);
-  static bool allow_cb(const ble_gap_addr_t& addr);
+  static void beacon_cb(const BleAddr& addr, int8_t rssi);
+  static bool allow_cb(const BleAddr& addr);
   void onLinkFrame(const uint8_t* data, uint16_t len, uint8_t link_idx);
-  void onBeacon(const ble_gap_addr_t& addr, int8_t rssi);
+  void onBeacon(const BleAddr& addr, int8_t rssi);
   /** @returns false to refuse a peer that dialled in. */
-  bool onInboundAdopt(const ble_gap_addr_t& addr);
+  bool onInboundAdopt(const BleAddr& addr);
   void sendHeartbeat();
   /** Map a link index onto a LinkStamp slot. */
   LinkStamp* stampFor(uint8_t link_idx);
 
-  BleDiscovery _disc;
+  BLE_DISCOVERY_CLASS _disc;
   BleLink _link;
   BleBridgeFrame::FrameCodec _codec;
   BleBridgeFrame::BleDenyList _deny;

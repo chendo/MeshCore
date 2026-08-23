@@ -1,7 +1,20 @@
 #pragma once
 
 #include <stdint.h>
-#include <bluefruit.h>
+
+#include "helpers/bridges/BleLinkTypes.h"
+
+/* The transport under this class. BleLink holds the framing, the queues and
+   the policy and names no BLE stack; the backend is everything that does.
+   Selected the way radios, displays and bridges are: a build flag names the
+   class and the header that declares it. See platformio.ini [bridge]. */
+#ifndef BLE_LINK_BACKEND_HEADER
+  #define BLE_LINK_BACKEND_HEADER "helpers/nrf52/BluefruitLinkBackend.h"
+#endif
+#ifndef BLE_LINK_BACKEND_CLASS
+  #define BLE_LINK_BACKEND_CLASS BluefruitLinkBackend
+#endif
+#include BLE_LINK_BACKEND_HEADER
 
 /* Sweep the peripheral connections for a peer that dialled in and wrote
    nothing. Set this to 0 in a build that also carries the BLE CLI.
@@ -40,7 +53,15 @@
  * acknowledges each fragment; over a broadcast it was fatal.
  *
  * The cost is that a connection is point to point. This class thus cannot find
- * a peer by itself. BleDiscovery finds one and the bridge calls notePeer().
+ * a peer by itself. The discovery layer finds one and the bridge calls
+ * notePeer().
+ *
+ * NOTHING here names a BLE stack. Every call into one goes through the backend
+ * that BLE_LINK_BACKEND_CLASS selects, so the framing, the queues, the
+ * authentication grace, the idle limit and the silent-peer sweep are ONE
+ * implementation that both an nRF52 node and an ESP32 node run. That is what
+ * makes the two ends of a mixed bridge behave alike, and it is why the host
+ * tests in test/test_ble_bridge cover both.
  */
 class BleLink {
 public:
@@ -51,11 +72,15 @@ public:
   /** Asked before we adopt a peer that dialled IN. The bridge owns the deny
    *  list, so BleLink asks rather than keeping a list of its own.
    *  @returns false to refuse the peer, which is then disconnected. */
-  typedef bool (*allow_handler_t)(const ble_gap_addr_t& addr);
+  typedef bool (*allow_handler_t)(const BleAddr& addr);
 
-  /* Outward links. Bounded by the central slots that the SoftDevice granted,
-     which on a RAK3401 came to three. See BleStack. */
-  static const uint8_t MAX_LINKS = 3;
+  /** The transport, chosen at build time. */
+  typedef BLE_LINK_BACKEND_CLASS Backend;
+
+  /* Outward links. Bounded by the central slots that the stack granted, which
+     on a RAK3401 came to three. The backend sizes its own per-link objects
+     from the same constant, so it lives in BleLinkTypes.h. */
+  static const uint8_t MAX_LINKS = BLE_LINK_MAX_LINKS;
   /* Index that means "no link": a locally sourced frame excludes nothing. */
   static const uint8_t NO_LINK = 0xFF;
   /* Index of the inbound peer, which has no Link slot of its own.
@@ -72,7 +97,7 @@ public:
    * @param self_addr  our own BLE address, for the tie-break below.
    * @param allow      optional: asked before a peer that dialled in is adopted.
    */
-  bool begin(rx_handler_t handler, const ble_gap_addr_t& self_addr,
+  bool begin(rx_handler_t handler, const BleAddr& self_addr,
              allow_handler_t allow = nullptr);
 
   /** Drive connection attempts, the idle check and the transmit queues. Call
@@ -95,7 +120,7 @@ public:
    * proves group membership on the first frame over the link, and it drops and
    * deny-lists a link that fails. See BLEBridge.
    */
-  void notePeer(const ble_gap_addr_t& addr);
+  void notePeer(const BleAddr& addr);
 
   /**
    * @brief  Send to every established link except one.
@@ -136,7 +161,7 @@ public:
    *
    * @returns false when nothing is waiting.
    */
-  bool takeAuthFailure(ble_gap_addr_t& addr);
+  bool takeAuthFailure(BleAddr& addr);
 
   uint8_t numUp() const;
   /** True while this link can carry a frame. INBOUND_LINK refers to the
@@ -146,12 +171,12 @@ public:
    *  @param rx_age_s  optional: seconds since the last frame arrived, or
    *                    0xFFFFFFFF if nothing ever has.
    *  @param queued     optional: frames still waiting in its TX queue. */
-  bool getInboundAddr(ble_gap_addr_t& addr, uint32_t* rx_age_s = nullptr,
+  bool getInboundAddr(BleAddr& addr, uint32_t* rx_age_s = nullptr,
                       uint32_t* queued = nullptr) const;
   /** @param rx_age_s  optional: seconds since the last frame arrived, or
    *                    0xFFFFFFFF if nothing ever has.
    *  @param queued     optional: frames still waiting in this link's TX queue. */
-  bool getLink(uint8_t idx, ble_gap_addr_t& addr, bool& up, int8_t& rssi,
+  bool getLink(uint8_t idx, BleAddr& addr, bool& up, int8_t& rssi,
                uint32_t& sent, uint32_t& recv, uint32_t& drops,
                uint32_t* rx_age_s = nullptr, uint32_t* queued = nullptr) const;
 
@@ -160,7 +185,7 @@ private:
      on exactly one link, instead of two crossed attempts that each tear the
      other down. No negotiation and no timers: both ends reach the same answer
      from information that they already hold. */
-  bool weInitiateTo(const ble_gap_addr_t& peer) const;
+  bool weInitiateTo(const BleAddr& peer) const;
 
   enum State : uint8_t { EMPTY = 0, IDLE, CONNECTING, DISCOVERING, UP };
 
@@ -184,7 +209,7 @@ private:
   static const uint8_t  TXQ_DEPTH = 4;
 
   struct Link {
-    ble_gap_addr_t addr;
+    BleAddr addr;
     uint16_t conn;
     State state;
     unsigned long next_try_ms;
@@ -246,7 +271,7 @@ private:
      disconnect is asynchronous, so a write from the peer we just dropped can
      still arrive and would otherwise buy it a new authentication window. Two
      seconds covers the disconnect and stays well below the interval at which
-     the SoftDevice would give the same handle to somebody else. */
+     a stack would give the same handle to somebody else. */
   static const uint32_t IN_DROP_HOLD_MS = 2000;
 
   static const uint16_t BACKOFF_MIN_MS = 2000;
@@ -288,7 +313,7 @@ private:
   void drain(Link& l, uint8_t idx);
   bool enqueueInbound(const uint8_t* data, uint16_t len);
   void drainInbound();
-  void noteAuthFailure(const ble_gap_addr_t& addr);
+  void noteAuthFailure(const BleAddr& addr);
   /** Forget the inbound peer if its connection has gone. */
   void checkInbound();
   /**
@@ -297,34 +322,33 @@ private:
    * The first write reaches this, and so does the sweep below. One path, so a
    * peer that never speaks meets the same rules as a peer that does.
    *
-   * @param c  the connection, or nullptr when the stack does not report one.
    * @returns  false when the peer is refused or the handle is held down.
    */
-  bool adoptInbound(uint16_t conn, BLEConnection* c);
+  bool adoptInbound(uint16_t conn);
   /** Find a peer that dialled in and has written nothing. See the .cpp. */
   void sweepInbound();
 
   static void connect_cb(uint16_t conn);
   static void disconnect_cb(uint16_t conn, uint8_t reason);
-  static void notify_cb(BLEClientCharacteristic* chr, uint8_t* data, uint16_t len);
-  static void written_cb(uint16_t conn, BLECharacteristic* chr, uint8_t* data, uint16_t len);
+  static void notify_cb(uint8_t link_idx, const uint8_t* data, uint16_t len);
+  static void written_cb(uint16_t conn, const uint8_t* data, uint16_t len);
 
   Link _links[MAX_LINKS];
-  ble_gap_addr_t _self;
+  BleAddr _self;
   rx_handler_t _handler = nullptr;
   allow_handler_t _allow = nullptr;
   bool _running = false;
   bool _topology_changed = false;
 
-  ble_gap_addr_t _auth_fail[AUTH_FAIL_DEPTH];
+  BleAddr _auth_fail[AUTH_FAIL_DEPTH];
   uint8_t _auth_fail_head = 0, _auth_fail_count = 0;
 
   /* Inbound peer link. The peripheral role also carries the CLI, so at most one
      slot is left for a peer that dials us. That is enough, because a peer that
      we cannot accept is dialled BY us instead. */
-  uint16_t _in_conn = BLE_CONN_HANDLE_INVALID;
+  uint16_t _in_conn = Backend::NO_CONN;
   /* The handle we dropped last, and when. See IN_DROP_HOLD_MS. */
-  uint16_t _in_dropped_conn = BLE_CONN_HANDLE_INVALID;
+  uint16_t _in_dropped_conn = Backend::NO_CONN;
   unsigned long _in_dropped_ms = 0;
   uint16_t _in_expect = 0, _in_have = 0;
   uint8_t _in_buf[MAX_FRAME];
