@@ -33,6 +33,7 @@
 #include "ChatSlot.h"
 #include "HydraSlot.h"
 #include "RepeaterSlot.h"
+#include <helpers/IdentityPath.h>
 #ifdef LORA_WATCHDOG_MS
   #include <helpers/LoraWatchdog.h>
 #endif
@@ -87,6 +88,10 @@ public:
 private:
   SlotEnableResult startSlot(int idx);
   void stopSlot(int idx);
+  // Every slot reads and writes its keypair through this one store. The
+  // directory comes from IdentityPath.h and from nowhere else.
+  IdentityStore identityStore() { return IdentityStore(*_fs, identityDir()); }
+  void migrateIdentities();
   void loadSlotConfig();
   void saveSlotConfig();
   void formatSlotTable(char* reply, size_t reply_sz);

@@ -9,6 +9,10 @@
   #include <SPIFFS.h>
 #endif
 
+#ifndef IDENTITY_DIR_STYLE
+  #error "helpers/IdentityPath.h has no identity directory for this platform"
+#endif
+
 HydraNode hydra;
 
 // The arbiter applies the TX power of a port just before that port transmits.
@@ -106,7 +110,9 @@ const char* HydraNode::typeName(SlotType t) {
 
 void HydraNode::slotIdName(int idx, char* dest, size_t sz) {
   // Slot 0 keeps the standard "_main" name. A board that you reflash from
-  // simple_repeater to hydra thus comes back as the same node to the mesh.
+  // simple_repeater to hydra thus comes back as the same node to the mesh. The
+  // name is only half of that: the directory must agree with upstream as well,
+  // and helpers/IdentityPath.h holds it.
   //
   // Every other slot is "_slotN". That name comes from the INDEX and from
   // nothing else. It does not come from the type. It does not come from the
@@ -116,8 +122,51 @@ void HydraNode::slotIdName(int idx, char* dest, size_t sz) {
   else snprintf(dest, sz, "_slot%d", idx);
 }
 
+/* Move keypairs from the directory that hydra used before it followed the
+   upstream convention. See helpers/IdentityPath.h for the convention and for
+   the rules. This runs before any slot starts, so a slot that begins finds its
+   file where it now looks for it.
+
+   It covers EVERY slot index and not only the slots that the config enables. A
+   slot that is off still owns a keypair, and that keypair must survive an
+   upgrade so that `slot N on` brings back the same identity.
+
+   The copy leaves the legacy file where it is. A keypair is the one thing on
+   this filesystem that the node cannot make again, so the operation adds a copy
+   and removes nothing. */
+void HydraNode::migrateIdentities() {
+  if (identityDirIsLegacy()) return;   // nRF52 and STM32: one path, nothing to do
+
+  IdentityStore current(*_fs, identityDir());
+  IdentityStore legacy(*_fs, identityLegacyDir());
+  current.begin();   // mkdir, where the filesystem has real directories
+
+  for (int i = 0; i < HYDRA_NUM_SLOTS; i++) {
+    char id_name[16];
+    slotIdName(i, id_name, sizeof(id_name));
+    mesh::LocalIdentity id;
+    bool at_current = current.load(id_name, id);
+    bool at_legacy = at_current ? false : legacy.load(id_name, id);
+    if (identityMoveAction(at_current, at_legacy) != IDENTITY_MOVE_COPY) continue;
+
+    // `id` holds the legacy keypair at this point, because load() filled it.
+    if (current.save(id_name, id)) {
+      Serial.printf("hydra: slot %d identity moved %s/%s.id -> %s/%s.id\n", i,
+                    identityLegacyDir(), id_name, identityDir(), id_name);
+    } else {
+      // The slot mints a new key this boot. The legacy file is still there, so
+      // the next boot tries the move again, and `set prv.key` can put the old
+      // key back by hand. Say it loudly: a silent failure here renames the node
+      // on the mesh.
+      Serial.printf("hydra: slot %d identity move FAILED - could not write %s/%s.id\n",
+                    i, identityDir(), id_name);
+    }
+  }
+}
+
 void HydraNode::begin(FILESYSTEM* fs) {
   _fs = fs;
+  migrateIdentities();   // before any slot looks for its keypair
   loadSlotConfig();
 
   // The node registers the port of every slot before it pumps anything. It does
@@ -188,7 +237,7 @@ SlotEnableResult HydraNode::startSlot(int idx) {
   if (idx == 0) {
     char id_name[16];
     slotIdName(0, id_name, sizeof(id_name));
-    IdentityStore store(*_fs, "");
+    IdentityStore store = identityStore();
     if (!_slot0.begin(_fs, store, id_name, NULL, SLOT_REPEATER)) return SLOT_ENABLE_FAILED;
     _core.setPortActive(0, true);
     Serial.print("hydra: slot 0 (repeater) id ");
@@ -211,7 +260,7 @@ SlotEnableResult HydraNode::startSlot(int idx) {
 
   char id_name[16];
   slotIdName(idx, id_name, sizeof(id_name));
-  IdentityStore store(*_fs, "");
+  IdentityStore store = identityStore();
   if (!_slots[idx]->begin(_fs, store, id_name, _cfg[idx].name, _cfg[idx].type)) {
     return SLOT_ENABLE_NO_RAM;   // begin() fails only when the heap refused
   }
@@ -738,7 +787,7 @@ bool HydraNode::setSlotPrivateKey(int idx, const char* hex, char* reply, size_t 
 
   char id_name[16];
   slotIdName(idx, id_name, sizeof(id_name));   // rule 1: the index, and nothing else
-  IdentityStore store(*_fs, "");
+  IdentityStore store = identityStore();
   if (!store.save(id_name, new_id)) {
     StrHelper::strncpy(reply, "ERR: could not write identity - key NOT changed", reply_sz);
     return false;
