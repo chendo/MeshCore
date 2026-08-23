@@ -22,6 +22,8 @@
      cable" and only then exports a private key. A LAN socket has not earned
      that, so TCP input is tagged as remote. */
   #define WIFI_CONSOLE_SENDER 1
+#endif
+
 /* THE BLE COMPANION FACADE. It makes this node answerable by the MeshCore
    phone app, so that an operator beside the board can administer every
    identity on it and spend no LoRa airtime. The same link carries the text
@@ -30,18 +32,29 @@
    A build that turns this on must NOT also build the BLE bridge. There is one
    BLE stack on the board, and the bridge owns it. */
 #ifdef WITH_COMPANION_BLE
-  #ifdef NRF52_PLATFORM
-    #include <helpers/nrf52/SerialBLEInterface.h>
-  #elif defined(ESP32)
-    #include <helpers/esp32/SerialBLEInterface.h>
-  #else
-    #error "WITH_COMPANION_BLE needs a SerialBLEInterface for this platform"
+  /* WHICH stack carries it is a separate choice from WHETHER to carry it, so
+     it is made the way this tree already selects radios, displays and bridges:
+     a *_CLASS macro plus its header, defaulting per platform. On ESP32 that
+     default is Bluedroid, because it is what every existing build links; an
+     env opts into NimBLE by defining both macros. The two stacks cannot share
+     a binary, so this is a choice and not a fallback chain. */
+  #ifndef BLE_SERIAL_CLASS
+    #ifdef NRF52_PLATFORM
+      #define BLE_SERIAL_CLASS  SerialBLEInterface
+      #define BLE_SERIAL_HEADER "helpers/nrf52/SerialBLEInterface.h"
+    #elif defined(ESP32)
+      #define BLE_SERIAL_CLASS  SerialBLEInterface
+      #define BLE_SERIAL_HEADER "helpers/esp32/SerialBLEInterface.h"
+    #else
+      #error "WITH_COMPANION_BLE needs a SerialBLEInterface for this platform"
+    #endif
   #endif
+  #include BLE_SERIAL_HEADER
   #include "HydraCompanion.h"
   #ifndef BLE_NAME_PREFIX
     #define BLE_NAME_PREFIX "MeshCore-"
   #endif
-  static SerialBLEInterface     companion_ble;
+  static BLE_SERIAL_CLASS       companion_ble;
   static HydraCompanionHost     companion_host;
   static companion::CompanionFacade companion_facade(companion_ble, companion_host);
 #endif
