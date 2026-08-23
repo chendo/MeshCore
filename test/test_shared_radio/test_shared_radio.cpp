@@ -1717,3 +1717,166 @@ TEST(ReplayFloor, AnAdvertFromSomebodyElseIsNotOurMark) {
   EXPECT_EQ(0u, f.core.observer().sentHighWater())
       << "only what WE originated is a mark against us";
 }
+
+// ------------------------------------------- loopback frames are not relayed
+//
+// The loopback must keep DELIVERING, because that is what lets a chat identity
+// address the repeater and the room on the same board. It must stop the
+// FORWARD, because a relay of a sibling adds no coverage: one antenna, one
+// radio horizon. See LoopbackForwardGuard in helpers/SharedRadio.h.
+
+namespace {
+// A stand-in packet address. The guard takes a packet pointer as an identity
+// token and never reads through it, so a distinct address is a distinct packet.
+const mesh::Packet* fakePkt(int n) {
+  return reinterpret_cast<const mesh::Packet*>((uintptr_t)0x1000 + n * 0x40);
+}
+}
+
+TEST(SharedRadioLoopback, ADeliveredSiblingFrameIsMarkedAsLoopback) {
+  Fixture f(/*loopback=*/true);
+  uint8_t msg[] = {0x42, 0x43};
+  ASSERT_TRUE(f.b.startSendRaw(msg, 2));
+  f.b.onSendFinished();
+  f.core.pump();
+
+  uint8_t buf[MAX_TRANS_UNIT];
+  ASSERT_EQ(2, take(f.a, buf)) << "delivery must survive: a chat slot reaches slot 0 this way";
+  EXPECT_EQ(0x42, buf[0]);
+  EXPECT_TRUE(f.a.lastRxWasLoopback());
+  ASSERT_EQ(2, take(f.c, buf));
+  EXPECT_TRUE(f.c.lastRxWasLoopback());
+}
+
+TEST(SharedRadioLoopback, AnOverTheAirFrameIsNotMarked) {
+  Fixture f(true);
+  f.deliver({0x11, 0x22});
+  uint8_t buf[MAX_TRANS_UNIT];
+  ASSERT_EQ(2, take(f.a, buf));
+  EXPECT_FALSE(f.a.lastRxWasLoopback());
+}
+
+// The mark belongs to the frame and not to the port. A port that takes a
+// sibling frame and then an air frame must report the air frame correctly.
+TEST(SharedRadioLoopback, TheMarkFollowsEachFrameThroughTheQueue) {
+  Fixture f(true);
+  uint8_t msg[] = {0xB0};
+  ASSERT_TRUE(f.b.startSendRaw(msg, 1));
+  f.b.onSendFinished();
+  f.radio.pending_rx = {0xA1};
+  f.core.pump();               // the sibling frame is queued first, then the air frame
+
+  uint8_t buf[MAX_TRANS_UNIT];
+  ASSERT_EQ(1, take(f.a, buf));
+  EXPECT_EQ(0xB0, buf[0]);
+  EXPECT_TRUE(f.a.lastRxWasLoopback());
+  ASSERT_EQ(1, take(f.a, buf));
+  EXPECT_EQ(0xA1, buf[0]);
+  EXPECT_FALSE(f.a.lastRxWasLoopback()) << "an air frame after a sibling frame is still air";
+}
+
+TEST(LoopbackForwardGuard, BlocksTheForwardOfAFrameThatCameFromASibling) {
+  LoopbackForwardGuard g;
+  g.onRx(fakePkt(1), true);
+
+  g.beginProcess(fakePkt(1));
+  EXPECT_TRUE(g.blocksForward());
+  g.endProcess();
+  EXPECT_FALSE(g.blocksForward()) << "the block must not leak into the next packet";
+}
+
+TEST(LoopbackForwardGuard, AnAirFrameIsStillForwarded) {
+  LoopbackForwardGuard g;
+  g.onRx(fakePkt(1), false);
+  g.beginProcess(fakePkt(1));
+  EXPECT_FALSE(g.blocksForward());
+  g.endProcess();
+}
+
+// A flood packet can wait in the delayed inbound queue of the Dispatcher while
+// other packets arrive and are decided. The mark must still be there.
+TEST(LoopbackForwardGuard, AMarkSurvivesOtherTrafficArrivingAndBeingDecided) {
+  LoopbackForwardGuard g;
+  g.onRx(fakePkt(1), true);       // a sibling flood, now waiting on its rx delay
+  g.onRx(fakePkt(2), false);      // air traffic arrives and is decided meanwhile
+  g.beginProcess(fakePkt(2));
+  EXPECT_FALSE(g.blocksForward());
+  g.endProcess();
+
+  g.beginProcess(fakePkt(1));
+  EXPECT_TRUE(g.blocksForward());
+  g.endProcess();
+}
+
+// The pool hands the same address out again. Every received packet passes
+// onRx() before anything asks about it, so the new packet rewrites the entry.
+TEST(LoopbackForwardGuard, ARecycledPacketAddressDoesNotInheritAMark) {
+  LoopbackForwardGuard g;
+  g.onRx(fakePkt(1), true);
+  g.onRx(fakePkt(1), false);      // the pool gave this address to an air frame
+  g.beginProcess(fakePkt(1));
+  EXPECT_FALSE(g.blocksForward());
+  EXPECT_EQ(0, g.numMarks());
+}
+
+TEST(LoopbackForwardGuard, ADecisionReleasesTheMark) {
+  LoopbackForwardGuard g;
+  g.onRx(fakePkt(1), true);
+  g.beginProcess(fakePkt(1));
+  g.endProcess();
+  EXPECT_EQ(0, g.numMarks()) << "a mark that is never released would fill the table";
+
+  g.beginProcess(fakePkt(1));
+  EXPECT_FALSE(g.blocksForward());
+}
+
+TEST(LoopbackForwardGuard, MarkingTheSamePacketTwiceCostsOneSlot) {
+  LoopbackForwardGuard g;
+  g.onRx(fakePkt(1), true);
+  g.onRx(fakePkt(1), true);
+  EXPECT_EQ(1, g.numMarks());
+}
+
+TEST(LoopbackForwardGuard, OverflowIsCountedAndNotSilent) {
+  LoopbackForwardGuard g;
+  const int n = LoopbackForwardGuard::MARK_SLOTS;
+  for (int i = 0; i < n + 2; i++) g.onRx(fakePkt(i), true);
+  EXPECT_EQ(n, g.numMarks());
+  EXPECT_EQ(2u, g.overflows()) << "a sibling frame that we may have relayed must leave evidence";
+
+  // The oldest marks are the ones that gave way. The newest are still held.
+  g.beginProcess(fakePkt(0));
+  EXPECT_FALSE(g.blocksForward());
+  g.endProcess();
+  g.beginProcess(fakePkt(n + 1));
+  EXPECT_TRUE(g.blocksForward());
+}
+
+// The whole path in one test: a chat slot transmits, the repeater slot on the
+// same board receives it complete, and the repeater refuses to relay it. The
+// same repeater still relays the same bytes when they come off the air.
+TEST(SharedRadioLoopback, AChatSlotReachesTheRepeaterButTheRepeaterDoesNotRelayIt) {
+  Fixture f(/*loopback=*/true);
+  LoopbackForwardGuard repeater_guard;
+  const mesh::Packet* parsed = fakePkt(7);   // what the Dispatcher of slot 0 allocates
+
+  uint8_t chat_frame[] = {0x05, 0x00, 0x99};
+  ASSERT_TRUE(f.b.startSendRaw(chat_frame, 3));
+  f.b.onSendFinished();
+  f.core.pump();
+
+  uint8_t buf[MAX_TRANS_UNIT];
+  ASSERT_EQ(3, take(f.a, buf)) << "the repeater must still SEE what its sibling said";
+  EXPECT_EQ(0, memcmp(buf, chat_frame, 3));
+  repeater_guard.onRx(parsed, f.a.lastRxWasLoopback());
+
+  repeater_guard.beginProcess(parsed);
+  EXPECT_TRUE(repeater_guard.blocksForward()) << "no relay: one antenna, one radio horizon";
+  repeater_guard.endProcess();
+
+  f.deliver({0x05, 0x00, 0x99});
+  ASSERT_EQ(3, take(f.a, buf));
+  repeater_guard.onRx(parsed, f.a.lastRxWasLoopback());
+  repeater_guard.beginProcess(parsed);
+  EXPECT_FALSE(repeater_guard.blocksForward());
+}

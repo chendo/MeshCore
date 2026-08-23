@@ -245,10 +245,20 @@ arbitrates between the ports. The limit is 8 ports.
   in used to look the same as a node on a quiet band. Read the counters with
   `stats-txwait`.
 - **Loopback.** One antenna is half duplex, so two identities on the same board cannot
-  hear each other over the air. Slot 0 could therefore never repeat for slot 1. With
-  loopback on, the core also gives each transmitted frame to the sibling ports as a
-  received frame, and never back to the sender. Each identity then has the experience of
-  a second physical node in the same room. Hydra turns loopback on.
+  hear each other over the air. A chat identity could therefore never address the
+  repeater or the room on its own board. With loopback on, the core also gives each
+  transmitted frame to the sibling ports as a received frame, and never back to the
+  sender. Each identity then has the experience of a second physical node in the same
+  room. Hydra turns loopback on.
+- **Loopback frames are delivered but never relayed.** A node that can hear the room slot
+  of this board can also hear the repeater of this board: one antenna, one radio horizon.
+  A relay of a sibling therefore adds no coverage. It only spends airtime from the pooled
+  duty budget and puts an extra hash in the path, which makes one board look like two
+  hops. So the arbiter marks each loopback frame, `RadioPort::lastRxWasLoopback()`
+  reports the mark to the identity that takes the frame, and `LoopbackForwardGuard`
+  carries it as far as `allowPacketForward()`, which is where a mesh decides to
+  retransmit. A frame off the air is forwarded exactly as before. `stats-shared` reports
+  `lbmiss`, which counts any mark that the guard could not hold; it should stay at zero.
 - **Cross-slot priority**, set for each port and not fixed in the arbiter, so the policy
   belongs to the caller. Hydra gives slot 0 priority 0 and gives the rest priority 1. The
   mesh depends on the repeater. It does not depend on chat.

@@ -76,7 +76,7 @@ void SharedRadioCore::pump() {
   // itself.
   while (_lb_count > 0 && _rx_count < RX_SLOTS) {
     LbFrame& f = _lb[_lb_head];
-    enqueueRx(f.buf, f.len, 12.0f, -20.0f, _cfg_cr, f.from >= 0 ? (1u << f.from) : 0);
+    enqueueRx(f.buf, f.len, 12.0f, -20.0f, _cfg_cr, f.from >= 0 ? (1u << f.from) : 0, true);
     _lb_head = (_lb_head + 1) % LB_SLOTS;
     _lb_count--;
   }
@@ -104,7 +104,7 @@ void SharedRadioCore::pump() {
     // frame only until the modem decodes the next frame, and the identities
     // take the frames off the queue much later.
     enqueueRx(tmp, len, _real->getLastSNR(), _real->getLastRSSI(),
-              _real ? _real->getLastRxCodingRate() : 0, 0);
+              _real ? _real->getLastRxCodingRate() : 0, 0, false);
     pktLogAdd(-1, tmp, len, (int8_t)(_real->getLastSNR() * 4), (int16_t)_real->getLastRSSI());
     _obs.observeRx(tmp, len, (int8_t)(_real->getLastSNR() * 4));    // the peers, hops and types
     if (_frame_hook) _frame_hook(tmp, len, false, _real->getLastSNR(), _real->getLastRSSI());
@@ -130,7 +130,7 @@ void SharedRadioCore::pump() {
 // Put a frame in the queue for the identities to take. Returns false only when
 // the code had to discard a frame to make space.
 bool SharedRadioCore::enqueueRx(const uint8_t* bytes, int len, float snr, float rssi,
-                                uint8_t cr, uint32_t consumed_init) {
+                                uint8_t cr, uint32_t consumed_init, bool loopback) {
   if (bytes == nullptr || len <= 0) return true;
   bool ok = true;
   if (_rx_count >= RX_SLOTS) {
@@ -147,6 +147,7 @@ bool SharedRadioCore::enqueueRx(const uint8_t* bytes, int len, float snr, float 
   memcpy(f.buf, bytes, f.len);
   f.snr = snr; f.rssi = rssi;
   f.cr = (cr >= 5 && cr <= 8) ? cr : 0;
+  f.loopback = loopback;
   f.consumed = consumed_init | ~allPortsMask();   // an inactive port never takes a frame
   _rx_count++;
   return ok;
@@ -177,7 +178,7 @@ int SharedRadioCore::takeFrame(RadioPort* p, uint8_t* dst, int sz) {
     int len = f.len;
     if (len > sz) len = sz;
     memcpy(dst, f.buf, len);
-    p->setLastMetadata(f.snr, f.rssi, f.cr);
+    p->setLastMetadata(f.snr, f.rssi, f.cr, f.loopback);
     f.consumed |= bit;
     _port_rx[idx] = _port_rx[idx] + 1;
     _port_last_ms[idx] = millis();
