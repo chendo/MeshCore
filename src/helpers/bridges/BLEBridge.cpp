@@ -7,8 +7,6 @@
   #include "helpers/StatusLed.h"
 #endif
 
-#include "helpers/nrf52/BleStack.h"
-
 BLEBridge *BLEBridge::_instance = nullptr;
 
 BLEBridge::BLEBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc)
@@ -55,14 +53,14 @@ void BLEBridge::loop() {
 
     char ble_name[40];
     snprintf(ble_name, sizeof(ble_name), "MeshCore-%s", _prefs->node_name);
-    if (!BleStack::ensure(ble_name, BLE_PRPH_SLOTS, BLE_CENTRAL_SLOTS)) {
+    if (!BLE_DISCOVERY_CLASS::stackBegin(ble_name, BLE_PRPH_SLOTS, BLE_CENTRAL_SLOTS)) {
       _next_start_attempt = now + START_RETRY_MS;
       BRIDGE_DEBUG_PRINTLN("BLE: stack failed to start, retrying later\n");
       return;
     }
 
-    ble_gap_addr_t self;
-    if (sd_ble_gap_addr_get(&self) != NRF_SUCCESS) {
+    BleAddr self;
+    if (!BLE_DISCOVERY_CLASS::selfAddr(self)) {
       _next_start_attempt = now + START_RETRY_MS;
       return;
     }
@@ -88,7 +86,7 @@ void BLEBridge::loop() {
 
   /* A link that never proved group membership. BleLink drops it and reports the
      address; the deny list is here, because the bridge owns the key. */
-  ble_gap_addr_t failed;
+  BleAddr failed;
   while (_link.takeAuthFailure(failed)) {
     _deny.add(failed.addr, millis());
     BRIDGE_DEBUG_PRINTLN("BLE: link never authenticated, address denied\n");
@@ -128,11 +126,11 @@ void BLEBridge::loop() {
   _disc.loop();
 }
 
-void BLEBridge::beacon_cb(const ble_gap_addr_t& addr, int8_t rssi) {
+void BLEBridge::beacon_cb(const BleAddr& addr, int8_t rssi) {
   if (_instance) _instance->onBeacon(addr, rssi);
 }
 
-void BLEBridge::onBeacon(const ble_gap_addr_t& addr, int8_t rssi) {
+void BLEBridge::onBeacon(const BleAddr& addr, int8_t rssi) {
   (void)rssi;
   /* The beacon carried our group marker, so this node speaks our protocol and
      probably holds our secret. It has not proved anything yet. Refuse an
@@ -145,11 +143,11 @@ void BLEBridge::onBeacon(const ble_gap_addr_t& addr, int8_t rssi) {
   _link.notePeer(addr);
 }
 
-bool BLEBridge::allow_cb(const ble_gap_addr_t& addr) {
+bool BLEBridge::allow_cb(const BleAddr& addr) {
   return _instance == nullptr || _instance->onInboundAdopt(addr);
 }
 
-bool BLEBridge::onInboundAdopt(const ble_gap_addr_t& addr) {
+bool BLEBridge::onInboundAdopt(const BleAddr& addr) {
   /* A peer that dials IN passes the same deny list as one that we dial. It is
      refused for the whole deny period, so a stranger cannot fail the group tag
      and come straight back to the single inbound slot. */
@@ -198,7 +196,7 @@ void BLEBridge::onLinkFrame(const uint8_t* data, uint16_t len, uint8_t link_idx)
        a stranger. Drop the link and deny the address, so it cannot come
        straight back and take one of the three central slots again. */
     _num_bad_tag++;
-    ble_gap_addr_t addr;
+    BleAddr addr;
     bool have_addr = false;
     if (link_idx == BleLink::INBOUND_LINK) {
       have_addr = _link.getInboundAddr(addr);

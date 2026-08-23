@@ -8,6 +8,8 @@
    so they live beside the frame codec. That header needs no BLE stack and no
    Arduino, which is how the host tests reach them. */
 #include "helpers/bridges/BleBridgeFrame.h"
+#include "helpers/bridges/BleLinkTypes.h"
+#include "BleStack.h"
 
 /**
  * @brief  How two bridge nodes find each other over BLE, and stay findable.
@@ -58,12 +60,29 @@ class BleDiscovery {
 public:
   /** Called for each beacon that carries our company ID and our group marker.
    *  Runs on the Bluefruit callback task. Keep it short. */
-  typedef void (*peer_handler_t)(const ble_gap_addr_t& addr, int8_t rssi);
+  typedef void (*peer_handler_t)(const BleAddr& addr, int8_t rssi);
 
   /** company(2) + version(1) + marker(2) + battery decivolts(1). */
   static const uint8_t BEACON_LEN = BleBridgeFrame::BEACON_LEN;
 
   BleDiscovery() {}
+
+  /**
+   * @brief  Start the BLE stack with the roles that a bridge needs.
+   *
+   * Static, and on the discovery class, because the stack must be up before
+   * any layer of the bridge does anything, and discovery is the layer that
+   * owns the advertising set. NimBleDiscovery answers the same two calls, so
+   * BLEBridge needs no platform test of its own.
+   */
+  static bool stackBegin(const char* name, uint8_t prph, uint8_t central) {
+    return BleStack::ensure(name, prph, central);
+  }
+
+  /** Our own BLE address, for the tie-break that decides which end dials. */
+  static bool selfAddr(BleAddr& out) {
+    return sd_ble_gap_addr_get(&out) == NRF_SUCCESS;
+  }
 
   /**
    * @param company_id     the Manufacturer ID that tags our beacon.
