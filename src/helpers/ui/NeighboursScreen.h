@@ -44,13 +44,18 @@ class NeighboursScreen : public UIScreen {
   const char* _subtitle;   // the radio config, drawn right-aligned
   int _pitch;
   int _refresh_ms;
+  int _text_size;
 
 public:
-  /** \param pitch  baseline-to-baseline spacing in display units. 11 matches
-   *                what the other MeshCore screens use at text size 1. */
+  /** \param pitch      baseline-to-baseline spacing in display units. 11 matches
+   *                    what the other MeshCore screens use at text size 1.
+   *  \param text_size  passed straight to the driver. A driver offering a
+   *                    compact font at 0 roughly triples the row count, so a
+   *                    caller on a dense panel wants 0 and a smaller pitch. */
   NeighboursScreen(NeighbourSource& src, const char* title, const char* subtitle,
-                   int pitch = 11, int refresh_ms = 5000)
-    : _src(src), _title(title), _subtitle(subtitle), _pitch(pitch), _refresh_ms(refresh_ms) { }
+                   int pitch = 11, int refresh_ms = 5000, int text_size = 1)
+    : _src(src), _title(title), _subtitle(subtitle), _pitch(pitch),
+      _refresh_ms(refresh_ms), _text_size(text_size) { }
 
   void setTitle(const char* t) { _title = t; }
   void setSubtitle(const char* s) { _subtitle = s; }

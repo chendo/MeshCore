@@ -176,7 +176,11 @@ class NeighboursModule : public AppModule {
 public:
   NeighboursModule()
     : _neighbours(hydra.radio().observer()),
-      _screen(_neighbours, NULL, NULL), _next_render(0), _ok(false) {
+      /* Text size 0 and a 6-unit pitch. At the stock FreeSans9pt the 200x200
+         panel is 20 columns by 9 lines, which is five peers and seven
+         characters of name -- not a table. The compact font makes it 33 by 25,
+         and 6 units of pitch spends the drawable height on 16 peer rows. */
+      _screen(_neighbours, NULL, NULL, 6, 5000, 0), _next_render(0), _ok(false) {
     _subtitle[0] = 0;
   }
 
