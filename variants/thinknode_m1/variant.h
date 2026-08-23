@@ -60,16 +60,25 @@
 
 ////////////////////////////////////////////////////////////////////////////////
 // Builtin LEDs
+//
+// This board has two LEDs, and no green LED. The user manual gives the red LED
+// to power and charge, and the blue LED to GPS and LoRa activity. A HIGH level
+// on the pin makes an LED light.
+//
+// The values in this block were a copy of variants/lilygo_techo/, whose LEDs
+// are on other pins and are active LOW.
+//
+// Two things share the blue LED: platformio.ini gives P0.13 to P_LORA_TX_LED,
+// and Bluefruit uses LED_BLUE for its own BLE activity blink.
 
-#define LED_RED                 (38)
-#define LED_GREEN               (36)
-#define LED_BLUE                (14)
+#define LED_RED                 (36)            // P1.04, power and charge
+#define LED_BLUE                (13)            // P0.13, GPS and LoRa activity
 
-#define PIN_STATUS_LED          LED_GREEN
-#define LED_BUILTIN             LED_GREEN
+#define PIN_STATUS_LED          LED_RED
+#define LED_BUILTIN             LED_RED
 #define PIN_LED                 LED_BUILTIN
 #define LED_PIN                 LED_BUILTIN
-#define LED_STATE_ON            LOW
+#define LED_STATE_ON            HIGH
 
 #define PIN_NEOPIXEL            (14)
 #define NEOPIXEL_NUM            (2)
@@ -143,6 +152,7 @@ extern const int SCK;
 // Do not give this pin to PIN_GPS_RESET. MicroNMEALocationProvider drives its
 // reset pin LOW when the GPS stops.
 #define PIN_GPS_REINIT          (37)
-#define PIN_GPS_PPS             (36)
+// There is no PIN_GPS_PPS. The old value 36 came from variants/lilygo_techo/,
+// and P1.04 is the red LED on this board. No code in this tree reads a PPS pin.
 #define PIN_GPS_STANDBY         (34)
 #define PIN_GPS_SWITCH          (33)
