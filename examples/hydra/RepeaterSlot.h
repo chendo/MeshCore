@@ -62,4 +62,7 @@ public:
   }
 
   NodePrefs* prefs() { return _mesh.getNodePrefs(); }
+  // The duplicate counters of the status report. They live in the dedup table,
+  // which this class owns.
+  SimpleMeshTables& tables() { return _tables; }
 };
