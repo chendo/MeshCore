@@ -213,6 +213,10 @@ private:
     uint16_t conn;
     State state;
     unsigned long next_try_ms;
+    /* When a CONNECTING slot gives up. A backend is not obliged to report a
+       dial that never completed, and one that does not would hold the slot
+       for ever -- and on NimBLE hold the scanner with it. */
+    unsigned long connect_deadline_ms;
     uint16_t backoff_ms;
     uint32_t sent, recv, drops;
     /* A connection can stay nominally up and carry nothing. The supervision
@@ -266,6 +270,9 @@ private:
   static const uint32_t AUTH_GRACE_MS = 45000;
 
   static const uint32_t LINK_IDLE_LIMIT_MS = 60000;
+  /* Longer than any backend's own connect timeout (NimBLE's is 10s here), so
+     this is the backstop and not the usual path. */
+  static const uint32_t CONNECT_LIMIT_MS = 12000;
 
   /* How long a connection handle stays refused after we dropped it. A
      disconnect is asynchronous, so a write from the peer we just dropped can

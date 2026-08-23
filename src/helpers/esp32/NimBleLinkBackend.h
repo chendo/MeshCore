@@ -92,6 +92,14 @@ public:
    *  same way the SoftDevice reports it through a callback. */
   static bool dial(const BleAddr& addr);
 
+  /** Abandon a connect that never completed, and free the radio.
+   *
+   *  NimBLE can leave an async connect outstanding indefinitely, and while
+   *  ble_gap_master.op is BLE_GAP_OP_M_CONN every ble_gap_disc() returns
+   *  BLE_HS_EBUSY. One dial that never answers therefore makes the node
+   *  permanently deaf: it cannot scan, so it never sees a beacon again. */
+  static bool cancelDial();
+
   /** Find our service on an outward link and subscribe to it. Blocking, and
    *  safe, because BleLink reaches it from poll() and thus from the caller's
    *  own task. */
