@@ -84,9 +84,15 @@ public:
   uint8_t getLastRxCodingRate() const override { return _last_cr; }
 
   // The core calls this when it delivers a buffered frame to this port.
-  void setLastMetadata(float snr, float rssi, uint8_t cr) {
-    _last_snr = snr; _last_rssi = rssi; _last_cr = cr;
+  void setLastMetadata(float snr, float rssi, uint8_t cr, bool loopback) {
+    _last_snr = snr; _last_rssi = rssi; _last_cr = cr; _last_loopback = loopback;
   }
+
+  // Did the frame that recvRaw() gave out last come from a sibling identity on
+  // this board, and not from the air? The value stays correct until this port
+  // takes the next frame. A Dispatcher reads the other link metrics in the same
+  // window, directly after recvRaw(). See LoopbackForwardGuard.
+  bool lastRxWasLoopback() const { return _last_loopback; }
 
   // What the prefs of this identity asked for. The core decides what the
   // shared radio does. See applyRadioPolicy.
@@ -98,6 +104,7 @@ private:
   float _last_snr, _last_rssi;
   uint8_t _last_cr;
   int8_t _tx_power_dbm;
+  bool _last_loopback = false;
   bool _cad_want = false;
   int  _thresh_want = 0;
 };
@@ -479,6 +486,7 @@ private:
     uint8_t  buf[MAX_TRANS_UNIT];
     uint8_t  len;
     uint8_t  cr;             // the 4/x denominator from the header of this frame; 0 = unknown
+    bool     loopback;       // a sibling identity on this board sent it, not a remote node
     float    snr, rssi;
     uint32_t consumed;       // the code sets bit i after port i takes this frame
   };
@@ -486,7 +494,7 @@ private:
   uint8_t  _rx_head = 0, _rx_count = 0;
   volatile uint32_t _rx_dropped = 0;   // the queue was full: the code discarded the oldest frame
   bool enqueueRx(const uint8_t* bytes, int len, float snr, float rssi, uint8_t cr,
-                 uint32_t consumed_init);
+                 uint32_t consumed_init, bool loopback);
   void retireConsumedFrames();
 
   int8_t   _cad_applied = -1;      // -1 = the code has never applied it
@@ -578,4 +586,81 @@ private:
   static const uint32_t TX_HOLD_LIMIT_MS = 15000;
   volatile uint32_t _tx_contention_port[MAX_PORTS] = {0};
   const char* _port_names[MAX_PORTS] = { "?", "?", "?", "?", "?", "?", "?", "?" };
+};
+
+// ---- loopback frames must not be relayed -----------------------------------
+//
+// The loopback above gives an identity the EXPERIENCE of a second node in the
+// room, but it is not one. A node that can hear the room slot of this board can
+// also hear the repeater of this board: same antenna, same radio horizon.
+// Therefore a relay of a sibling transmission adds no coverage. It only spends
+// airtime from the pooled duty budget and puts an extra hash in the path, which
+// makes one board look like two hops.
+//
+// So the delivery stays and the FORWARD stops. This class carries "the frame
+// came from a sibling" from the moment the port hands the frame over to the
+// moment the mesh decides whether to retransmit it. The two moments are not the
+// same moment: a flood packet can wait in the delayed inbound queue of the
+// Dispatcher for as long as calcRxDelay() says. A flag on the port alone would
+// be stale by then.
+//
+// The identity of a packet here is its POINTER. The packet pool owns the
+// memory, so a pointer is stable while the packet lives, and a pointer that
+// comes back from the pool always passes through onRx() again before anything
+// asks about it. That call rewrites the entry. Therefore a recycled address
+// cannot inherit a mark from the packet that held it before.
+//
+// A Mesh subclass wires up three of its own virtuals:
+//   logRx()              -> onRx(pkt, port.lastRxWasLoopback())
+//   onRecvPacket()       -> beginProcess(pkt) ... endProcess()
+//   allowPacketForward() -> return !blocksForward() && Base::allowPacketForward()
+namespace mesh { class Packet; }
+
+class LoopbackForwardGuard {
+public:
+  // The marks that this class can hold at one time. One mark is live only
+  // between the receive of a packet and the decision about it. That window
+  // holds the delayed inbound queue and nothing else.
+  static const int MARK_SLOTS = 8;
+
+  // Call this for EVERY received packet, and not only for the loopback ones.
+  // A call with loopback=false is what clears a stale mark off a pointer that
+  // the pool has given out again.
+  void onRx(const mesh::Packet* pkt, bool loopback) {
+    if (pkt == nullptr) return;
+    int at = find(pkt);
+    if (!loopback) { if (at >= 0) drop(at); return; }
+    if (at >= 0) return;                       // already marked
+    if (_num == MARK_SLOTS) { drop(0); _overflows++; }   // the oldest mark gives way
+    _mark[_num++] = pkt;
+  }
+
+  // Take the mark of the packet that the mesh is about to decide on.
+  void beginProcess(const mesh::Packet* pkt) {
+    int at = find(pkt);
+    _blocking = (at >= 0);
+    if (at >= 0) drop(at);
+  }
+  void endProcess() { _blocking = false; }
+  bool blocksForward() const { return _blocking; }
+
+  // The marks that MARK_SLOTS could not hold. Each one is a sibling frame that
+  // this node may have relayed after all. It should stay at zero.
+  uint32_t overflows() const { return _overflows; }
+  int numMarks() const { return _num; }
+
+private:
+  int find(const mesh::Packet* pkt) const {
+    for (int i = 0; i < _num; i++) if (_mark[i] == pkt) return i;
+    return -1;
+  }
+  void drop(int at) {
+    for (int i = at + 1; i < _num; i++) _mark[i - 1] = _mark[i];
+    _num--;
+  }
+
+  const mesh::Packet* _mark[MARK_SLOTS] = {nullptr};
+  int _num = 0;
+  bool _blocking = false;
+  uint32_t _overflows = 0;
 };
