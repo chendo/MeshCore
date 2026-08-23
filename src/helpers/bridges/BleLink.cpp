@@ -1,59 +1,20 @@
 #include "BleLink.h"
-#include "BleStack.h"
 
 #include <string.h>
 
-/* Vendor UUIDs for the bridge service. Random 128-bit, so nothing else claims
-   them. The base is shared and only the 16-bit slot differs. */
-static const uint8_t BRIDGE_SVC_UUID[16] = {
-  0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0,
-  0x93, 0xF3, 0xA3, 0xB5, 0x01, 0x7A, 0x40, 0x6E
-};
-static const uint8_t BRIDGE_CHR_UUID[16] = {
-  0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0,
-  0x93, 0xF3, 0xA3, 0xB5, 0x02, 0x7A, 0x40, 0x6E
-};
-
-/* Named, and not temporaries: the compiler reads BLEService s(BLEUuid(x)) as a
-   function declaration and not as an object. */
-static BLEUuid s_svc_uuid(BRIDGE_SVC_UUID);
-static BLEUuid s_chr_uuid(BRIDGE_CHR_UUID);
-
-/* Peripheral side: what a peer that dials US talks to. */
-static BLEService        s_svc(s_svc_uuid);
-static BLECharacteristic s_chr(s_chr_uuid);
-
-/* Central side: Bluefruit binds a client service to one connection at a time,
-   so each outward link needs its own instance. A shared pair that we point at a
-   different connection each time does not work. */
-static BLEClientService        s_clt[BleLink::MAX_LINKS] = {
-  BLEClientService(s_svc_uuid), BLEClientService(s_svc_uuid), BLEClientService(s_svc_uuid)
-};
-static BLEClientCharacteristic s_cchr[BleLink::MAX_LINKS] = {
-  BLEClientCharacteristic(s_chr_uuid), BLEClientCharacteristic(s_chr_uuid),
-  BLEClientCharacteristic(s_chr_uuid)
-};
-
 static BleLink* s_instance = nullptr;
-
-/* The GATT service and its characteristics are registered with the SoftDevice
-   once for the life of the process. `set bridge.secret` calls restartBridge(),
-   which ends and begins the bridge, so begin() runs more than once; a second
-   s_svc.begin() would add a SECOND copy of the service to the attribute table
-   and consume attribute RAM that never comes back. */
-static bool s_gatt_ready = false;
 
 /* The largest single write. This follows the MTU that the stack negotiated, and
    not the 23-byte minimum: at MTU 247 a whole bridge frame is one write and
    never becomes fragments, which removes the entire class of desynchronisation
-   faults that this transport had. BleStack gives up MTU before it gives up
+   faults that this transport had. The backend gives up MTU before it gives up
    connection slots, so this can still come back as 20 on a node that is short
    of RAM. Fragmentation still works there, with more packets. */
 static const uint16_t MAX_CHUNK = 244;          // MTU 247 - 3 bytes of ATT overhead
 static uint16_t s_chunk = 20;                   // resolved in begin(), after the stack is up
 #define CHUNK s_chunk
 
-bool BleLink::begin(rx_handler_t handler, const ble_gap_addr_t& self_addr,
+bool BleLink::begin(rx_handler_t handler, const BleAddr& self_addr,
                     allow_handler_t allow) {
   if (_running) return true;
   s_instance = this;
@@ -62,33 +23,18 @@ bool BleLink::begin(rx_handler_t handler, const ble_gap_addr_t& self_addr,
   memcpy(&_self, &self_addr, sizeof(_self));
   memset(_links, 0, sizeof(_links));
 
-  /* Resolve the write size from what the stack negotiated. BleStack has already
-     run its ladder, so this is the real MTU and not a hope. */
+  /* Resolve the write size from what the stack negotiated. The backend has
+     already run its ladder, so this is the real MTU and not a hope. */
   {
-    uint16_t m = BleStack::mtu();
+    uint16_t m = Backend::stackMtu();
     if (m < 23) m = 23;
     uint16_t c = (uint16_t)(m - 3);             // ATT opcode + handle
     s_chunk = c > MAX_CHUNK ? MAX_CHUNK : c;
   }
 
-  if (!s_gatt_ready) {
-    s_gatt_ready = true;
-    s_svc.begin();                     // must come before its characteristics
-    s_chr.setProperties(CHR_PROPS_WRITE_WO_RESP | CHR_PROPS_NOTIFY);
-    s_chr.setPermission(SECMODE_OPEN, SECMODE_OPEN);
-    s_chr.setMaxLen(CHUNK);
-    s_chr.setWriteCallback(written_cb);
-    s_chr.begin();
-
-    for (uint8_t i = 0; i < MAX_LINKS; i++) {
-      s_clt[i].begin();
-      s_cchr[i].setNotifyCallback(notify_cb);
-      s_cchr[i].begin();
-    }
-  }
-
-  Bluefruit.Central.setConnectCallback(connect_cb);
-  Bluefruit.Central.setDisconnectCallback(disconnect_cb);
+  /* The backend registers the GATT service once for the life of the process,
+     because `set bridge.secret` restarts the bridge and thus runs this again. */
+  Backend::begin(CHUNK, connect_cb, disconnect_cb, notify_cb, written_cb);
 
   _running = true;
   return true;
@@ -96,7 +42,7 @@ bool BleLink::begin(rx_handler_t handler, const ble_gap_addr_t& self_addr,
 
 void BleLink::resetLink(Link& l) {
   l.state = IDLE;
-  l.conn = BLE_CONN_HANDLE_INVALID;
+  l.conn = Backend::NO_CONN;
   l.last_rx_ms = 0;
   l.txq_count = 0; l.txq_head = 0; l.tx_off = 0;
   l.rx_expect = l.rx_have = 0; l.rx_hdr_have = 0;
@@ -108,11 +54,11 @@ void BleLink::resetInbound() {
      from the peer we just dropped still reaches onWritten(), and without this
      record it is adopted again with a fresh authentication window. That is
      exactly the squat that the drop was for. */
-  if (_in_conn != BLE_CONN_HANDLE_INVALID) {
+  if (_in_conn != Backend::NO_CONN) {
     _in_dropped_conn = _in_conn;
     _in_dropped_ms = millis();
   }
-  _in_conn = BLE_CONN_HANDLE_INVALID;
+  _in_conn = Backend::NO_CONN;
   _in_txq_count = 0; _in_txq_head = 0; _in_tx_off = 0;
   _in_expect = _in_have = 0; _in_hdr_have = 0;
   _in_authed = false; _in_up_ms = 0;
@@ -133,23 +79,19 @@ void BleLink::end() {
   for (uint8_t i = 0; i < MAX_LINKS; i++) {
     Link& l = _links[i];
     if (l.state == UP || l.state == DISCOVERING || l.state == CONNECTING) {
-      BLEConnection* c = Bluefruit.Connection(l.conn);
-      if (c != nullptr) c->disconnect();
+      Backend::disconnect(l.conn);
     }
     resetLink(l);
     l.state = EMPTY;                         // the slot is free for another peer
   }
 
-  if (_in_conn != BLE_CONN_HANDLE_INVALID) {
-    BLEConnection* c = Bluefruit.Connection(_in_conn);
-    if (c != nullptr) c->disconnect();
-  }
+  if (_in_conn != Backend::NO_CONN) Backend::disconnect(_in_conn);
   resetInbound();
   _auth_fail_count = 0; _auth_fail_head = 0;
   _topology_changed = true;                  // the caller must arm the scanner again
 }
 
-bool BleLink::weInitiateTo(const ble_gap_addr_t& peer) const {
+bool BleLink::weInitiateTo(const BleAddr& peer) const {
   /* Addresses are little-endian on the air. Compare from the most significant
      byte, so the order matches how a person reads an address. Two distinct
      devices cannot be equal. */
@@ -159,7 +101,7 @@ bool BleLink::weInitiateTo(const ble_gap_addr_t& peer) const {
   return false;
 }
 
-void BleLink::notePeer(const ble_gap_addr_t& addr) {
+void BleLink::notePeer(const BleAddr& addr) {
   if (!_running) return;
   for (uint8_t i = 0; i < MAX_LINKS; i++) {
     if (_links[i].state != EMPTY && memcmp(_links[i].addr.addr, addr.addr, 6) == 0) return;
@@ -174,21 +116,21 @@ void BleLink::notePeer(const ble_gap_addr_t& addr) {
       memset(&_links[i], 0, sizeof(_links[i]));
       memcpy(&_links[i].addr, &addr, sizeof(addr));
       _links[i].state = IDLE;
-      _links[i].conn = BLE_CONN_HANDLE_INVALID;
+      _links[i].conn = Backend::NO_CONN;
       _links[i].backoff_ms = BACKOFF_MIN_MS;
       return;
     }
   }
 }
 
-void BleLink::noteAuthFailure(const ble_gap_addr_t& addr) {
+void BleLink::noteAuthFailure(const BleAddr& addr) {
   if (_auth_fail_count >= AUTH_FAIL_DEPTH) return;    // the bridge is not reading
   uint8_t slot = (uint8_t)((_auth_fail_head + _auth_fail_count) % AUTH_FAIL_DEPTH);
   memcpy(&_auth_fail[slot], &addr, sizeof(addr));
   _auth_fail_count++;
 }
 
-bool BleLink::takeAuthFailure(ble_gap_addr_t& addr) {
+bool BleLink::takeAuthFailure(BleAddr& addr) {
   if (_auth_fail_count == 0) return false;
   memcpy(&addr, &_auth_fail[_auth_fail_head], sizeof(addr));
   _auth_fail_head = (uint8_t)((_auth_fail_head + 1) % AUTH_FAIL_DEPTH);
@@ -198,9 +140,8 @@ bool BleLink::takeAuthFailure(ble_gap_addr_t& addr) {
 
 void BleLink::dropLink(uint8_t idx) {
   if (idx == INBOUND_LINK) {
-    if (_in_conn == BLE_CONN_HANDLE_INVALID) return;
-    BLEConnection* c = Bluefruit.Connection(_in_conn);
-    if (c != nullptr) c->disconnect();
+    if (_in_conn == Backend::NO_CONN) return;
+    Backend::disconnect(_in_conn);
     resetInbound();
     _topology_changed = true;
     return;
@@ -208,8 +149,7 @@ void BleLink::dropLink(uint8_t idx) {
   if (idx >= MAX_LINKS) return;
   Link& l = _links[idx];
   if (l.state == EMPTY) return;
-  BLEConnection* c = Bluefruit.Connection(l.conn);
-  if (c != nullptr) c->disconnect();
+  Backend::disconnect(l.conn);
   l.unauthed_drops++;
   resetLink(l);
   /* Back off hard, and do not dial again at once. A peer that cannot
@@ -220,9 +160,8 @@ void BleLink::dropLink(uint8_t idx) {
 }
 
 void BleLink::checkInbound() {
-  if (_in_conn == BLE_CONN_HANDLE_INVALID) return;
-  BLEConnection* c = Bluefruit.Connection(_in_conn);
-  if (c != nullptr && c->connected()) return;
+  if (_in_conn == Backend::NO_CONN) return;
+  if (Backend::connected(_in_conn)) return;
   /* The peer went away. Forget it, or numUp() over-counts for ever and every
      notify() goes to a handle that no longer exists. The source of this port
      never cleared the handle, because nothing else looked at it. */
@@ -232,6 +171,14 @@ void BleLink::checkInbound() {
 
 void BleLink::loop() {
   if (!_running) return;
+
+  /* Let the backend deliver anything it had to hold. A stack whose events
+     arrive on a task that must not block cannot run GATT discovery from its own
+     connect callback, so it queues the event and hands it over here instead,
+     where a blocking call costs only a slow loop pass. The nRF52 backend has
+     nothing to hold and this compiles away. */
+  Backend::poll();
+
   unsigned long now = millis();
 
   checkInbound();
@@ -249,8 +196,7 @@ void BleLink::loop() {
        this loop captured. Unsigned, that reads as a very old link and
        disconnects a perfectly healthy one. */
     if ((long)(now - l.last_rx_ms) < (long)LINK_IDLE_LIMIT_MS) continue;
-    BLEConnection* c = Bluefruit.Connection(l.conn);
-    if (c != nullptr) c->disconnect();
+    Backend::disconnect(l.conn);
     l.drops++;
     resetLink(l);
   }
@@ -270,9 +216,9 @@ void BleLink::loop() {
     noteAuthFailure(l.addr);
     dropLink(i);
   }
-  if (_in_conn != BLE_CONN_HANDLE_INVALID && !_in_authed && _in_up_ms != 0
+  if (_in_conn != Backend::NO_CONN && !_in_authed && _in_up_ms != 0
       && (long)(now - _in_up_ms) >= (long)AUTH_GRACE_MS) {
-    ble_gap_addr_t a;
+    BleAddr a;
     if (getInboundAddr(a)) noteAuthFailure(a);
     dropLink(INBOUND_LINK);
   }
@@ -281,7 +227,7 @@ void BleLink::loop() {
      the same reason. There is exactly ONE inbound slot, so a peer that
      authenticates and then goes quiet holds all of it, and no other peer can
      dial us at all. */
-  if (_in_conn != BLE_CONN_HANDLE_INVALID && _in_last_rx_ms != 0
+  if (_in_conn != Backend::NO_CONN && _in_last_rx_ms != 0
       && (long)(now - _in_last_rx_ms) >= (long)LINK_IDLE_LIMIT_MS) {
     dropLink(INBOUND_LINK);
   }
@@ -310,7 +256,7 @@ void BleLink::loop() {
        sd_ble_gap_connect() does that unconditionally. Flag it, so the caller
        arms the scanner again; otherwise the node is deaf from here on. */
     _topology_changed = true;
-    if (!Bluefruit.Central.connect(&l.addr)) l.state = IDLE;
+    if (!Backend::dial(l.addr)) l.state = IDLE;
   }
 }
 
@@ -322,11 +268,10 @@ int BleLink::findByConn(uint16_t conn) const {
 }
 
 void BleLink::onConnected(uint16_t conn) {
-  /* Bluefruit's central callback does not say which peer it dialled, so match
-     the connection back to a link by address. */
-  BLEConnection* c = Bluefruit.Connection(conn);
-  if (c == nullptr) return;
-  ble_gap_addr_t peer = c->getPeerAddr();
+  /* The central callback does not say which peer it dialled, so match the
+     connection back to a link by address. */
+  BleAddr peer;
+  if (!Backend::peerAddr(conn, peer)) return;
 
   for (uint8_t i = 0; i < MAX_LINKS; i++) {
     Link& l = _links[i];
@@ -336,7 +281,7 @@ void BleLink::onConnected(uint16_t conn) {
     l.state = DISCOVERING;
     l.rx_expect = l.rx_have = 0; l.rx_hdr_have = 0;
 
-    if (s_clt[i].discover(conn) && s_cchr[i].discover() && s_cchr[i].enableNotify()) {
+    if (Backend::discoverLink(i, conn)) {
       l.state = UP;
       l.last_rx_ms = millis();               // a grace period before the idle check
       l.up_ms = millis();                    // start of the authentication window
@@ -346,9 +291,9 @@ void BleLink::onConnected(uint16_t conn) {
       /* We connected to something that is not a bridge peer, or discovery
          failed. Drop it, and do not hold a slot for a link that can carry
          nothing. */
-      c->disconnect();
+      Backend::disconnect(conn);
       l.state = IDLE;
-      l.conn = BLE_CONN_HANDLE_INVALID;
+      l.conn = Backend::NO_CONN;
     }
     return;
   }
@@ -435,7 +380,7 @@ void BleLink::onNotify(uint8_t idx, const uint8_t* data, uint16_t len) {
   if (idx < MAX_LINKS) feed(_links[idx], idx, data, len);
 }
 
-bool BleLink::adoptInbound(uint16_t conn, BLEConnection* c) {
+bool BleLink::adoptInbound(uint16_t conn) {
   /* Refuse the handle that we dropped a moment ago. Its disconnect is still
      in flight, and to adopt it again would grant another grace window. */
   if (conn == _in_dropped_conn
@@ -445,8 +390,9 @@ bool BleLink::adoptInbound(uint16_t conn, BLEConnection* c) {
      Without this the deny list stops nothing on this side: a peer whose
      first frame failed the group tag simply connects again and takes the
      single inbound slot back. */
-  if (_allow != nullptr && c != nullptr && !_allow(c->getPeerAddr())) {
-    c->disconnect();
+  BleAddr peer;
+  if (_allow != nullptr && Backend::peerAddr(conn, peer) && !_allow(peer)) {
+    Backend::disconnect(conn);
     return false;
   }
   _in_conn = conn;
@@ -465,29 +411,29 @@ bool BleLink::adoptInbound(uint16_t conn, BLEConnection* c) {
    in range. This sweep closes that, and the peer then meets the authentication
    grace and the deny list that every other peer meets.
 
-   A poll, and not a callback. Bluefruit.Periph.setConnectCallback() is a
+   A poll, and not a callback. On nRF52 the peripheral connect callback is a
    SINGLE slot, and SerialBLEInterface already holds it. Two owners of one slot
    means whichever begin() runs last takes the callback from the other in
    silence, and that fault appears only in a build combination that nobody has
    tried. loop() already runs on every main pass, so a poll costs one short
    walk over the connection handles and owes nothing to anybody.
 
-   Periph.connected(h) is role AND liveness in one call, so an outward link of
-   our own can never match here.
+   peripheralConnAt() reports only a connection on which we hold the PERIPHERAL
+   role and which is live, so an outward link of our own can never match here.
 
    A secured or bonded connection belongs to the CLI or to DFU. Both need MITM
    encryption before they carry a byte, and a bridge peer never pairs, so this
    is what keeps the sweep away from the CLI. */
 void BleLink::sweepInbound() {
 #if BLE_LINK_SILENT_SWEEP
-  if (_in_conn != BLE_CONN_HANDLE_INVALID) return;    // the slot is already ours
+  if (_in_conn != Backend::NO_CONN) return;    // the slot is already ours
 
-  for (uint16_t h = 0; h < BLE_MAX_CONNECTION; h++) {
-    if (!Bluefruit.Periph.connected(h)) continue;
-    BLEConnection* c = Bluefruit.Connection(h);
-    if (c == nullptr) continue;
-    if (c->secured() || c->bonded()) continue;        // the CLI, or DFU
-    if (adoptInbound(h, c)) return;
+  for (uint8_t i = 0; i < Backend::SWEEP_SLOTS; i++) {
+    uint16_t h = Backend::peripheralConnAt(i);
+    if (h == Backend::NO_CONN) continue;
+    if (!Backend::exists(h)) continue;
+    if (Backend::paired(h)) continue;                 // the CLI, or DFU
+    if (adoptInbound(h)) return;
   }
 #endif
 }
@@ -495,7 +441,7 @@ void BleLink::sweepInbound() {
 void BleLink::onWritten(uint16_t conn, const uint8_t* data, uint16_t len) {
   /* A peer dialled US. Reassembled apart from the outward links: it has no Link
      slot, because we did not choose it and cannot dial it back. */
-  if (_in_conn != conn && !adoptInbound(conn, Bluefruit.Connection(conn))) return;
+  if (_in_conn != conn && !adoptInbound(conn)) return;
   reassemble(_in_hdr, _in_hdr_have, _in_expect, _in_have, _in_buf,
              _in_started_ms, _in_resyncs, _in_recv, _in_last_rx_ms,
              INBOUND_LINK, data, len);
@@ -542,9 +488,9 @@ void BleLink::drain(Link& l, uint8_t idx) {
        each write restores the all-or-nothing behaviour that the loop below
        assumes. */
     uint16_t cap = CHUNK;
-    BLEConnection* c = Bluefruit.Connection(l.conn);
-    if (c != nullptr) {
-      uint16_t mp = (uint16_t)(c->getMtu() - 3);
+    uint16_t conn_mtu = Backend::connMtu(l.conn);
+    if (conn_mtu != 0) {
+      uint16_t mp = (uint16_t)(conn_mtu - 3);
       if (mp < cap) cap = mp;
     }
 
@@ -554,7 +500,7 @@ void BleLink::drain(Link& l, uint8_t idx) {
       /* One attempt. No credit means no credit: return and resume next pass.
          Advance by what the stack ACTUALLY accepted, so a partial can never go
          out twice even if the stack splits despite the clamp. */
-      uint16_t wrote = s_cchr[idx].write(&b[l.tx_off], take);
+      uint16_t wrote = Backend::writeLink(idx, &b[l.tx_off], take);
       l.tx_off = (uint16_t)(l.tx_off + wrote);
       if (wrote != take) return;
     }
@@ -577,7 +523,7 @@ uint8_t BleLink::send(const uint8_t* data, uint16_t len, uint8_t except) {
 
   /* The inbound peer, if one is attached. We notify it rather than write to it,
      because on that link the roles are the other way round. */
-  if (_in_conn != BLE_CONN_HANDLE_INVALID && except != INBOUND_LINK) {
+  if (_in_conn != Backend::NO_CONN && except != INBOUND_LINK) {
     if (enqueueInbound(data, len)) n++;
   }
   return n;
@@ -597,7 +543,7 @@ bool BleLink::enqueueInbound(const uint8_t* data, uint16_t len) {
 }
 
 void BleLink::drainInbound() {
-  if (_in_conn == BLE_CONN_HANDLE_INVALID) {
+  if (_in_conn == Backend::NO_CONN) {
     _in_txq_count = 0; _in_txq_head = 0; _in_tx_off = 0;   // peer gone; nothing to send
     return;
   }
@@ -611,16 +557,16 @@ void BleLink::drainInbound() {
        for. To keep every notify to a single packet is the only way to make
        false reliably mean that nothing went out. */
     uint16_t cap = CHUNK;
-    BLEConnection* c = Bluefruit.Connection(_in_conn);
-    if (c != nullptr) {
-      uint16_t mp = (uint16_t)(c->getMtu() - 3);
+    uint16_t conn_mtu = Backend::connMtu(_in_conn);
+    if (conn_mtu != 0) {
+      uint16_t mp = (uint16_t)(conn_mtu - 3);
       if (mp < cap) cap = mp;
     }
 
     while (_in_tx_off < total) {
       uint16_t rem = (uint16_t)(total - _in_tx_off);
       uint16_t take = rem < cap ? rem : cap;
-      if (!s_chr.notify(&b[_in_tx_off], take)) return;     // no credit; resume next pass
+      if (!Backend::notifyInbound(_in_conn, &b[_in_tx_off], take)) return;  // no credit
       _in_tx_off = (uint16_t)(_in_tx_off + take);
     }
     _in_txq_head = (uint8_t)((_in_txq_head + 1) % TXQ_DEPTH);
@@ -633,21 +579,19 @@ void BleLink::drainInbound() {
 uint8_t BleLink::numUp() const {
   uint8_t n = 0;
   for (uint8_t i = 0; i < MAX_LINKS; i++) if (_links[i].state == UP) n++;
-  if (_in_conn != BLE_CONN_HANDLE_INVALID) n++;
+  if (_in_conn != Backend::NO_CONN) n++;
   return n;
 }
 
 bool BleLink::isUp(uint8_t idx) const {
-  if (idx == INBOUND_LINK) return _in_conn != BLE_CONN_HANDLE_INVALID;
+  if (idx == INBOUND_LINK) return _in_conn != Backend::NO_CONN;
   return idx < MAX_LINKS && _links[idx].state == UP;
 }
 
-bool BleLink::getInboundAddr(ble_gap_addr_t& addr, uint32_t* rx_age_s,
+bool BleLink::getInboundAddr(BleAddr& addr, uint32_t* rx_age_s,
                              uint32_t* queued) const {
-  if (_in_conn == BLE_CONN_HANDLE_INVALID) return false;
-  BLEConnection* c = Bluefruit.Connection(_in_conn);
-  if (c == nullptr) return false;
-  addr = c->getPeerAddr();
+  if (_in_conn == Backend::NO_CONN) return false;
+  if (!Backend::peerAddr(_in_conn, addr)) return false;
   /* The same figure as getLink() reports, and for the same reason: counters
      alone cannot tell a peer that carries traffic from one that went quiet an
      hour ago. Signed, because the BLE event context writes _in_last_rx_ms. */
@@ -659,7 +603,7 @@ bool BleLink::getInboundAddr(ble_gap_addr_t& addr, uint32_t* rx_age_s,
   return true;
 }
 
-bool BleLink::getLink(uint8_t idx, ble_gap_addr_t& addr, bool& up, int8_t& rssi,
+bool BleLink::getLink(uint8_t idx, BleAddr& addr, bool& up, int8_t& rssi,
                       uint32_t& sent, uint32_t& recv, uint32_t& drops,
                       uint32_t* rx_age_s, uint32_t* queued) const {
   if (idx >= MAX_LINKS || _links[idx].state == EMPTY) return false;
@@ -687,13 +631,9 @@ void BleLink::connect_cb(uint16_t conn) {
 void BleLink::disconnect_cb(uint16_t conn, uint8_t reason) {
   if (s_instance) s_instance->onDisconnected(conn, reason);
 }
-void BleLink::notify_cb(BLEClientCharacteristic* chr, uint8_t* data, uint16_t len) {
-  if (!s_instance) return;
-  for (uint8_t i = 0; i < MAX_LINKS; i++) {
-    if (chr == &s_cchr[i]) { s_instance->onNotify(i, data, len); return; }
-  }
+void BleLink::notify_cb(uint8_t link_idx, const uint8_t* data, uint16_t len) {
+  if (s_instance) s_instance->onNotify(link_idx, data, len);
 }
-void BleLink::written_cb(uint16_t conn, BLECharacteristic* chr, uint8_t* data, uint16_t len) {
-  (void)chr;
+void BleLink::written_cb(uint16_t conn, const uint8_t* data, uint16_t len) {
   if (s_instance) s_instance->onWritten(conn, data, len);
 }
