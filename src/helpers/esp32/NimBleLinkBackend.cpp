@@ -280,7 +280,22 @@ bool NimBleLinkBackend::dial(const BleAddr& addr) {
     if (s_link_client[i] == c) s_link_chr[i] = nullptr;
   }
 
-  NimBLEAddress peer(addr.addr, addr.addr_type);
+  /* BYTE ORDER. NimBLE's address API is asymmetric and it is a trap:
+       NimBLEAddress::getVal()            returns val as the host holds it, LSB first
+       NimBLEAddress(const uint8_t*, type) REVERSE-copies what you give it
+     Everything that fills a BleAddr on this backend -- onAdvReport() through
+     getVal(), peerAddr() through ble_gap_conn_desc::peer_ota_addr.val -- stores
+     the host order. Handing that straight back to the array constructor
+     therefore dials the address backwards, and nothing answers: the connect
+     ends in BLE_HS_ETIMEOUT and the link never comes up. The ble_addr_t
+     constructor copies instead of reversing, so it is the one to use.
+     This is why the nRF52 pair worked and the first ESP32-to-nRF52 link did
+     not: Bluefruit has no such asymmetry, so only this backend can get it
+     wrong. */
+  ble_addr_t raw;
+  raw.type = addr.addr_type;
+  memcpy(raw.val, addr.addr, sizeof(raw.val));
+  NimBLEAddress peer(raw);
 
   /* ASYNCHRONOUS. A blocking connect would stall the main loop for as long as
      the peer takes to answer, which stalls the mesh as well. The result arrives
