@@ -500,11 +500,13 @@ void HydraNode::handleCommand(uint32_t sender_timestamp, char* command,
   }
   if (strcmp(command, "stats-shared") == 0) {   // the arbiter view, for the whole node
     snprintf(reply, reply_sz,
-             "rx=%u tx=%u contend=%u stuck=%u refused=%u dropped=%u peers=%d idle=%us "
+             "rx=%u tx=%u contend=%u stuck=%u refused=%u dropped=%u lbmiss=%u peers=%d idle=%us "
              "duty=%u/%us used=%us",
              (unsigned)_core.rxTotal(), (unsigned)_core.txTotal(),
              (unsigned)_core.txContention(), (unsigned)_core.txStuck(),
              (unsigned)_core.txRefused(), (unsigned)_core.rxDropped(),
+             // sibling frames that slot 0 may have relayed after all: see LoopbackForwardGuard
+             (unsigned)_slot0.mesh().loopbackGuard().overflows(),
              _core.numPeers(), (unsigned)(_core.msSinceLastRx() / 1000),
              (unsigned)(_core.txBudgetMs() / 1000), (unsigned)(_core.txBudgetMaxMs() / 1000),
              (unsigned)(_core.txChargedMs() / 1000));
