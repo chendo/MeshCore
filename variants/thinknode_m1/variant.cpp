@@ -20,10 +20,12 @@ void initVariant() {
   pinMode(PIN_BUTTON1, INPUT_PULLUP);
   pinMode(PIN_BUTTON2, INPUT_PULLUP);
 
+  // Put the two LEDs in a known off state. ledOff() gets the polarity from
+  // LED_STATE_ON.
   pinMode(LED_RED, OUTPUT);
-  pinMode(LED_GREEN, OUTPUT);
+  ledOff(LED_RED);
   pinMode(LED_BLUE, OUTPUT);
-  digitalWrite(LED_BLUE, HIGH);
+  ledOff(LED_BLUE);
 
   pinMode(PIN_TXCO, OUTPUT);
   digitalWrite(PIN_TXCO, HIGH);
