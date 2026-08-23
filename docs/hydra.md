@@ -42,6 +42,60 @@ The radio driver holds a receive-failure count for each cause. The packet trace 
 each receive error with its RadioLib code. No command prints either of those two. That
 work is still open.
 
+### Changing the partition table destroys the filesystem
+
+**This applies to the ESP32 boards. It has already cost one operator four identity
+keys.** Read it before you flash an M5 with anything other than the image that is on it
+now.
+
+An ESP32 image carries its own partition table, and the table says where SPIFFS starts.
+The envs in this tree do not all use the same table:
+
+| env | table | SPIFFS offset | SPIFFS size |
+|---|---|---|---|
+| every other `ThinkNode_M5_*` env, `_Repeater` and `_Repeater_hardened` included | stock `default.csv` | `0x290000` | `0x160000` |
+| `ThinkNode_M5_hydra` | `min_spiffs.csv` | `0x3D0000` | `0x20000` |
+| (`huge_app.csv`, if anyone ever selects it) | `huge_app.csv` | `0x310000` | `0xE0000` |
+
+Flash a board from one row to another and the new firmware looks for its filesystem at an
+address where no filesystem has ever been. **Everything in the old SPIFFS is orphaned:**
+
+- every identity keypair — `_main` and each `_slotN`
+- `prefs.json`: node name, frequency, bandwidth, spreading factor, TX power, region
+- the repeater ACL and each room ACL
+- `/hydra_slots`, the slot configuration
+
+**It happens with no error and no prompt.** `SPIFFS.begin(true)` formats what it finds at
+the new offset, the node boots clean, mints fresh keys and adverts under them. The old
+bytes are still on the chip, but nothing addresses them and no command reads them. The
+first sign is that the mesh no longer recognises the node.
+
+**Before you flash across a table change, save the keys.** On the serial console:
+
+```
+get prv.key                 # slot 0
+slot 1 get prv.key          # and each other slot in turn
+slots                       # the type and name of each slot
+get name / get freq / ...   # anything you changed from the build default
+```
+
+Both `get prv.key` forms answer the console only, never a remote command. Write the
+output down somewhere off the board. After the flash, put each key back with
+`set prv.key <hex>` for slot 0 and `slot N set prv.key <hex>` for the others, then set
+the name and type of each slot again. `slot N set prv.key` needs the slot to be **off**
+for that boot, and it reads the key back and compares it before it reports success.
+
+**NVS survives, and it is not a safety net.** All three tables above put `nvs` at
+`0x9000` with a size of `0x5000`, so a partition change never moves it. That is why the
+operator recovered: the firmware that had been on the board before mirrored its keys
+into NVS. Hydra writes nothing to NVS, deliberately. A second copy of a private key in a
+second store is a second thing to keep correct and a second thing to leak, and the
+answer to "I am about to change the partition table" is to save the keys, not to build a
+mirror. **Do not rely on NVS holding anything.**
+
+An over-the-air update inside one env does not change the table and is safe. Only a full
+flash of an image built with a different `board_build.partitions` moves the filesystem.
+
 ---
 
 ## Two upstream bug fixes
@@ -282,9 +336,27 @@ Slot 0 runs the **same `simple_repeater` `MyMesh` that this tree ships**. It is 
 fork of it. `MyMesh` already takes a `mesh::Radio&`, so the reuse is to hand it a
 `RadioPort` in place of `radio_driver`. The build compiles that directory's `MyMesh.cpp`
 and puts the directory on the include path. To upgrade a `simple_repeater` node
-therefore costs nothing: slot 0 keeps the `_main` identity key, so `prefs.json`,
-the ACL and the region map carry over. Flash hydra over a repeater and it comes back as
-the same node with slots 1 and above off.
+therefore costs nothing on the nRF52 boards: slot 0 keeps the `_main` identity key, so
+`prefs.json`, the ACL and the region map carry over. Flash hydra over a repeater and it
+comes back as the same node with slots 1 and above off.
+
+> **On the M5 that upgrade changes the partition table, and the filesystem does not
+> carry over.** `ThinkNode_M5_Repeater_hardened` uses the stock table and
+> `ThinkNode_M5_hydra` uses `min_spiffs.csv`. The two put SPIFFS at different offsets,
+> so every identity key on the board is orphaned by the flash. **Save the keys first**
+> — see [Changing the partition table destroys the filesystem](#changing-the-partition-table-destroys-the-filesystem).
+
+**Where a keypair lives.** `IdentityStore` files it at `<dir>/<name>.id`, and `<dir>`
+comes from the platform: `""` on nRF52 and STM32, `/identity` on ESP32 and RP2040. That
+is upstream's convention, and `src/helpers/IdentityPath.h` now holds it once for the
+whole of hydra. Hydra used to pass `""` everywhere, so on an M5 it wrote `/_main.id`
+where the stock firmware and upstream's own `saveIdentity()` used `/identity/_main.id`.
+An M5 that got hydra flashed over stock firmware therefore minted a fresh key with the
+filesystem intact, and `set prv.key` on slot 0 wrote a file that hydra never read back.
+`HydraNode::migrateIdentities()` runs before any slot starts and copies each key forward
+from the old path, once, printing `hydra: slot N identity moved ...` when it does. It
+never overwrites a key that is already at the current path, and it leaves the old file
+in place. Nothing changes on the nRF52 boards, where both paths are the same string.
 
 Slots 1 and above are much smaller than slot 0: a packet pool of 8 against 32, and a
 dedup table of 32 hashes against the 160 of `SimpleMeshTables`. `MAX_CONTACTS` is 16,
@@ -389,13 +461,13 @@ on the M5.
 |---|---|---:|---:|
 | `RAK_3401_repeater_hardened` | builds | 380,092 B (46.6% of 815,104) | 33,048 B (14.0% of 235,520) |
 | `RAK_3401_repeater_bridge_ble` | builds | 395,848 B (48.6%) | 41,200 B (17.5%) |
-| `RAK_3401_hydra` (3 slots) | builds | 392,876 B (48.2%) | 54,600 B (23.2%) |
+| `RAK_3401_hydra` (3 slots) | builds | 403,868 B (49.5%) | 54,888 B (23.3%) |
 | `RAK_3401_hydra_debug` (packet trace on) | builds | 395,500 B (48.5%) | 65,544 B (27.8%) |
 | `ThinkNode_M1_repeater_hardened` | builds | 304,848 B (37.4% of 815,104) | 30,768 B (13.1% of 235,520) |
 | `ThinkNode_M1_repeater_bridge_ble` | builds | 320,412 B (39.3%) | 38,904 B (16.5%) |
-| `ThinkNode_M1_hydra` (3 slots) | builds | 330,128 B (40.5%) | 52,512 B (22.3%) |
+| `ThinkNode_M1_hydra` (3 slots) | builds | 341,624 B (41.9%) | 52,800 B (22.4%) |
 | `ThinkNode_M5_Repeater_hardened` | builds | 1,126,385 B (85.9% of 1,310,720) | 60,912 B (11.6% of 524,288) |
-| `ThinkNode_M5_hydra` (5 slots) | builds | 1,125,249 B (57.2% of 1,966,080) | 104,288 B (19.9%) |
+| `ThinkNode_M5_hydra` (5 slots) | builds | 1,135,597 B (57.8% of 1,966,080) | 104,864 B (20.0%) |
 
 The ESP32 image embeds the `.pio/libdeps/<env>/...` path of each third-party source that
 uses `__FILE__`, so an M5 flash figure moves by a few bytes when an env is renamed.
@@ -414,7 +486,13 @@ far more than the identities, the preferences, the ACLs and `/hydra_slots` need.
 `huge_app.csv` would give 3 MB, but it deletes the second OTA slot, and a repeater on a
 mast is the node that most needs to accept an image over the air. The hydra env also
 drops `DISPLAY_CLASS`, which keeps GxEPD2 and its fonts out of the image. That reduction
-is about the size of hydra itself, so the two envs land within 1,200 B of each other.
+is about the size of hydra itself, so the two envs land within 10 KB of each other
+(1,126,385 B against 1,135,597 B).
+
+The two envs therefore have **different** tables, and moving a board between them
+destroys its filesystem and every identity key on it. See
+[Changing the partition table destroys the filesystem](#changing-the-partition-table-destroys-the-filesystem)
+before you flash one over the other.
 
 **A build that passes is not a test on hardware.** No firmware from this tree has gone
 onto a board.
@@ -473,19 +551,32 @@ pio test -e native -e native_ble -e native_radio -e native_multi \
          -e native_multi_notrace -e native_kiss_modem
 ```
 
-**277 cases, and all of them pass.** 229 are new here. 48 are upstream's.
+**449 cases, and all of them pass.** 401 are new here. 48 are upstream's, in the six
+suites that upstream ships (`test_config_serializer`, `test_kiss_modem`,
+`test_mesh_tables`, `test_routing_policy`, `test_utf8_helpers`, `test_utils`).
 
 | suite | env | cases |
 |---|---|---:|
-| `test_shared_radio` | `native_multi` | 90 |
-| `test_hydra_slots` | `native_multi` | 53 |
+| `test_hydra_slots` | `native_multi` | 147 |
+| `test_shared_radio` | `native_multi` | 97 |
+| `test_clock_policy` | `native` | 39 |
+| `test_ble_bridge` | `native_ble` | 34 |
 | `test_lora_watchdog` | `native_multi` | 18 |
-| `test_ble_bridge` | `native_ble` | 18 |
 | `test_radio_wrapper` | `native_radio` | 17 |
+| `test_gps_switch` | `native` | 16 |
+| `test_routing_policy` | `native` | 14 |
 | `test_mux` | `native_multi` | 14 |
+| `test_config_serializer` | `native` | 9 |
+| `test_kiss_modem` | `native_kiss_modem` | 8 |
+| `test_mesh_tables` | `native` | 8 |
 | `test_packet` | `native` | 8 |
 | `test_shared_radio_notrace` | `native_multi_notrace` | 8 |
+| `test_utils` | `native` | 5 |
+| `test_utf8_helpers` | `native` | 4 |
 | `test_bridge` | `native` | 3 |
+
+`test_companion_node_prefs` is upstream's and holds one case, but it supplies its own
+`main()` and PlatformIO reports it as zero. It is not in the 449.
 
 `test_shared_radio_notrace` needs its own env, because a second binary is the only way
 to exercise the off state of a compile-time flag. `native_ble` supplies a real SHA-256
