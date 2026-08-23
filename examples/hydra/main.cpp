@@ -82,6 +82,80 @@
   #include <SPIFFS.h>
 #endif
 
+#include <helpers/AppModule.h>
+
+/* The node's modules, as modules. Each is a thin adapter over something that
+   already existed: the point is not to rewrite them but to stop main.cpp being
+   the only place that knows they exist. A module added later registers itself
+   and needs no edit here.
+   All NODE scope -- an LED, a sensor bus, a console and a BLE link belong to
+   the board, not to any one identity. Nothing here wants a packet. */
+#if WITH_STATUS_LED
+class StatusLedModule : public AppModule {
+public:
+  AppScope scope() const override { return AppScope::NODE; }
+  void onSetup() override { status_led.begin(LED_BLUE, LED_GREEN, LED_STATE_ON); }
+  void onLoop() override { status_led.loop(); }
+};
+static StatusLedModule status_led_module;
+#endif
+
+class SensorsModule : public AppModule {
+public:
+  AppScope scope() const override { return AppScope::NODE; }
+  void onSetup() override { sensors.begin(); }
+  void onLoop() override { sensors.loop(); }
+};
+static SensorsModule sensors_module;
+
+#ifdef WITH_WIFI_CONSOLE
+/* onLoop() only pumps the transport. Reading a line stays in the CLI block
+   below, because a console line has to reach dispatch(), and dispatch() is the
+   entrypoint's business and not a module's. loopAll() runs before that block,
+   so the ordering the console needs is preserved. */
+class WifiConsoleModule : public AppModule {
+public:
+  AppScope scope() const override { return AppScope::NODE; }
+  void onSetup() override {
+  #ifdef WIFI_NTP_SERVER
+    wifi_console.enableNtp(WIFI_NTP_SERVER);
+  #endif
+    wifi_console.begin();
+  }
+  void onLoop() override { wifi_console.loop(); }
+};
+static WifiConsoleModule wifi_console_module;
+#endif
+
+#ifdef WITH_COMPANION_BLE
+class CompanionModule : public AppModule {
+public:
+  AppScope scope() const override { return AppScope::NODE; }
+  void onSetup() override {
+    // The name of slot 0 is the BLE device name. begin() may rewrite the buffer
+    // when the name is "@@MAC", which is why it takes a writable string.
+    companion_ble.begin(BLE_NAME_PREFIX, hydra.repeater().prefs()->node_name, BLE_PIN_CODE);
+    companion_ble.enable();
+  }
+  void onLoop() override { companion_facade.loop(); }
+  bool hasPendingWork() const override { return companion_ble.isConnected(); }
+};
+static CompanionModule companion_module;
+#endif
+
+static void registerModules() {
+#if WITH_STATUS_LED
+  AppModules::add(&status_led_module);
+#endif
+  AppModules::add(&sensors_module);
+#ifdef WITH_WIFI_CONSOLE
+  AppModules::add(&wifi_console_module);
+#endif
+#ifdef WITH_COMPANION_BLE
+  AppModules::add(&companion_module);
+#endif
+}
+
 static char command[160];
 
 /* Both consoles funnel through here. WiFi is owned by main.cpp, not HydraNode:
@@ -158,38 +232,22 @@ void setup() {
   #error "need to define filesystem"
 #endif
 
-  sensors.begin();
   WDOG_FEED();
 
   hydra.begin(fs);
   WDOG_FEED();
 
-#ifdef WITH_COMPANION_BLE
-  // The name of slot 0 is the BLE device name. begin() may rewrite the buffer
-  // when the name is "@@MAC", which is why it takes a writable string.
-  companion_ble.begin(BLE_NAME_PREFIX, hydra.repeater().prefs()->node_name, BLE_PIN_CODE);
-  companion_ble.enable();
-  WDOG_FEED();
-#endif
 
-#if WITH_STATUS_LED
-  // The colour shows the radio and the brightness shows the direction. Green
-  // is LoRa. Dim is receive. Bright is transmit. Every slot shares the LED,
-  // because there is one radio.
-  status_led.begin(LED_BLUE, LED_GREEN, LED_STATE_ON);
-#endif
 
   command[0] = 0;
-#ifdef WITH_WIFI_CONSOLE
-  #ifdef WIFI_NTP_SERVER
-    wifi_console.enableNtp(WIFI_NTP_SERVER);
-  #endif
-  wifi_console.begin();      // reads NVS; idle if no SSID has been set
-#endif
+  registerModules();
+  AppModules::setupAll();
   board.onBootComplete();
 }
 
 void loop() {
+  AppModules::loopAll();
+
   int len = strlen(command);
   while (Serial.available() && len < (int)sizeof(command) - 1) {
     char c = Serial.read();
@@ -213,7 +271,6 @@ void loop() {
   }
 
 #ifdef WITH_WIFI_CONSOLE
-  wifi_console.loop();
   if (const char* line = wifi_console.takeLine()) {
     char wreply[160];
     wreply[0] = 0;
@@ -235,14 +292,7 @@ void loop() {
 
   hydra.loop();          // every slot, then the arbiter. The order is important.
 
-#ifdef WITH_COMPANION_BLE
-  companion_facade.loop();
-#endif
 
-#if WITH_STATUS_LED
-  status_led.loop();
-#endif
-  sensors.loop();
   rtc_clock.tick();
 
   // Powersave is a decision of the node. So the queue check must cover every
@@ -253,7 +303,8 @@ void loop() {
 #ifdef WITH_COMPANION_BLE
   if (companion_ble.isConnected()) return;
 #endif
-  if (hydra.repeater().prefs()->powersaving_enabled && !hydra.hasPendingWork()) {
+  if (hydra.repeater().prefs()->powersaving_enabled && !hydra.hasPendingWork()
+      && !AppModules::anyPendingWork()) {
 #if defined(NRF52_PLATFORM)
     board.sleep(0);   // the nRF ignores the seconds. It wakes on LoRa or a timer.
 #else
