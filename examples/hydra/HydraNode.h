@@ -85,6 +85,11 @@ public:
   RepeaterSlot& repeater() { return _slot0; }
   SharedRadioCore& radio() { return _core; }
 
+  // The BLE companion facade reports one contact for each enabled identity, so
+  // it walks the slots. Use radio().portActive(i) to tell an enabled slot from
+  // one that is off. See examples/hydra/HydraCompanion.h.
+  HydraSlot* slot(int i) { return (i >= 0 && i < HYDRA_NUM_SLOTS) ? _slots[i] : NULL; }
+
 private:
   SlotEnableResult startSlot(int idx);
   void stopSlot(int idx);
