@@ -143,6 +143,68 @@ public:
 static CompanionModule companion_module;
 #endif
 
+#ifdef DISPLAY_CLASS
+#include <helpers/ObserverNeighbours.h>
+
+/* The neighbours screen.
+
+   NODE scope: the peer table is the board's view of the air, built from every
+   frame the shared radio hears, so it belongs to the node and not to any one
+   identity. Per-identity pages sit on top of this later.
+
+   Cadence: an e-paper full refresh is around two seconds of blocking SPI, so
+   asking for one per loop would dominate the super-loop. render() returns the
+   interval it wants, and the driver's frame CRC drops the refresh entirely
+   when nothing on screen actually moved -- so a quiet mesh costs one CRC per
+   interval and no panel time at all. */
+class NeighboursModule : public AppModule {
+  ObserverNeighbours _neighbours;
+  NeighboursScreen _screen;
+  char _subtitle[28];
+  unsigned long _next_render;
+  bool _ok;
+
+  void formatRadio(const NodePrefs* p) {
+    /* Integer formatting on purpose. Pulling %f into the link costs a few KB
+       of printf on the nRF52 builds, and this is the only float on screen. */
+    uint32_t khz = (uint32_t)(p->freq * 1000.0f + 0.5f);
+    snprintf(_subtitle, sizeof(_subtitle), "%u.%03u BW%u SF%u CR%u",
+             (unsigned)(khz / 1000), (unsigned)(khz % 1000),
+             (unsigned)(p->bw + 0.5f), (unsigned)p->sf, (unsigned)p->cr);
+  }
+
+public:
+  NeighboursModule()
+    : _neighbours(hydra.radio().observer()),
+      _screen(_neighbours, NULL, NULL), _next_render(0), _ok(false) {
+    _subtitle[0] = 0;
+  }
+
+  AppScope scope() const override { return AppScope::NODE; }
+
+  void onSetup() override {
+    _ok = display.begin();
+    if (!_ok) return;
+    NodePrefs* p = hydra.repeater().prefs();
+    _screen.setTitle(p->node_name);
+    formatRadio(p);
+    _screen.setSubtitle(_subtitle);
+  }
+
+  void onLoop() override {
+    if (!_ok || !display.isOn()) return;
+    unsigned long now = millis();
+    if (now < _next_render) return;
+    // Re-read the config every frame: the CLI can change it at runtime, and a
+    // stale header is exactly the kind of quiet lie a status screen must not tell.
+    formatRadio(hydra.repeater().prefs());
+    _neighbours.refresh(now);
+    _next_render = now + _screen.render(display);
+  }
+};
+static NeighboursModule neighbours_module;
+#endif
+
 static void registerModules() {
 #if WITH_STATUS_LED
   AppModules::add(&status_led_module);
@@ -153,6 +215,9 @@ static void registerModules() {
 #endif
 #ifdef WITH_COMPANION_BLE
   AppModules::add(&companion_module);
+#endif
+#ifdef DISPLAY_CLASS
+  AppModules::add(&neighbours_module);
 #endif
 }
 
