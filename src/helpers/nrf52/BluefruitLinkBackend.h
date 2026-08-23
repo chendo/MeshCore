@@ -33,8 +33,9 @@ public:
 
   /** No connection. The SoftDevice value, so a handle needs no translation. */
   static const uint16_t NO_CONN = BLE_CONN_HANDLE_INVALID;
-  /** Handles that sweepInbound() must walk. */
-  static const uint16_t MAX_CONN_HANDLES = BLE_MAX_CONNECTION;
+  /** Peripheral connections that sweepInbound() must walk. The SoftDevice
+   *  numbers its handles from zero, so a handle IS the slot here. */
+  static const uint8_t SWEEP_SLOTS = BLE_MAX_CONNECTION;
 
   /**
    * @brief  Register the GATT service and the callbacks.
@@ -79,9 +80,19 @@ public:
     BLEConnection* c = Bluefruit.Connection(conn);
     return c != nullptr && (c->secured() || c->bonded());
   }
-  /** True while we hold the PERIPHERAL role on a live connection. Role and
-   *  liveness together, so an outward link of our own never matches. */
-  static bool isPeripheral(uint16_t conn) { return Bluefruit.Periph.connected(conn); }
+  /**
+   * @brief  The nth live connection on which we hold the PERIPHERAL role.
+   *
+   * Role and liveness together, so an outward link of our own never matches.
+   * @returns NO_CONN when that slot holds nothing.
+   */
+  static uint16_t peripheralConnAt(uint8_t slot) {
+    return Bluefruit.Periph.connected(slot) ? (uint16_t)slot : NO_CONN;
+  }
+
+  /** Nothing to deliver: every Bluefruit callback reaches BleLink directly,
+   *  on a task that BleLink is already written for. */
+  static void poll() {}
 
   /* ---- The central side ------------------------------------------------- */
 
@@ -100,8 +111,12 @@ public:
 
   /**
    * @brief  Notify the peer that dialled in, on which the roles are reversed.
+   *
+   * Named by connection, and not "every subscriber": there is one inbound peer,
+   * and a stranger that connects and subscribes must not be handed our frames.
+   *
    * @returns false when the stack took nothing. It reports only a bool, which
    *          is why BleLink keeps every notify to a single packet.
    */
-  static bool notifyInbound(const uint8_t* data, uint16_t len);
+  static bool notifyInbound(uint16_t conn, const uint8_t* data, uint16_t len);
 };
