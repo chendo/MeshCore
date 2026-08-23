@@ -37,8 +37,13 @@ public:
   std::vector<Draw> texts;
   int cur_x = 0, cur_y = 0;
   int frames = 0;
+  /* Character width in DISPLAY UNITS, which is not panel pixels. The M5 scales
+     its 128-unit space onto a 200px panel, so the compact font's 6px cell is
+     3.84 units, not 6. Getting this wrong is what makes a layout that measures
+     fine on paper truncate on the glass. */
+  int char_w = CHAR_W;
 
-  FakeDisplay(int w = 128, int h = 128) : DisplayDriver(w, h) { }
+  FakeDisplay(int w = 128, int h = 128, int cw = CHAR_W) : DisplayDriver(w, h), char_w(cw) { }
 
   bool isOn() override { return true; }
   void turnOn() override { }
@@ -52,7 +57,7 @@ public:
   void fillRect(int x, int y, int w, int h) override { }
   void drawRect(int x, int y, int w, int h) override { }
   void drawXbm(int x, int y, const uint8_t* b, int w, int h) override { }
-  uint16_t getTextWidth(const char* s) override { return (uint16_t)(strlen(s) * CHAR_W); }
+  uint16_t getTextWidth(const char* s) override { return (uint16_t)(strlen(s) * char_w); }
   void endFrame() override { }
 
   bool has(const std::string& s) const {
@@ -283,6 +288,31 @@ TEST_F(ScreenTest, ColumnsAreRightAlignedAndDoNotOverlapTheName) {
   for (auto& t : d.texts) {
     if (t.x == 0) EXPECT_TRUE(t.s == "NAME" || t.s == "1101" || t.s == "N") << t.s;
   }
+}
+
+/* The M5's e-paper as the driver reports it once the compact font is in play:
+   a 128x128 unit space minus the 10 units of EINK_Y_OFFSET that are shifted off
+   the bottom, and 6 units of pitch. This is the geometry the layout was drawn
+   for, so it is worth pinning: a regression here silently costs peer rows. */
+TEST(CompactGeometry, TheM5FitsAUsableNumberOfPeers) {
+  Obs o;
+  g_fake_millis = 10000;
+  for (uint8_t i = 0; i < 20; i++) {
+    o.rx(floodWithPath({{(uint8_t)(0x40 + i), 0x01}}, 2), (int8_t)(40 - i));
+  }
+  ObserverNeighbours n(o.obs);
+  n.refresh(g_fake_millis);
+  ASSERT_EQ(20, n.numNeighbours());
+
+  // 6 panel px / 1.5625 scale = 3.84 units per character, rounded to 4.
+  FakeDisplay m5(128, 118, 4);
+  NeighboursScreen s(n, "VIC-NorthcoteNW-EDG-01", "915.075 BW125 SF9 CR5", 6, 5000, 0);
+  EXPECT_EQ(16, s.rowCapacity(m5)) << "the compact font must buy back peer rows";
+
+  s.render(m5);
+  // A full node name has to survive at this density; that was the whole point.
+  EXPECT_TRUE(m5.has("VIC-NorthcoteNW-EDG-01"));
+  EXPECT_TRUE(m5.has("+4")) << "the truncation badge, 20 neighbours into 16 rows";
 }
 
 int main(int argc, char** argv) {

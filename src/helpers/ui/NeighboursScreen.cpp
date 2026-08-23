@@ -52,7 +52,7 @@ int NeighboursScreen::render(DisplayDriver& display) {
   const int W = display.width();
 
   display.startFrame();
-  display.setTextSize(1);
+  display.setTextSize(_text_size);
   display.setColor(UIColor::primary_txt);
 
   const int cap = rowCapacity(display);
