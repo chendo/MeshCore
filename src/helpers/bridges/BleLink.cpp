@@ -239,6 +239,22 @@ void BleLink::loop() {
   }
   drainInbound();
 
+  /* A dial that never completed. NimBLE can leave an async connect outstanding
+     for ever, and while it is outstanding ble_gap_disc() returns BLE_HS_EBUSY:
+     one unanswered dial makes the node permanently deaf, because it can no
+     longer scan and so never sees a beacon again. Bounding it here, rather
+     than in one backend, keeps the recovery in the state machine that owns the
+     slot. cancelDial() frees the radio; the backend that does not need it says
+     so and returns false. */
+  for (uint8_t i = 0; i < MAX_LINKS; i++) {
+    Link& l = _links[i];
+    if (l.state != CONNECTING) continue;
+    if ((long)(now - l.connect_deadline_ms) < 0) continue;
+    Backend::cancelDial();
+    l.state = IDLE;
+    _topology_changed = true;      // the caller must arm the scanner again
+  }
+
   for (uint8_t i = 0; i < MAX_LINKS; i++) {
     Link& l = _links[i];
     if (l.state != IDLE) continue;
@@ -250,6 +266,7 @@ void BleLink::loop() {
        must thus tolerate an attempt that simply never completes. */
     l.state = CONNECTING;
     l.next_try_ms = now + l.backoff_ms;
+    l.connect_deadline_ms = now + CONNECT_LIMIT_MS;
     if (l.backoff_ms < BACKOFF_MAX_MS) l.backoff_ms = (uint16_t)(l.backoff_ms * 2 > BACKOFF_MAX_MS
                                                                 ? BACKOFF_MAX_MS : l.backoff_ms * 2);
     /* Whether or not this succeeds, the SoftDevice has now stopped the scan.

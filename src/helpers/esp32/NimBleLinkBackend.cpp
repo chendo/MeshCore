@@ -92,17 +92,33 @@ void NimBleLinkBackend::poll() {
   }
 }
 
+/* The client with a connect outstanding, or nullptr. Held so cancelDial() can
+   reach it: NimBLE cancels at the stack level, but the call hangs off a client
+   object. Declared here because the callbacks below clear it. */
+static NimBLEClient* s_dialing = nullptr;
+
 /* ---- Callbacks ---------------------------------------------------------- */
 
 class LinkClientCallbacks : public NimBLEClientCallbacks {
-  void onConnect(NimBLEClient* c) override { pushEvent(c->getConnHandle(), false, 0); }
+  void onConnect(NimBLEClient* c) override { s_dialing = nullptr; pushEvent(c->getConnHandle(), false, 0); }
   void onDisconnect(NimBLEClient* c, int reason) override {
+    s_dialing = nullptr;
     pushEvent(c->getConnHandle(), true, (uint8_t)reason);
   }
   /* A dial that never completed. BleLink holds the slot in CONNECTING until
      something reports a handle, so say nothing here: the handle we would
      report is NO_CONN, which matches no link and could match the wrong one. */
-  void onConnectFail(NimBLEClient* c, int reason) override { (void)c; (void)reason; }
+  /* A dial that failed. BleLink holds the slot in CONNECTING until something
+     reports a handle, and the handle here would be NO_CONN, which matches no
+     link and could match the wrong one -- so still say nothing to BleLink; its
+     CONNECT_LIMIT_MS timeout returns the slot. What this MUST do is forget the
+     attempt, so a later cancelDial() does not act on a stale client. */
+  /* A dial that failed. BleLink holds the slot in CONNECTING until something
+     reports a handle, and the handle here would be NO_CONN, which matches no
+     link and could match the wrong one -- so still say nothing to BleLink; its
+     CONNECT_LIMIT_MS timeout returns the slot. What this MUST do is forget the
+     attempt, so a later cancelDial() does not act on a stale client. */
+  void onConnectFail(NimBLEClient* c, int reason) override { (void)c; (void)reason; s_dialing = nullptr; }
 };
 static LinkClientCallbacks s_client_cbs;
 
@@ -264,11 +280,45 @@ bool NimBleLinkBackend::dial(const BleAddr& addr) {
     if (s_link_client[i] == c) s_link_chr[i] = nullptr;
   }
 
-  NimBLEAddress peer(addr.addr, addr.addr_type);
+  /* BYTE ORDER. NimBLE's address API is asymmetric and it is a trap:
+       NimBLEAddress::getVal()            returns val as the host holds it, LSB first
+       NimBLEAddress(const uint8_t*, type) REVERSE-copies what you give it
+     Everything that fills a BleAddr on this backend -- onAdvReport() through
+     getVal(), peerAddr() through ble_gap_conn_desc::peer_ota_addr.val -- stores
+     the host order. Handing that straight back to the array constructor
+     therefore dials the address backwards, and nothing answers: the connect
+     ends in BLE_HS_ETIMEOUT and the link never comes up. The ble_addr_t
+     constructor copies instead of reversing, so it is the one to use.
+     This is why the nRF52 pair worked and the first ESP32-to-nRF52 link did
+     not: Bluefruit has no such asymmetry, so only this backend can get it
+     wrong. */
+  ble_addr_t raw;
+  raw.type = addr.addr_type;
+  memcpy(raw.val, addr.addr, sizeof(raw.val));
+  NimBLEAddress peer(raw);
+
   /* ASYNCHRONOUS. A blocking connect would stall the main loop for as long as
      the peer takes to answer, which stalls the mesh as well. The result arrives
      as a queued event and reaches BleLink from poll(). */
-  return c->connect(peer, true, true, true);
+  s_dialing = c;
+  const bool started = c->connect(peer, true, true, true);
+  if (!started) s_dialing = nullptr;
+  return started;
+}
+
+bool NimBleLinkBackend::cancelDial() {
+  NimBLEClient* c = s_dialing;
+  s_dialing = nullptr;
+  /* The cancel is a stack-level operation (ble_gap_conn_cancel); the client is
+     only the vehicle that exposes it. So any client will do, and it MUST be
+     tried even when we no longer believe a dial is outstanding: NimBLE can
+     report a connect as failed and still leave ble_gap_master.op set, and that
+     alone keeps every ble_gap_disc() returning BLE_HS_EBUSY. */
+  if (c == nullptr) c = NimBLEDevice::getDisconnectedClient();
+  if (c == nullptr) return false;
+  /* ble_gap_conn_cancel() under the hood. Returns true for BLE_HS_EALREADY
+     too, which is the case where the attempt had just ended by itself. */
+  return c->cancelConnect();
 }
 
 bool NimBleLinkBackend::discoverLink(uint8_t idx, uint16_t conn) {
