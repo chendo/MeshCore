@@ -106,6 +106,38 @@ void UITask::refreshContext() {
   _ctx.connected = hasConnection();
   _ctx.buzzer_muted = isBuzzerQuiet();
   _bt_status = _ctx.connected ? "linked" : (_ctx.bt_enabled ? "on" : "off");
+
+  /* Home-screen figures, gathered here so the pages stay free of mesh types.
+     _neighbours was refreshed by loop() just before this. */
+  _ctx.uptime_ms = millis();
+  _ctx.noise = radio_driver.getNoiseFloor();
+  _ctx.peers = rfObserver().numPeers();
+
+  int direct = 0;
+  _ctx.best_snr4 = INT32_MIN;
+  _ctx.best_name = NULL;
+  for (int i = 0; i < _neighbours.numNeighbours(); i++) {
+    NeighbourRow n;
+    if (!_neighbours.getNeighbour(i, n)) break;
+    if (n.hops == 1) direct++;
+    if (n.has_snr && n.snr4 > _ctx.best_snr4) {
+      _ctx.best_snr4 = n.snr4;
+      /* Only a named peer is worth printing here. An unnamed one would show a
+         path hash, which tells you nothing you cannot get from the neighbours
+         page, and would crowd out the number that matters. */
+      _ctx.best_name = (n.name != NULL && n.name[0]) ? n.name : "(unnamed)";
+    }
+  }
+  _ctx.direct = direct;
+
+  /* Airtime as a share of uptime. getTotalAirTime() is Dispatcher's, counted
+     since boot, so this is a lifetime duty cycle rather than a recent one --
+     it moves very slowly once a node has been up for days. */
+  uint32_t up_s = _ctx.uptime_ms / 1000;
+  uint32_t air_ms = the_mesh.getTotalAirTime();
+  /* ms-of-air per second IS tenths of a percent: 21000ms over 1000s = 21 =
+     2.1%. Dividing again gave 0.0% for every realistic duty cycle. */
+  _ctx.air_pct_x10 = up_s ? (uint16_t)(air_ms / up_s) : 0;
   _ctx.node_name = _node_prefs ? _node_prefs->node_name : "";
 #if ENV_INCLUDE_GPS == 1
   _ctx.gps_on = _node_prefs && _node_prefs->gps_enabled;

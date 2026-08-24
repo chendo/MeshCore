@@ -4,6 +4,7 @@
 #include <helpers/ui/NeighboursScreen.h>
 #include <helpers/PowerMonitor.h>
 #include "RecentMessages.h"
+#include <limits.h>
 #include "../NodePrefs.h"
 
 /* Shared helpers. Dividers are drawn as TEXT everywhere in this tree: in
@@ -59,6 +60,17 @@ struct UIContext {
   bool            gps_on;
   bool            gps_present;
   const char*     node_name;
+
+  /* Everything the home screen shows, resolved by the task. Pages take values
+     rather than reaching for the_mesh or radio_driver themselves, which is what
+     keeps this header free of mesh types and testable on the host. */
+  int             peers;          // everything the observer has seen
+  int             direct;         // of those, one hop away
+  int32_t         best_snr4;      // quarter-dB, the closest/strongest link
+  const char*     best_name;      // may be NULL or empty
+  int             noise;          // dBm
+  uint16_t        air_pct_x10;    // time on air since boot, tenths of a percent
+  uint32_t        uptime_ms;
 };
 
 // ---------------------------------------------------------------- home
@@ -66,35 +78,111 @@ struct UIContext {
 class HomePage : public UIPage {
   UIContext& _c;
   int _pitch;
+
+  static void fmtUptime(char* out, size_t n, uint32_t ms) {
+    uint32_t sec = ms / 1000, d = sec / 86400;
+    sec %= 86400;
+    if (d) snprintf(out, n, "%ud%02u:%02u", (unsigned)d,
+                    (unsigned)(sec / 3600), (unsigned)((sec / 60) % 60));
+    else   snprintf(out, n, "%02u:%02u:%02u", (unsigned)(sec / 3600),
+                    (unsigned)((sec / 60) % 60), (unsigned)(sec % 60));
+  }
+
+  /* A text bar, not a filled rectangle. fillRect and setCursor do not share an
+     origin on the e-paper driver -- setCursor adds EINK_Y_OFFSET and the font
+     baseline correction, fillRect adds neither -- so a bar drawn as a rect next
+     to its own label lands in a different place. Built from characters it
+     cannot drift, and it works on every driver. */
+  void batteryBar(DisplayDriver& d, int y, int pct) {
+    char buf[40];
+    int cell = d.getTextWidth("#");
+    if (cell <= 0) return;
+    int tail = d.getTextWidth(" 100%");
+    int cells = (d.width() - tail) / cell - 2;          // minus the two brackets
+    if (cells < 4) cells = 4;
+    if (cells > (int)sizeof(buf) - 8) cells = (int)sizeof(buf) - 8;
+
+    int filled = pct < 0 ? 0 : (pct * cells + 50) / 100;
+    int j = 0;
+    buf[j++] = '[';
+    for (int i = 0; i < cells; i++) buf[j++] = (i < filled) ? '#' : '-';
+    buf[j++] = ']';
+    buf[j] = 0;
+    d.drawTextLeftAlign(0, y, buf);
+
+    if (pct >= 0) snprintf(buf, sizeof(buf), "%d%%", pct);
+    else          snprintf(buf, sizeof(buf), "n/a");
+    d.drawTextRightAlign(d.width(), y, buf);
+  }
+
 public:
   HomePage(UIContext& c, int pitch) : _c(c), _pitch(pitch) { }
   const char* tapLabel() const override { return _c.buzzer_muted ? "unmute" : "mute"; }
 
   int renderBody(DisplayDriver& d, int avail_h) override {
-    char l[40], r[24];
+    char l[48], r[32];
     int y = 2;
     d.setColor(UIColor::primary_txt);
+
     d.translateUTF8ToBlocks(l, _c.node_name ? _c.node_name : "(unnamed)", sizeof(l));
     d.drawTextEllipsized(0, y, d.width(), l);
     y += _pitch;
-    uiRule(d, y); y += _pitch;
-
-    snprintf(r, sizeof(r), "%d", _c.msg_count);
-    uiRow(d, y, "msgs", r); y += _pitch;
-
-    uiRow(d, y, "bt", _c.bt_enabled ? (_c.connected ? "linked" : "on") : "off");
-    y += _pitch;
 
     int pct = _c.power ? _c.power->percent() : -1;
-    if (pct < 0) snprintf(r, sizeof(r), "n/a");
-    else if (_c.power->isCharging()) snprintf(r, sizeof(r), "%d%% chg", pct);
-    else snprintf(r, sizeof(r), "%d%%", pct);
-    uiRow(d, y, "batt", r); y += _pitch;
+    batteryBar(d, y, pct);
+    y += _pitch;
 
-    if (y + _pitch <= avail_h) {
-      uiRow(d, y, "buzzer", _c.buzzer_muted ? "muted" : "on");
-      y += _pitch;
+    /* Volts on the left, what the pack is doing on the right. "chg" and a
+       runtime are mutually exclusive: a charging pack has no meaningful time
+       to empty, and PowerMonitor withholds one until a trend exists. */
+    if (_c.power && _c.power->hasReading()) {
+      uint16_t mv = _c.power->millivolts();
+      snprintf(l, sizeof(l), "%u.%02uV", (unsigned)(mv / 1000), (unsigned)((mv % 1000) / 10));
+      if (_c.power->isCharging()) {
+        snprintf(r, sizeof(r), "charging");
+      } else {
+        int32_t mins = _c.power->minutesRemaining();
+        if (mins < 0)          snprintf(r, sizeof(r), "est..");
+        else if (mins < 90)    snprintf(r, sizeof(r), "~%dm left", (int)mins);
+        else                   snprintf(r, sizeof(r), "~%dh left", (int)(mins / 60));
+      }
+      uiRow(d, y, l, r);
+    } else {
+      uiRow(d, y, "batt", "no reading");
     }
+    y += _pitch;
+
+    uiRule(d, y); y += _pitch;
+
+    snprintf(l, sizeof(l), "PEERS %d", _c.peers);
+    snprintf(r, sizeof(r), "DIRECT %d", _c.direct);
+    uiRow(d, y, l, r); y += _pitch;
+
+    snprintf(l, sizeof(l), "MSGS %d", _c.msg_count);
+    snprintf(r, sizeof(r), "NOISE %d", _c.noise);
+    uiRow(d, y, l, r); y += _pitch;
+
+    snprintf(l, sizeof(l), "AIR %u.%u%%", (unsigned)(_c.air_pct_x10 / 10),
+             (unsigned)(_c.air_pct_x10 % 10));
+    fmtUptime(r, sizeof(r), _c.uptime_ms);
+    uiRow(d, y, l, r); y += _pitch;
+
+    /* The strongest link, named. A bare number says the radio works; a name
+       says which neighbour is carrying you. */
+    if (_c.best_name != NULL && _c.best_snr4 != INT32_MIN) {
+      int32_t t = (_c.best_snr4 * 10) / 4;
+      char sign = t < 0 ? '-' : '+';
+      if (t < 0) t = -t;
+      snprintf(l, sizeof(l), "BEST %c%d.%d", sign, (int)(t / 10), (int)(t % 10));
+      d.drawTextLeftAlign(0, y, l);
+      d.translateUTF8ToBlocks(r, _c.best_name, sizeof(r));
+      int lw = d.getTextWidth(l) + d.getTextWidth(" ");
+      d.drawTextEllipsized(lw, y, d.width() - lw, r);
+    } else {
+      uiRow(d, y, "BEST", "-");
+    }
+    y += _pitch;
+
     uiActions(d, y, avail_h, _pitch, tapLabel(), holdLabel());
     return 5000;
   }
