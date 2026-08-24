@@ -109,6 +109,18 @@ private:
   int  _thresh_want = 0;
 };
 
+/* Optional. Told when the REAL radio transmits or receives a frame -- once per
+   frame on the air, not once per port, so a multi-identity node does not report
+   a single reception once for every identity it runs. Deliberately tiny and
+   free of any LED or Arduino type, so SharedRadio goes on knowing nothing
+   about what is listening to it. */
+class RadioActivitySink {
+public:
+  virtual ~RadioActivitySink() { }
+  virtual void onRadioTx() { }
+  virtual void onRadioRx() { }
+};
+
 // This interface is optional. It sets the TX power of the real radio.
 // RadioLibWrapper implements setTxPower. The interface stays very small, so
 // that SharedRadio does not depend on the concrete wrapper type.
@@ -243,6 +255,7 @@ public:
       _tx_owner(nullptr), _pwr_ctl(nullptr), _applied_pwr(0x7F) {}
 
   void setTxPowerControl(TxPowerControl* ctl) { _pwr_ctl = ctl; }
+  void setActivitySink(RadioActivitySink* sink) { _activity = sink; }
 
   // You may register a port as inactive, and you may switch a port on and off
   // while the node runs. Therefore you can start or silence an identity
@@ -532,6 +545,7 @@ private:
 
   RadioPort* _tx_owner;
   TxPowerControl* _pwr_ctl;
+  RadioActivitySink* _activity = nullptr;
   int8_t   _applied_pwr;     // the last power applied to the real radio. It prevents unnecessary writes.
   bool     _real_begun = false;   // the begin() of the real driver must run exactly one time
 
