@@ -25,6 +25,7 @@ struct NeighbourRow {
   uint8_t hash_len;
   int32_t snr4;          // mean SNR in quarter-dB
   bool has_snr;
+  uint8_t hops;          // 1 = we hear its radio; 0 = not known
   uint32_t rx;           // frames received from it directly
   uint32_t fwd;          // times it was seen forwarding one of OUR packets
 };
