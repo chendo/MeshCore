@@ -227,6 +227,55 @@ public:
 static NeighboursModule neighbours_module;
 #endif
 
+#ifdef WITH_ACTIVITY_LED
+#include <helpers/ActivityLed.h>
+
+/* Radio traffic on the two LEDs.
+     BLUE  dark when idle, held dim while a BLE connection is up, and pulsed
+           bright on every transmission.
+     RED   lit when idle, blanked briefly on every reception.
+
+   NODE scope: it reports the shared radio, which belongs to the board rather
+   than to any one identity, and it must not fire once per slot.
+
+   The M1 variant hands P_LORA_TX_LED the same pin as LED_BLUE and its board
+   class drives it directly around each transmit, forcing the pin LOW when the
+   transmit ends. That would erase the BLE dim a few times a second, so the env
+   unflags P_LORA_TX_LED and the blue LED is driven from here alone. */
+class ActivityLedModule : public AppModule, public RadioActivitySink {
+  ActivityLed _led;
+public:
+  AppScope scope() const override { return AppScope::NODE; }
+
+  void onSetup() override {
+    _led.begin(ACTIVITY_LED_TX_PIN, ACTIVITY_LED_RX_PIN, ACTIVITY_LED_ON_HIGH);
+    hydra.radio().setActivitySink(this);
+  }
+
+  // Called from the radio path: stamp a deadline and return, never any I/O.
+  void onRadioTx() override { _led.notifyTx(millis()); }
+  void onRadioRx() override { _led.notifyRx(millis()); }
+
+  void onLoop() override {
+    /* What counts as "a BLE connection" differs per build, so it is resolved
+       here rather than inside the LED driver: a companion build means a phone
+       is attached, a bridge build means a peer link is carrying our traffic. */
+  #if defined(WITH_COMPANION_BLE)
+    _led.setBleConnected(companion_ble.isConnected());
+  #elif defined(WITH_BRIDGE) && defined(ACTIVITY_LED_BRIDGE_LINKS)
+    /* getBridge() hands back the AbstractBridge base, which has no link count.
+       The cast is safe only where the build really selected a BLE bridge, and
+       BRIDGE_CLASS cannot be compared in the preprocessor, so the env states it
+       outright rather than this file guessing from the class name. */
+    _led.setBleConnected(
+        ((BRIDGE_CLASS*)hydra.repeater().mesh().getBridge())->numLinks() > 0);
+  #endif
+    _led.loop(millis());
+  }
+};
+static ActivityLedModule activity_led_module;
+#endif
+
 static void registerModules() {
 #if WITH_STATUS_LED
   AppModules::add(&status_led_module);
@@ -240,6 +289,9 @@ static void registerModules() {
 #endif
 #ifdef DISPLAY_CLASS
   AppModules::add(&neighbours_module);
+#endif
+#ifdef WITH_ACTIVITY_LED
+  AppModules::add(&activity_led_module);
 #endif
 }
 
