@@ -5,7 +5,9 @@
 /* Pitch and text size. 0 selects GxEPDDisplay's compact 5x7 font, which turns
    the 200x200 panel from 20 columns by 9 lines into 33 by 25 -- the difference
    between a headline and a table. See patches/gxepd-compact-text-size. */
-#define UI_PITCH      6
+/* 8 units = 12.5px, matching Spleen's 12px line. At the built-in 5x7 (8px)
+   this would be 6. Set with the font, or rows overlap or waste half the panel. */
+#define UI_PITCH      8
 #define UI_TEXT_SIZE  0
 
 #ifndef AUTO_OFF_MILLIS

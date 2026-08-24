@@ -12,6 +12,16 @@
 #include <Fonts/FreeSans9pt7b.h>
 #include <Fonts/FreeSansBold12pt7b.h>
 #include <Fonts/FreeSans18pt7b.h>
+/* Text size 0's font is a build-time choice, via the same *_HEADER idiom the
+   radios and bridges use. Unset, it is Adafruit's built-in 5x7 (8px lines).
+   Set, it is whatever the variant names -- e.g.
+     -D COMPACT_FONT=Spleen6x12
+     -D COMPACT_FONT_HEADER='"helpers/ui/fonts/Spleen6x12.h"'
+   GFX ships nothing between a 7px line and 18px, and the fonts wired in here
+   start at 22px, so anything in between has to be supplied. */
+#ifdef COMPACT_FONT_HEADER
+  #include COMPACT_FONT_HEADER
+#endif
 #include <CRC32.h>
 
 #include "DisplayDriver.h"
