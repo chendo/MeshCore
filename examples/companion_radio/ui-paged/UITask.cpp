@@ -23,8 +23,11 @@ UITask::UITask(mesh::MainBoard* board, MultiSerialInterface* serial)
     _messages(_ctx, UI_PITCH),
     _neigh(_neighbours, NULL, NULL, UI_PITCH, 5000, UI_TEXT_SIZE),
     _radio(_ctx, UI_PITCH),
-    _advert("ADVERT", "x2 to send", UI_PITCH),
-    _bluetooth("BLUETOOTH", "x2 to toggle", UI_PITCH, &_bt_status),
+    /* Same configuration as the button that works: plain INPUT, active low,
+       trusting the board's external pull-up. */
+    _btn2(UI_BUTTON2_PIN, 700, true, false),
+    _advert("ADVERT", "B2 or x2: send", UI_PITCH),
+    _bluetooth("BLUETOOTH", "B2 hold or x2", UI_PITCH, &_bt_status),
     _bt_status("?"),
 #if ENV_INCLUDE_GPS == 1
     _gps(_ctx, UI_PITCH, &_screen),
@@ -74,6 +77,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _idx_shutdown = _screen.numPages(); _screen.addPage(&_shutdown);
 
   user_btn.begin();      // the variant's, configured the way this board needs
+  _btn2.begin();
 
   /* main.cpp has already called display.begin() and passes NULL when it
      failed, so this must not begin() again. It must still turnOn(): begin()
@@ -197,32 +201,36 @@ static void logBtn(const char* which, int pin, int ev) {
 #endif
 
 void UITask::pollButtons() {
-  int ev = user_btn.check();
+  /* Poll BOTH every pass. MomentaryButton's multi-click window only advances
+     while check() is being called, so returning early on one button's event
+     stalls the other's detection. */
+  int ev1 = user_btn.check();
+  int ev2 = _btn2.check();
 #ifdef UI_BUTTON_DEBUG
-  if (ev != BUTTON_EVENT_NONE) Serial.printf("BTN ev=%d\n", ev);
+  if (ev1) Serial.printf("BTN b1(%d) ev=%d\n", PIN_USER_BTN, ev1);
+  if (ev2) Serial.printf("BTN b2(%d) ev=%d\n", UI_BUTTON2_PIN, ev2);
 #endif
-  if (ev == BUTTON_EVENT_NONE) return;
+  if (ev1 == BUTTON_EVENT_NONE && ev2 == BUTTON_EVENT_NONE) return;
 
-  switch (ev) {
-    case BUTTON_EVENT_CLICK:
-      /* Leaving the power-off page disarms it: a walk round the pages must not
-         come back to a screen that is one press from shutting down. */
-      _shutdown.disarm();
-      _screen.handleInput(KEY_NEXT);
-      break;
-    case BUTTON_EVENT_DOUBLE_CLICK:
-      pageAction();
-      break;
-    case BUTTON_EVENT_TRIPLE_CLICK:
-      _shutdown.disarm();
-      _screen.handleInput(KEY_PREV);
-      break;
-    case BUTTON_EVENT_LONG_PRESS:
-      _shutdown.disarm();
-      _screen.handleInput(KEY_HOME);
-      break;
-    default:
-      return;
+  char key = 0;
+  switch (ev1) {
+    case BUTTON_EVENT_CLICK:        key = KEY_NEXT; break;
+    case BUTTON_EVENT_DOUBLE_CLICK: key = KEY_PREV; break;
+    case BUTTON_EVENT_LONG_PRESS:   key = KEY_HOME; break;
+    default: break;
+  }
+  if (key != 0) {
+    /* Leaving the power-off page disarms it: a walk round the pages must not
+       come back to a screen one press from shutting down. */
+    _shutdown.disarm();
+    _screen.handleInput(key);
+  } else {
+    switch (ev2) {
+      case BUTTON_EVENT_CLICK:        sendAdvert(); break;
+      case BUTTON_EVENT_LONG_PRESS:   toggleBluetooth(); break;
+      case BUTTON_EVENT_DOUBLE_CLICK: pageAction(); break;
+      default: break;
+    }
   }
   _next_render = 0;
 #if AUTO_OFF_MILLIS > 0
