@@ -18,17 +18,22 @@
  * on the concrete type is begin() and loop(); the rest arrives through
  * AbstractUITask.
  *
- * Buttons (two on this board):
- *   B1 tap      next page
- *   B1 double   previous page
- *   B1 hold     first page
- *   B2 tap      send a flood advert      -- from ANY page
- *   B2 hold     toggle Bluetooth         -- from ANY page
- *   B2 double   the current page's action (mute, GPS, arm power-off)
+ * ONE BUTTON. Measured, not assumed: across full press tests PIN_BUTTON2
+ * produced no edge as either INPUT or INPUT_PULLUP, and PIN_GPS_SWITCH is the
+ * GPS module's hardware kill line rather than a spare input -- upstream only
+ * reads it to report "gps off(hw)". So every action lives on a page:
  *
- * B2's two global gestures are why the page action is a double-tap: with the
- * tap and the hold already spoken for, there was no other gesture left, and the
- * pages that need one would otherwise have been unreachable.
+ *   tap        next page
+ *   double     do what THIS page says it does
+ *   triple     previous page
+ *   hold (>1s) back to the first page
+ *
+ * Advert, Bluetooth and power-off are therefore pages, each labelled with what
+ * a double-tap will do. ui-new reaches the same arrangement on this board for
+ * the same reason.
+ *
+ * The hold threshold is the variant's 1000ms, not ours: B1 IS the variant's own
+ * user_btn object rather than a second one on the same pin.
  */
 class UITask : public AbstractUITask {
   DisplayDriver*  _display;
@@ -45,13 +50,19 @@ class UITask : public AbstractUITask {
   MessagesPage     _messages;
   NeighboursScreen _neigh;
   RadioPage        _radio;
+  ActionPage       _advert;
+  ActionPage       _bluetooth;
+  const char*      _bt_status;
 #if ENV_INCLUDE_GPS == 1
   GpsPage          _gps;
 #endif
   ShutdownPage     _shutdown;
 
-  MomentaryButton  _btn1;
-  MomentaryButton  _btn2;
+  /* B1 is the variant's OWN user_btn (target.cpp), not a second object on the
+     same pin. The variant knows how this board wires it -- plain INPUT, relying
+     on an external pull-up. An earlier version built its own with INPUT_PULLUP
+     and the button never once read low, while stock firmware on the same pin
+     works. Do not duplicate a button the variant already declares. */
 #ifdef PIN_BUZZER
   // A member, not a global: every ui-* variant in this tree owns its own.
   genericBuzzer    buzzer;
@@ -62,7 +73,7 @@ class UITask : public AbstractUITask {
   uint32_t  _auto_off;
   char      _radio_sub[28];
   bool      _ok;
-  int       _idx_home, _idx_gps, _idx_shutdown;
+  int       _idx_home, _idx_gps, _idx_shutdown, _idx_advert, _idx_bt;
 
   void refreshContext();
   void pollButtons();

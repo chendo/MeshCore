@@ -77,7 +77,7 @@ public:
     }
     if (y + _pitch <= avail_h) {
       d.setColor(UIColor::secondary_txt);
-      d.drawTextLeftAlign(0, y, "B2x2: mute");
+      d.drawTextLeftAlign(0, y, "x2: mute");
       d.setColor(UIColor::primary_txt);
     }
     return 5000;
@@ -170,6 +170,40 @@ public:
   }
 };
 
+/* ACTION PAGES.
+   The M1 has exactly one usable button: pin 42. PIN_BUTTON2 produced no edge in
+   a full press test as either INPUT or INPUT_PULLUP, and PIN_GPS_SWITCH is a
+   hardware kill line for the GPS module, not a spare input -- upstream only
+   reads it to report "gps off(hw)".
+   So a global action button does not exist, and actions live on pages instead,
+   each one saying what it does. That is how ui-new works on this board too. */
+class ActionPage : public UIPage {
+  const char* _title;
+  const char* _hint;
+  int _pitch;
+  const char** _status;      // may be NULL; a live value shown under the title
+public:
+  ActionPage(const char* title, const char* hint, int pitch, const char** status = NULL)
+    : _title(title), _hint(hint), _pitch(pitch), _status(status) { }
+
+  int renderBody(DisplayDriver& d, int avail_h) override {
+    int y = 2;
+    d.setColor(UIColor::primary_txt);
+    d.drawTextLeftAlign(0, y, _title);
+    y += _pitch;
+    uiRule(d, y); y += _pitch;
+    if (_status != NULL && *_status != NULL) {
+      d.drawTextCentered(d.width() / 2, y + _pitch, *_status);
+    }
+    if (y + _pitch * 3 <= avail_h) {
+      d.setColor(UIColor::secondary_txt);
+      d.drawTextCentered(d.width() / 2, y + _pitch * 3, _hint);
+      d.setColor(UIColor::primary_txt);
+    }
+    return 5000;
+  }
+};
+
 // ----------------------------------------------------------------- gps
 
 #if ENV_INCLUDE_GPS == 1
@@ -190,13 +224,24 @@ public:
     int y = 2;
     d.setColor(UIColor::primary_txt);
     d.drawTextLeftAlign(0, y, "GPS");
-    d.drawTextRightAlign(d.width(), y, _c.gps_on ? "on" : "off");
+    d.drawTextRightAlign(d.width(), y, _c.gps_on ? "sw on" : "sw off");
     y += _pitch;
     uiRule(d, y); y += _pitch;
 
-    if (!_c.gps_on || _loc == NULL) {
+    /* Two things can turn the GPS off and they are worth telling apart: the
+       slide switch cuts the module's power, the pref only stops us asking it.
+       A page that showed one "off" would send you hunting for the wrong one. */
+    bool hw_on = digitalRead(PIN_GPS_SWITCH);
+    if (!hw_on) {
+      d.setColor(UIColor::warning_txt);
+      d.drawTextLeftAlign(0, y, "switch: OFF");
+      d.setColor(UIColor::primary_txt);
+      y += _pitch;
+    }
+    if (!_c.gps_on || !hw_on || _loc == NULL) {
       d.setColor(UIColor::secondary_txt);
-      d.drawTextLeftAlign(0, y, _c.gps_on ? "no receiver" : "powered down");
+      d.drawTextLeftAlign(0, y, !hw_on ? "hardware off"
+                              : (_c.gps_on ? "no receiver" : "software off"));
       d.setColor(UIColor::primary_txt);
       y += _pitch;
     } else {
@@ -215,7 +260,7 @@ public:
     }
     if (y + _pitch <= avail_h) {
       d.setColor(UIColor::secondary_txt);
-      d.drawTextLeftAlign(0, y, "B2x2: toggle");
+      d.drawTextLeftAlign(0, y, "x2: toggle sw");
       d.setColor(UIColor::primary_txt);
     }
     return _c.gps_on ? 5000 : 30000;
@@ -256,12 +301,12 @@ public:
       d.setColor(UIColor::warning_txt);
       d.drawTextCentered(d.width() / 2, y, "ARMED");
       y += _pitch;
-      d.drawTextCentered(d.width() / 2, y, "B2x2 to confirm");
+      d.drawTextCentered(d.width() / 2, y, "x2 to confirm");
       d.setColor(UIColor::primary_txt);
       return 500;    // redraw often so the window visibly closes
     }
     d.setColor(UIColor::secondary_txt);
-    d.drawTextCentered(d.width() / 2, y, "B2x2 to arm");
+    d.drawTextCentered(d.width() / 2, y, "x2 to arm");
     d.setColor(UIColor::primary_txt);
     return 30000;
   }
