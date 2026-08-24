@@ -2246,19 +2246,24 @@ void MyMesh::loop() {
 #endif
 }
 
-bool MyMesh::advert() {
+bool MyMesh::advert(bool flood) {
   mesh::Packet* pkt;
   if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) {
     pkt = createSelfAdvert(_prefs.node_name);
   } else {
     pkt = createSelfAdvert(_prefs.node_name, sensors.node_lat, sensors.node_lon);
   }
-  if (pkt) {
-    sendZeroHop(pkt);
-    return true;
+  if (pkt == NULL) return false;
+
+  if (flood) {
+    // The same route CMD_SEND_SELF_ADVERT takes when its flood flag is set.
+    TransportKey default_scope;
+    memcpy(&default_scope.key, _prefs.default_scope_key, sizeof(default_scope.key));
+    sendFloodScoped(default_scope, pkt, 0);
   } else {
-    return false;
+    sendZeroHop(pkt);
   }
+  return true;
 }
 
 // To check if there is pending work

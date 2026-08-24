@@ -22,6 +22,25 @@ inline void uiRule(DisplayDriver& d, int y) {
   d.setColor(UIColor::primary_txt);
 }
 
+/* The action footer. Drawn by each page at the bottom of its own body, in the
+   secondary colour, so what the buttons do is always on screen rather than
+   remembered. */
+inline void uiActions(DisplayDriver& d, int y, int avail_h, int pitch,
+                      const char* tap, const char* hold) {
+  char buf[40];
+  d.setColor(UIColor::secondary_txt);
+  if (tap != NULL && y + pitch <= avail_h) {
+    snprintf(buf, sizeof(buf), "tap: %s", tap);
+    d.drawTextLeftAlign(0, y, buf);
+    y += pitch;
+  }
+  if (hold != NULL && y + pitch <= avail_h) {
+    snprintf(buf, sizeof(buf), "hold: %s", hold);
+    d.drawTextLeftAlign(0, y, buf);
+  }
+  d.setColor(UIColor::primary_txt);
+}
+
 inline void uiRow(DisplayDriver& d, int y, const char* l, const char* r) {
   if (l) d.drawTextLeftAlign(0, y, l);
   if (r) d.drawTextRightAlign(d.width(), y, r);
@@ -49,6 +68,7 @@ class HomePage : public UIPage {
   int _pitch;
 public:
   HomePage(UIContext& c, int pitch) : _c(c), _pitch(pitch) { }
+  const char* tapLabel() const override { return _c.buzzer_muted ? "unmute" : "mute"; }
 
   int renderBody(DisplayDriver& d, int avail_h) override {
     char l[40], r[24];
@@ -75,11 +95,7 @@ public:
       uiRow(d, y, "buzzer", _c.buzzer_muted ? "muted" : "on");
       y += _pitch;
     }
-    if (y + _pitch <= avail_h) {
-      d.setColor(UIColor::secondary_txt);
-      d.drawTextLeftAlign(0, y, "B2 x2: mute");
-      d.setColor(UIColor::primary_txt);
-    }
+    uiActions(d, y, avail_h, _pitch, tapLabel(), holdLabel());
     return 5000;
   }
 };
@@ -179,12 +195,16 @@ public:
    each one saying what it does. That is how ui-new works on this board too. */
 class ActionPage : public UIPage {
   const char* _title;
-  const char* _hint;
+  const char* _tap;
+  const char* _hold;
   int _pitch;
   const char** _status;      // may be NULL; a live value shown under the title
 public:
-  ActionPage(const char* title, const char* hint, int pitch, const char** status = NULL)
-    : _title(title), _hint(hint), _pitch(pitch), _status(status) { }
+  ActionPage(const char* title, const char* tap, const char* hold, int pitch,
+             const char** status = NULL)
+    : _title(title), _tap(tap), _hold(hold), _pitch(pitch), _status(status) { }
+  const char* tapLabel() const override { return _tap; }
+  const char* holdLabel() const override { return _hold; }
 
   int renderBody(DisplayDriver& d, int avail_h) override {
     int y = 2;
@@ -195,11 +215,7 @@ public:
     if (_status != NULL && *_status != NULL) {
       d.drawTextCentered(d.width() / 2, y + _pitch, *_status);
     }
-    if (y + _pitch * 3 <= avail_h) {
-      d.setColor(UIColor::secondary_txt);
-      d.drawTextCentered(d.width() / 2, y + _pitch * 3, _hint);
-      d.setColor(UIColor::primary_txt);
-    }
+    uiActions(d, y + _pitch * 3, avail_h, _pitch, _tap, _hold);
     return 5000;
   }
 };
@@ -218,6 +234,7 @@ public:
   GpsPage(UIContext& c, int pitch, PagedScreen* owner)
     : _c(c), _pitch(pitch), _loc(NULL), _owner(owner) { }
   void setProvider(LocationProvider* l) { _loc = l; }
+  const char* tapLabel() const override { return _c.gps_on ? "gps off" : "gps on"; }
 
   int renderBody(DisplayDriver& d, int avail_h) override {
     char r[28];
@@ -258,11 +275,7 @@ public:
         uiRow(d, y, "lon", r); y += _pitch;
       }
     }
-    if (y + _pitch <= avail_h) {
-      d.setColor(UIColor::secondary_txt);
-      d.drawTextLeftAlign(0, y, "B2 x2: toggle");
-      d.setColor(UIColor::primary_txt);
-    }
+    uiActions(d, y, avail_h, _pitch, tapLabel(), NULL);
     return _c.gps_on ? 5000 : 30000;
   }
 
@@ -273,21 +286,17 @@ public:
 
 // ------------------------------------------------------------ shutdown
 
-/* Two deliberate presses, never one. B2 double-tap is the page action
-   everywhere else in this UI, so on this page alone it only ARMS; a second
-   double-tap inside the window powers off. A handheld that switches itself off
-   because a button caught on a pocket is worse than one that takes two presses. */
+/* Power-off needs no arming step. Under the one rule this UI follows -- tap is
+   the light action, hold is the heavy one -- a hold IS the deliberate act, and a
+   button that has to be held for a second will not be triggered by a pocket. An
+   earlier version made it two double-taps, which was ceremony that the rule
+   already provides. */
 class ShutdownPage : public UIPage {
   UIContext& _c;
   int _pitch;
-  uint32_t _armed_until;
 public:
-  static const uint32_t ARM_MS = 5000;
-  ShutdownPage(UIContext& c, int pitch) : _c(c), _pitch(pitch), _armed_until(0) { }
-
-  bool isArmed(uint32_t now) const { return (int32_t)(_armed_until - now) > 0; }
-  void arm(uint32_t now) { _armed_until = now + ARM_MS; }
-  void disarm() { _armed_until = 0; }
+  ShutdownPage(UIContext& c, int pitch) : _c(c), _pitch(pitch) { }
+  const char* holdLabel() const override { return "power off"; }
 
   int renderBody(DisplayDriver& d, int avail_h) override {
     int y = 2;
@@ -295,19 +304,10 @@ public:
     d.drawTextLeftAlign(0, y, "POWER OFF");
     y += _pitch;
     uiRule(d, y); y += _pitch * 2;
-
-    uint32_t now = millis();
-    if (isArmed(now)) {
-      d.setColor(UIColor::warning_txt);
-      d.drawTextCentered(d.width() / 2, y, "ARMED");
-      y += _pitch;
-      d.drawTextCentered(d.width() / 2, y, "B2 x2 confirm");
-      d.setColor(UIColor::primary_txt);
-      return 500;    // redraw often so the window visibly closes
-    }
     d.setColor(UIColor::secondary_txt);
-    d.drawTextCentered(d.width() / 2, y, "B2 x2 to arm");
+    d.drawTextCentered(d.width() / 2, y, "hold B2 to shut down");
     d.setColor(UIColor::primary_txt);
+    uiActions(d, y + _pitch * 2, avail_h, _pitch, NULL, holdLabel());
     return 30000;
   }
 };
