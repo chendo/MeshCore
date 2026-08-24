@@ -53,21 +53,28 @@ static void fmtLabel(char* out, size_t n, const NeighbourRow& p) {
   out[j] = 0;
 }
 
-int NeighboursScreen::rowCapacity(DisplayDriver& display) const {
+int NeighboursScreen::rowCapacity(DisplayDriver& display, int avail_h) const {
   int first = TITLE_Y + _pitch * HDR_LINES;   // name, config, rule, column labels
-  int rows = (display.height() - first) / _pitch;
+  int rows = (avail_h - first) / _pitch;
   return rows < 0 ? 0 : rows;
 }
 
 int NeighboursScreen::render(DisplayDriver& display) {
+  // Standalone: this screen owns the frame and the whole panel.
+  display.startFrame();
+  display.setTextSize(_text_size);
+  int next_ms = renderBody(display, display.height());
+  display.endFrame();
+  return next_ms;
+}
+
+int NeighboursScreen::renderBody(DisplayDriver& display, int avail_h) {
   char tmp[NEIGHBOUR_TMP_LEN];
   const int W = display.width();
 
-  display.startFrame();
-  display.setTextSize(_text_size);
   display.setColor(UIColor::primary_txt);
 
-  const int cap = rowCapacity(display);
+  const int cap = rowCapacity(display, avail_h);
   const int have = _src.numNeighbours();
   const int shown = have < cap ? have : cap;
 
@@ -173,6 +180,5 @@ int NeighboursScreen::render(DisplayDriver& display) {
     display.drawTextCentered(W / 2, TITLE_Y + _pitch * HDR_LINES, "no neighbours");
   }
 
-  display.endFrame();
   return _refresh_ms;
 }

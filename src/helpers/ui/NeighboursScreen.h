@@ -1,6 +1,7 @@
 #pragma once
 
 #include "UIScreen.h"
+#include "PagedScreen.h"
 
 // Long enough for a full 32-char node_name plus formatting slack.
 #define NEIGHBOUR_TMP_LEN 48
@@ -39,7 +40,10 @@ public:
   virtual bool getNeighbour(int i, NeighbourRow& out) = 0;
 };
 
-class NeighboursScreen : public UIScreen {
+/* Both a UIScreen and a UIPage: render() owns a frame for standalone use,
+   renderBody() draws into a height somebody else decided. The second is what
+   PagedScreen calls, and it is the only one that has to respect avail_h. */
+class NeighboursScreen : public UIScreen, public UIPage {
   NeighbourSource& _src;
   const char* _title;      // our own node name
   const char* _subtitle;   // the radio config, drawn right-aligned
@@ -61,9 +65,11 @@ public:
   void setTitle(const char* t) { _title = t; }
   void setSubtitle(const char* s) { _subtitle = s; }
 
-  /** How many neighbour rows would fit on this display. Exposed so a caller
-   *  can page, and so a test can assert the geometry without a framebuffer. */
-  int rowCapacity(DisplayDriver& display) const;
+  /** How many neighbour rows fit in avail_h. Exposed so a caller can page, and
+   *  so a test can assert the geometry without a framebuffer. */
+  int rowCapacity(DisplayDriver& display, int avail_h) const;
+  int rowCapacity(DisplayDriver& display) const { return rowCapacity(display, display.height()); }
 
   int render(DisplayDriver& display) override;
+  int renderBody(DisplayDriver& display, int avail_h) override;
 };
