@@ -5,9 +5,12 @@
 /* Pitch and text size. 0 selects GxEPDDisplay's compact 5x7 font, which turns
    the 200x200 panel from 20 columns by 9 lines into 33 by 25 -- the difference
    between a headline and a table. See patches/gxepd-compact-text-size. */
-/* 8 units = 12.5px, matching Spleen's 12px line. At the built-in 5x7 (8px)
-   this would be 6. Set with the font, or rows overlap or waste half the panel. */
-#define UI_PITCH      8
+/* 10 units = 15.6px against Spleen 8x16's 16px line. The glyph ink spans 12px
+   inside that 16px cell (cap top to descender), so 15.6px still leaves clear
+   air between rows. Pitch belongs with the font: 6 for the built-in 5x7, 8 for
+   the 6x12, 10 here. Change one without the other and rows either collide or
+   waste half the panel. */
+#define UI_PITCH      10
 #define UI_TEXT_SIZE  0
 
 #ifndef AUTO_OFF_MILLIS
