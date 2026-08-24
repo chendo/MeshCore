@@ -87,21 +87,49 @@ ColorVal UIColor::popup_bkg = 0, UIColor::popup_txt = 1, UIColor::corp_blue = 1;
 
 // ---------------------------------------------------------------- filtering
 
-TEST(Neighbours, OnlyTheFinalHopIsANeighbour) {
+TEST(Neighbours, EveryHopIsListedClosestFirst) {
   Obs o;
   g_fake_millis = 10000;
-  // Two hops: 0xAA relayed it, 0xBB transmitted the copy we received.
+  // Two hops: 0xAA relayed it, 0xBB transmitted the copy we received. Both are
+  // part of this node's picture of the mesh, so both are listed -- but the one
+  // whose radio we actually hear comes first.
   o.rx(floodWithPath({{0xAA, 0x01}, {0xBB, 0x02}}, 2), 20);
   ASSERT_EQ(2, o.obs.numPeers());
 
   ObserverNeighbours n(o.obs);
   n.refresh(g_fake_millis);
-  ASSERT_EQ(1, n.numNeighbours()) << "a mid-path hop is topology, not a neighbour";
+  ASSERT_EQ(2, n.numNeighbours()) << "distant peers are shown too, not filtered out";
 
-  NeighbourRow p;
-  ASSERT_TRUE(n.getNeighbour(0, p));
-  EXPECT_EQ(0xBB, p.hash[0]);
-  EXPECT_EQ(1u, p.rx);
+  NeighbourRow near, far;
+  ASSERT_TRUE(n.getNeighbour(0, near));
+  ASSERT_TRUE(n.getNeighbour(1, far));
+  EXPECT_EQ(0xBB, near.hash[0]) << "the node we hear directly sorts first";
+  EXPECT_EQ(1, near.hops);
+  EXPECT_EQ(1u, near.rx);
+  EXPECT_TRUE(near.has_snr);
+  EXPECT_EQ(0xAA, far.hash[0]);
+  EXPECT_EQ(2, far.hops);
+  EXPECT_EQ(0u, far.rx) << "we have never heard its radio, and must not imply we have";
+  EXPECT_FALSE(far.has_snr);
+}
+
+TEST(Neighbours, UnknownDistanceSortsLastNotFirst) {
+  Obs o;
+  g_fake_millis = 10000;
+  o.rx(floodWithPath({{0x11, 0x01}, {0x22, 0x02}}, 2), 20);   // hops 2 and 1
+  ObserverNeighbours n(o.obs);
+  n.refresh(g_fake_millis);
+  ASSERT_EQ(2, n.numNeighbours());
+  // min_hops of 0 means "never placed". Sorting it as nearest would put the
+  // least-known nodes at the top of a list whose whole point is proximity.
+  for (int i = 0; i < n.numNeighbours(); i++) {
+    NeighbourRow r;
+    n.getNeighbour(i, r);
+    EXPECT_NE(0, r.hops) << "row " << i << " should have a placed distance";
+  }
+  NeighbourRow a, b;
+  n.getNeighbour(0, a); n.getNeighbour(1, b);
+  EXPECT_LE(a.hops, b.hops) << "hop count must be non-decreasing down the list";
 }
 
 TEST(Neighbours, StaleNeighboursDropOffAfterSixHours) {
@@ -228,6 +256,8 @@ TEST_F(ScreenTest, DrawsOneRowPerNeighbourWithHeaders) {
   EXPECT_TRUE(d.has("SNR"));
   EXPECT_TRUE(d.has("RX"));
   EXPECT_TRUE(d.has("FWD"));
+  EXPECT_TRUE(d.has("HOP")) << "the sort is by distance, so distance must be visible";
+  EXPECT_TRUE(d.has("1")) << "a directly-heard peer renders as hop 1";
   EXPECT_TRUE(d.has("915.075 SF9"));
   EXPECT_TRUE(d.has("+10.0")) << "quarter-dB means render as signed tenths";
   EXPECT_TRUE(d.has("+1.0"));

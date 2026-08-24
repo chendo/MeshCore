@@ -31,6 +31,13 @@ static void fmtCount(char* out, size_t n, uint32_t v) {
   else snprintf(out, n, "%uM", (unsigned)(v / 1000000));
 }
 
+/* Distance. 0 is the observer's "never placed it" and must not print as a
+   distance of nothing; 1 means we hear the node's own radio. */
+static void fmtHops(char* out, size_t n, uint8_t hops) {
+  if (hops == 0) snprintf(out, n, "?");
+  else snprintf(out, n, "%u", (unsigned)hops);
+}
+
 static void fmtLabel(char* out, size_t n, const NeighbourRow& p) {
   if (p.name != NULL && p.name[0] != 0) {
     strncpy(out, p.name, n - 1);
@@ -95,6 +102,7 @@ int NeighboursScreen::render(DisplayDriver& display) {
      of small counts, and still cannot overflow, because the widest string
      measured IS the widest string drawn. */
   const int gap = display.getTextWidth(" ");
+  int w_hop = display.getTextWidth("HOP");
   int w_snr = display.getTextWidth("SNR");
   int w_rx  = display.getTextWidth("RX");
   int w_fwd = display.getTextWidth("FWD");
@@ -102,6 +110,8 @@ int NeighboursScreen::render(DisplayDriver& display) {
     NeighbourRow p;
     if (!_src.getNeighbour(i, p)) break;
     int w;
+    fmtHops(tmp, sizeof(tmp), p.hops);
+    if ((w = display.getTextWidth(tmp)) > w_hop) w_hop = w;
     fmtSnr(tmp, sizeof(tmp), p.snr4, p.has_snr);
     if ((w = display.getTextWidth(tmp)) > w_snr) w_snr = w;
     fmtCount(tmp, sizeof(tmp), p.rx);
@@ -113,7 +123,8 @@ int NeighboursScreen::render(DisplayDriver& display) {
   const int x_fwd = W;                       // right edge of the FWD column
   const int x_rx  = x_fwd - w_fwd - gap;
   const int x_snr = x_rx  - w_rx  - gap;
-  const int name_w = x_snr - w_snr - gap;
+  const int x_hop = x_snr - w_snr - gap;
+  const int name_w = x_hop - w_hop - gap;
 
   /* The divider is drawn as TEXT, not with fillRect. In GxEPDDisplay,
      setCursor() adds EINK_Y_OFFSET and a font baseline correction while
@@ -131,6 +142,7 @@ int NeighboursScreen::render(DisplayDriver& display) {
 
   const int hdr_y = TITLE_Y + _pitch * 3;
   display.drawTextLeftAlign(0, hdr_y, "NAME");
+  display.drawTextRightAlign(x_hop, hdr_y, "HOP");
   display.drawTextRightAlign(x_snr, hdr_y, "SNR");
   display.drawTextRightAlign(x_rx,  hdr_y, "RX");
   display.drawTextRightAlign(x_fwd, hdr_y, "FWD");
@@ -146,6 +158,8 @@ int NeighboursScreen::render(DisplayDriver& display) {
     display.translateUTF8ToBlocks(tmp, raw, sizeof(tmp));
     display.drawTextEllipsized(0, y, name_w, tmp);
 
+    fmtHops(tmp, sizeof(tmp), p.hops);
+    display.drawTextRightAlign(x_hop, y, tmp);
     fmtSnr(tmp, sizeof(tmp), p.snr4, p.has_snr);
     display.drawTextRightAlign(x_snr, y, tmp);
     fmtCount(tmp, sizeof(tmp), p.rx);
