@@ -23,16 +23,15 @@ UITask::UITask(mesh::MainBoard* board, MultiSerialInterface* serial)
     _messages(_ctx, UI_PITCH),
     _neigh(_neighbours, NULL, NULL, UI_PITCH, 5000, UI_TEXT_SIZE),
     _radio(_ctx, UI_PITCH),
+    _advert("ADVERT", "x2 to send", UI_PITCH),
+    _bluetooth("BLUETOOTH", "x2 to toggle", UI_PITCH, &_bt_status),
+    _bt_status("?"),
 #if ENV_INCLUDE_GPS == 1
     _gps(_ctx, UI_PITCH, &_screen),
 #endif
     _shutdown(_ctx, UI_PITCH),
-    /* Active-low with an internal pull-up, and a 700ms hold: long enough not to
-       fire on a firm tap, short enough that holding for it is not a wait. */
-    _btn1(PIN_BUTTON1, 700, true, true),
-    _btn2(PIN_BUTTON2, 700, true, true),
     _msgcount(0), _next_render(0), _auto_off(0), _ok(false),
-    _idx_home(0), _idx_gps(-1), _idx_shutdown(-1) {
+    _idx_home(0), _idx_gps(-1), _idx_shutdown(-1), _idx_advert(-1), _idx_bt(-1) {
   memset(&_ctx, 0, sizeof(_ctx));
   _radio_sub[0] = 0;
 }
@@ -62,6 +61,8 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _screen.addPage(&_messages);
   _screen.addPage(&_neigh);
   _screen.addPage(&_radio);
+  _idx_advert = _screen.numPages(); _screen.addPage(&_advert);
+  _idx_bt     = _screen.numPages(); _screen.addPage(&_bluetooth);
 #if ENV_INCLUDE_GPS == 1
   if (_sensors != NULL) {
     _gps.setProvider(_sensors->getLocationProvider());
@@ -72,8 +73,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 #endif
   _idx_shutdown = _screen.numPages(); _screen.addPage(&_shutdown);
 
-  _btn1.begin();
-  _btn2.begin();
+  user_btn.begin();      // the variant's, configured the way this board needs
 
   /* main.cpp has already called display.begin() and passes NULL when it
      failed, so this must not begin() again. It must still turnOn(): begin()
@@ -96,6 +96,7 @@ void UITask::refreshContext() {
   _ctx.bt_enabled = isBluetoothEnabled();
   _ctx.connected = hasConnection();
   _ctx.buzzer_muted = isBuzzerQuiet();
+  _bt_status = _ctx.connected ? "linked" : (_ctx.bt_enabled ? "on" : "off");
   _ctx.node_name = _node_prefs ? _node_prefs->node_name : "";
 #if ENV_INCLUDE_GPS == 1
   _ctx.gps_on = _node_prefs && _node_prefs->gps_enabled;
@@ -153,6 +154,12 @@ void UITask::pageAction() {
       the_mesh.savePrefs();
       _screen.showToast(_node_prefs->buzzer_quiet ? "buzzer muted" : "buzzer on", now);
     }
+  } else if (idx == _idx_advert) {
+    sendAdvert();
+    return;                              // sendAdvert() sets its own toast
+  } else if (idx == _idx_bt) {
+    toggleBluetooth();
+    return;
   } else if (idx == _idx_shutdown) {
     if (_shutdown.isArmed(now)) {
       doShutdown();                       // does not return
@@ -174,33 +181,52 @@ void UITask::pageAction() {
   _next_render = 0;
 }
 
-void UITask::pollButtons() {
-  char key = 0;
-  switch (_btn1.check()) {
-    case BUTTON_EVENT_CLICK:        key = KEY_NEXT; break;
-    case BUTTON_EVENT_DOUBLE_CLICK: key = KEY_PREV; break;
-    case BUTTON_EVENT_LONG_PRESS:   key = KEY_HOME; break;
-    default: break;
-  }
-  if (key != 0) {
-    /* Leaving the power-off page must disarm it, or a walk round the pages
-       could come back to a screen that is still one press from shutting down. */
-    _shutdown.disarm();
-    _screen.handleInput(key);
-    _next_render = 0;
-#if AUTO_OFF_MILLIS > 0
-    _auto_off = millis() + AUTO_OFF_MILLIS;
+#ifdef UI_BUTTON_DEBUG
+/* Which physical button is on which pin is not answerable from variant.h:
+   PIN_BUTTON2 is declared there but nothing in the stock firmware reads it on
+   this board, so it may not be wired to anything. This prints every event with
+   its pin so one press-test settles it. */
+static void logBtn(const char* which, int pin, int ev) {
+  if (ev == BUTTON_EVENT_NONE) return;
+  const char* n = ev == BUTTON_EVENT_CLICK        ? "CLICK"
+                : ev == BUTTON_EVENT_DOUBLE_CLICK ? "DOUBLE"
+                : ev == BUTTON_EVENT_TRIPLE_CLICK ? "TRIPLE"
+                : ev == BUTTON_EVENT_LONG_PRESS   ? "LONG" : "?";
+  Serial.printf("BTN %s pin=%d %s\n", which, pin, n);
+}
 #endif
-    return;
-  }
 
-  switch (_btn2.check()) {
-    case BUTTON_EVENT_CLICK:        sendAdvert(); break;
-    case BUTTON_EVENT_LONG_PRESS:   toggleBluetooth(); break;
-    case BUTTON_EVENT_DOUBLE_CLICK: pageAction(); break;
-    default: return;
+void UITask::pollButtons() {
+  int ev = user_btn.check();
+#ifdef UI_BUTTON_DEBUG
+  if (ev != BUTTON_EVENT_NONE) Serial.printf("BTN ev=%d\n", ev);
+#endif
+  if (ev == BUTTON_EVENT_NONE) return;
+
+  switch (ev) {
+    case BUTTON_EVENT_CLICK:
+      /* Leaving the power-off page disarms it: a walk round the pages must not
+         come back to a screen that is one press from shutting down. */
+      _shutdown.disarm();
+      _screen.handleInput(KEY_NEXT);
+      break;
+    case BUTTON_EVENT_DOUBLE_CLICK:
+      pageAction();
+      break;
+    case BUTTON_EVENT_TRIPLE_CLICK:
+      _shutdown.disarm();
+      _screen.handleInput(KEY_PREV);
+      break;
+    case BUTTON_EVENT_LONG_PRESS:
+      _shutdown.disarm();
+      _screen.handleInput(KEY_HOME);
+      break;
+    default:
+      return;
   }
+  _next_render = 0;
 #if AUTO_OFF_MILLIS > 0
+  if (_display != NULL && !_display->isOn()) _display->turnOn();
   _auto_off = millis() + AUTO_OFF_MILLIS;
 #endif
 }
