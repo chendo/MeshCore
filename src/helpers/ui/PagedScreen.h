@@ -38,7 +38,9 @@ public:
   static const int MAX_PAGES = 8;
 
   PagedScreen(int pitch = 11, int text_size = 1)
-    : _count(0), _cur(0), _pitch(pitch), _text_size(text_size) { }
+    : _count(0), _cur(0), _pitch(pitch), _text_size(text_size), _toast_until(0) {
+    _toast[0] = 0;
+  }
 
   /** \returns false when full, so a caller cannot silently lose a page. */
   bool addPage(UIPage* page);
@@ -52,7 +54,17 @@ public:
   /** Height the current page is given, once the indicator has taken its row. */
   int pageHeight(DisplayDriver& display) const;
 
+  /** Show a short confirmation over the current page for `ms`.
+   *  An action triggered by a button has no other way to say it happened: the
+   *  page behind it often looks identical either way, and on e-paper a change
+   *  that arrives at the next 5s refresh reads as a coincidence, not a reply.
+   *  Call render() promptly after this -- showToast() does not draw. */
+  void showToast(const char* msg, uint32_t now_ms, uint32_t ms = TOAST_MS);
+  bool toastVisible(uint32_t now_ms) const;
+  static const uint32_t TOAST_MS = 3000;
+
   int render(DisplayDriver& display) override;
+  int render(DisplayDriver& display, uint32_t now_ms);
   /** KEY_NEXT, KEY_PREV and KEY_HOME are consumed here. Anything else is the
    *  current page's business and is passed straight through. */
   bool handleInput(char c) override;
@@ -64,6 +76,9 @@ private:
   int      _cur;
   int      _pitch;
   int      _text_size;
+  char     _toast[32];
+  uint32_t _toast_until;
 
   void drawIndicator(DisplayDriver& display);
+  void drawToast(DisplayDriver& display);
 };
