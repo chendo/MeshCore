@@ -1,0 +1,268 @@
+#pragma once
+
+#include <helpers/ui/PagedScreen.h>
+#include <helpers/ui/NeighboursScreen.h>
+#include <helpers/PowerMonitor.h>
+#include "RecentMessages.h"
+#include "../NodePrefs.h"
+
+/* Shared helpers. Dividers are drawn as TEXT everywhere in this tree: in
+   GxEPDDisplay, setCursor() adds EINK_Y_OFFSET and a font baseline correction
+   while fillRect() adds neither, so a rule placed against a text baseline lands
+   in a different coordinate space and strikes through the text. */
+inline void uiRule(DisplayDriver& d, int y) {
+  char buf[48];
+  int w = d.getTextWidth("-");
+  int n = w > 0 ? d.width() / w : 0;
+  if (n > (int)sizeof(buf) - 1) n = (int)sizeof(buf) - 1;
+  for (int i = 0; i < n; i++) buf[i] = '-';
+  buf[n > 0 ? n : 0] = 0;
+  d.setColor(UIColor::secondary_txt);
+  d.drawTextLeftAlign(0, y, buf);
+  d.setColor(UIColor::primary_txt);
+}
+
+inline void uiRow(DisplayDriver& d, int y, const char* l, const char* r) {
+  if (l) d.drawTextLeftAlign(0, y, l);
+  if (r) d.drawTextRightAlign(d.width(), y, r);
+}
+
+/* The state the pages share with the task. Passed by reference so a page never
+   reaches for a global, which is what makes these testable on the host. */
+struct UIContext {
+  NodePrefs*      prefs;
+  RecentMessages* recent;
+  PowerMonitor*   power;
+  int             msg_count;
+  bool            bt_enabled;
+  bool            connected;
+  bool            buzzer_muted;
+  bool            gps_on;
+  bool            gps_present;
+  const char*     node_name;
+};
+
+// ---------------------------------------------------------------- home
+
+class HomePage : public UIPage {
+  UIContext& _c;
+  int _pitch;
+public:
+  HomePage(UIContext& c, int pitch) : _c(c), _pitch(pitch) { }
+
+  int renderBody(DisplayDriver& d, int avail_h) override {
+    char l[40], r[24];
+    int y = 2;
+    d.setColor(UIColor::primary_txt);
+    d.translateUTF8ToBlocks(l, _c.node_name ? _c.node_name : "(unnamed)", sizeof(l));
+    d.drawTextEllipsized(0, y, d.width(), l);
+    y += _pitch;
+    uiRule(d, y); y += _pitch;
+
+    snprintf(r, sizeof(r), "%d", _c.msg_count);
+    uiRow(d, y, "msgs", r); y += _pitch;
+
+    uiRow(d, y, "bt", _c.bt_enabled ? (_c.connected ? "linked" : "on") : "off");
+    y += _pitch;
+
+    int pct = _c.power ? _c.power->percent() : -1;
+    if (pct < 0) snprintf(r, sizeof(r), "n/a");
+    else if (_c.power->isCharging()) snprintf(r, sizeof(r), "%d%% chg", pct);
+    else snprintf(r, sizeof(r), "%d%%", pct);
+    uiRow(d, y, "batt", r); y += _pitch;
+
+    if (y + _pitch <= avail_h) {
+      uiRow(d, y, "buzzer", _c.buzzer_muted ? "muted" : "on");
+      y += _pitch;
+    }
+    if (y + _pitch <= avail_h) {
+      d.setColor(UIColor::secondary_txt);
+      d.drawTextLeftAlign(0, y, "B2x2: mute");
+      d.setColor(UIColor::primary_txt);
+    }
+    return 5000;
+  }
+};
+
+// ------------------------------------------------------------ messages
+
+class MessagesPage : public UIPage {
+  UIContext& _c;
+  int _pitch;
+public:
+  MessagesPage(UIContext& c, int pitch) : _c(c), _pitch(pitch) { }
+
+  int renderBody(DisplayDriver& d, int avail_h) override {
+    char l[72];
+    int y = 2;
+    d.setColor(UIColor::primary_txt);
+    snprintf(l, sizeof(l), "MESSAGES");
+    d.drawTextLeftAlign(0, y, l);
+    snprintf(l, sizeof(l), "%d", _c.msg_count);
+    d.drawTextRightAlign(d.width(), y, l);
+    y += _pitch;
+    uiRule(d, y); y += _pitch;
+
+    if (_c.recent == NULL || _c.recent->count() == 0) {
+      d.setColor(UIColor::secondary_txt);
+      d.drawTextCentered(d.width() / 2, y + _pitch, "no messages yet");
+      return 10000;
+    }
+
+    /* Two lines per message: who, then what. A single line would truncate the
+       text to nothing once the name has taken its share. */
+    for (int i = 0; i < _c.recent->count() && y + _pitch * 2 <= avail_h; i++) {
+      const RecentMessages::Entry* e = _c.recent->at(i);
+      if (e == NULL) break;
+      d.setColor(UIColor::primary_txt);
+      d.translateUTF8ToBlocks(l, e->from, sizeof(l));
+      d.drawTextEllipsized(0, y, d.width(), l);
+      y += _pitch;
+      d.setColor(UIColor::secondary_txt);
+      d.translateUTF8ToBlocks(l, e->text, sizeof(l));
+      d.drawTextEllipsized(0, y, d.width(), l);
+      y += _pitch;
+    }
+    d.setColor(UIColor::primary_txt);
+    return 10000;
+  }
+};
+
+// --------------------------------------------------------------- radio
+
+class RadioPage : public UIPage {
+  UIContext& _c;
+  int _pitch;
+public:
+  RadioPage(UIContext& c, int pitch) : _c(c), _pitch(pitch) { }
+
+  int renderBody(DisplayDriver& d, int avail_h) override {
+    char l[32], r[24];
+    int y = 2;
+    d.setColor(UIColor::primary_txt);
+    d.drawTextLeftAlign(0, y, "RADIO");
+    d.drawTextRightAlign(d.width(), y, "read-only");
+    y += _pitch;
+    uiRule(d, y); y += _pitch;
+
+    NodePrefs* p = _c.prefs;
+    if (p == NULL) return 30000;
+
+    /* Integer formatting: %f would pull printf's float support into the image
+       for the sake of four numbers. */
+    uint32_t khz = (uint32_t)(p->freq * 1000.0f + 0.5f);
+    snprintf(r, sizeof(r), "%u.%03u", (unsigned)(khz / 1000), (unsigned)(khz % 1000));
+    uiRow(d, y, "freq", r); y += _pitch;
+
+    snprintf(r, sizeof(r), "%u", (unsigned)(p->bw + 0.5f));
+    uiRow(d, y, "bw", r); y += _pitch;
+
+    snprintf(l, sizeof(l), "sf %u", (unsigned)p->sf);
+    snprintf(r, sizeof(r), "cr %u", (unsigned)p->cr);
+    uiRow(d, y, l, r); y += _pitch;
+
+    if (y + _pitch <= avail_h) {
+      snprintf(r, sizeof(r), "%ddBm", (int)p->tx_power_dbm);
+      uiRow(d, y, "power", r);
+    }
+    // The app owns these; nothing here changes on its own.
+    return 30000;
+  }
+};
+
+// ----------------------------------------------------------------- gps
+
+#if ENV_INCLUDE_GPS == 1
+#include <helpers/sensors/LocationProvider.h>
+
+class GpsPage : public UIPage {
+  UIContext& _c;
+  int _pitch;
+  LocationProvider* _loc;
+  PagedScreen* _owner;
+public:
+  GpsPage(UIContext& c, int pitch, PagedScreen* owner)
+    : _c(c), _pitch(pitch), _loc(NULL), _owner(owner) { }
+  void setProvider(LocationProvider* l) { _loc = l; }
+
+  int renderBody(DisplayDriver& d, int avail_h) override {
+    char r[28];
+    int y = 2;
+    d.setColor(UIColor::primary_txt);
+    d.drawTextLeftAlign(0, y, "GPS");
+    d.drawTextRightAlign(d.width(), y, _c.gps_on ? "on" : "off");
+    y += _pitch;
+    uiRule(d, y); y += _pitch;
+
+    if (!_c.gps_on || _loc == NULL) {
+      d.setColor(UIColor::secondary_txt);
+      d.drawTextLeftAlign(0, y, _c.gps_on ? "no receiver" : "powered down");
+      d.setColor(UIColor::primary_txt);
+      y += _pitch;
+    } else {
+      snprintf(r, sizeof(r), "%ld", _loc->satellitesCount());
+      uiRow(d, y, "sats", r); y += _pitch;
+      uiRow(d, y, "fix", _loc->isValid() ? "yes" : "searching"); y += _pitch;
+      if (_loc->isValid() && y + _pitch * 2 <= avail_h) {
+        /* Degrees are stored scaled by 1e6; printed as integer parts so the
+           page needs no float formatting. */
+        long la = _loc->getLatitude(), lo = _loc->getLongitude();
+        snprintf(r, sizeof(r), "%ld.%04ld", la / 1000000, labs(la % 1000000) / 100);
+        uiRow(d, y, "lat", r); y += _pitch;
+        snprintf(r, sizeof(r), "%ld.%04ld", lo / 1000000, labs(lo % 1000000) / 100);
+        uiRow(d, y, "lon", r); y += _pitch;
+      }
+    }
+    if (y + _pitch <= avail_h) {
+      d.setColor(UIColor::secondary_txt);
+      d.drawTextLeftAlign(0, y, "B2x2: toggle");
+      d.setColor(UIColor::primary_txt);
+    }
+    return _c.gps_on ? 5000 : 30000;
+  }
+
+  // Handled by the task, which owns the SensorManager; see UITask::pageAction.
+  bool handleInput(char c) override { return false; }
+};
+#endif
+
+// ------------------------------------------------------------ shutdown
+
+/* Two deliberate presses, never one. B2 double-tap is the page action
+   everywhere else in this UI, so on this page alone it only ARMS; a second
+   double-tap inside the window powers off. A handheld that switches itself off
+   because a button caught on a pocket is worse than one that takes two presses. */
+class ShutdownPage : public UIPage {
+  UIContext& _c;
+  int _pitch;
+  uint32_t _armed_until;
+public:
+  static const uint32_t ARM_MS = 5000;
+  ShutdownPage(UIContext& c, int pitch) : _c(c), _pitch(pitch), _armed_until(0) { }
+
+  bool isArmed(uint32_t now) const { return (int32_t)(_armed_until - now) > 0; }
+  void arm(uint32_t now) { _armed_until = now + ARM_MS; }
+  void disarm() { _armed_until = 0; }
+
+  int renderBody(DisplayDriver& d, int avail_h) override {
+    int y = 2;
+    d.setColor(UIColor::primary_txt);
+    d.drawTextLeftAlign(0, y, "POWER OFF");
+    y += _pitch;
+    uiRule(d, y); y += _pitch * 2;
+
+    uint32_t now = millis();
+    if (isArmed(now)) {
+      d.setColor(UIColor::warning_txt);
+      d.drawTextCentered(d.width() / 2, y, "ARMED");
+      y += _pitch;
+      d.drawTextCentered(d.width() / 2, y, "B2x2 to confirm");
+      d.setColor(UIColor::primary_txt);
+      return 500;    // redraw often so the window visibly closes
+    }
+    d.setColor(UIColor::secondary_txt);
+    d.drawTextCentered(d.width() / 2, y, "B2x2 to arm");
+    d.setColor(UIColor::primary_txt);
+    return 30000;
+  }
+};
