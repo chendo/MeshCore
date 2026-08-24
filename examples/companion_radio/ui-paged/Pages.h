@@ -77,7 +77,7 @@ public:
     }
     if (y + _pitch <= avail_h) {
       d.setColor(UIColor::secondary_txt);
-      d.drawTextLeftAlign(0, y, "x2: mute");
+      d.drawTextLeftAlign(0, y, "B2 x2: mute");
       d.setColor(UIColor::primary_txt);
     }
     return 5000;
@@ -260,7 +260,7 @@ public:
     }
     if (y + _pitch <= avail_h) {
       d.setColor(UIColor::secondary_txt);
-      d.drawTextLeftAlign(0, y, "x2: toggle sw");
+      d.drawTextLeftAlign(0, y, "B2 x2: toggle");
       d.setColor(UIColor::primary_txt);
     }
     return _c.gps_on ? 5000 : 30000;
@@ -301,12 +301,12 @@ public:
       d.setColor(UIColor::warning_txt);
       d.drawTextCentered(d.width() / 2, y, "ARMED");
       y += _pitch;
-      d.drawTextCentered(d.width() / 2, y, "x2 to confirm");
+      d.drawTextCentered(d.width() / 2, y, "B2 x2 confirm");
       d.setColor(UIColor::primary_txt);
       return 500;    // redraw often so the window visibly closes
     }
     d.setColor(UIColor::secondary_txt);
-    d.drawTextCentered(d.width() / 2, y, "x2 to arm");
+    d.drawTextCentered(d.width() / 2, y, "B2 x2 to arm");
     d.setColor(UIColor::primary_txt);
     return 30000;
   }

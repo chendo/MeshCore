@@ -18,22 +18,22 @@
  * on the concrete type is begin() and loop(); the rest arrives through
  * AbstractUITask.
  *
- * ONE BUTTON. Measured, not assumed: across full press tests PIN_BUTTON2
- * produced no edge as either INPUT or INPUT_PULLUP, and PIN_GPS_SWITCH is the
- * GPS module's hardware kill line rather than a spare input -- upstream only
- * reads it to report "gps off(hw)". So every action lives on a page:
+ * Two buttons, both confirmed against Elecrow's datasheet AND a press test:
  *
- *   tap        next page
- *   double     do what THIS page says it does
- *   triple     previous page
- *   hold (>1s) back to the first page
+ *   B1 "Page Turn"  P1.10 = 42   tap next page, double previous, hold first
+ *   B2 "Function"   P1.07 = 39   tap advert, hold Bluetooth, double page action
  *
- * Advert, Bluetooth and power-off are therefore pages, each labelled with what
- * a double-tap will do. ui-new reaches the same arrangement on this board for
- * the same reason.
+ * B2 is NOT PIN_BUTTON2. variant.h puts that at 11, which is wrong for this
+ * board -- pin 11 produced no edge under either pull configuration, and nothing
+ * upstream reads it here. The datasheet names P1.07, and that is what works.
  *
- * The hold threshold is the variant's 1000ms, not ours: B1 IS the variant's own
- * user_btn object rather than a second one on the same pin.
+ * B1 is the variant's own `user_btn`, not a second object on the same pin. An
+ * earlier version built its own with INPUT_PULLUP and saw nothing at all: the
+ * internal pull-up holds that pin high straight through a press. Its hold
+ * threshold is therefore the variant's 1000ms rather than ours.
+ *
+ * PIN_GPS_SWITCH is readable but is the GPS module's hardware kill line, not a
+ * spare input -- upstream only reads it to report "gps off(hw)".
  */
 class UITask : public AbstractUITask {
   DisplayDriver*  _display;
@@ -50,6 +50,7 @@ class UITask : public AbstractUITask {
   MessagesPage     _messages;
   NeighboursScreen _neigh;
   RadioPage        _radio;
+  MomentaryButton  _btn2;
   ActionPage       _advert;
   ActionPage       _bluetooth;
   const char*      _bt_status;
