@@ -145,6 +145,10 @@ static CompanionModule companion_module;
 
 #ifdef DISPLAY_CLASS
 #include <helpers/ObserverNeighbours.h>
+#include <helpers/ui/PagedScreen.h>
+#ifdef UI_BUTTON_PIN
+  #include <helpers/ui/MomentaryButton.h>
+#endif
 
 /* The neighbours screen.
 
@@ -159,11 +163,18 @@ static CompanionModule companion_module;
    interval and no panel time at all. */
 class NeighboursModule : public AppModule {
   ObserverNeighbours _neighbours;
-  NeighboursScreen _screen;
+  NeighboursScreen _neighbours_page;
+  PagedScreen _screen;
   char _subtitle[28];
   unsigned long _next_render;
   bool _ok;
   uint32_t _frames;
+#ifdef UI_BUTTON_PIN
+  MomentaryButton _btn1;
+#endif
+#ifdef UI_BUTTON2_PIN
+  MomentaryButton _btn2;
+#endif
 
   void formatRadio(const NodePrefs* p) {
     /* Integer formatting on purpose. Pulling %f into the link costs a few KB
@@ -181,7 +192,17 @@ public:
          panel is 20 columns by 9 lines, which is five peers and seven
          characters of name -- not a table. The compact font makes it 33 by 25,
          and 6 units of pitch spends the drawable height on 16 peer rows. */
-      _screen(_neighbours, NULL, NULL, 6, 5000, 0), _next_render(0), _ok(false), _frames(0) {
+      _neighbours_page(_neighbours, NULL, NULL, 6, 5000, 0),
+      _screen(6, 0), _next_render(0), _ok(false), _frames(0)
+#ifdef UI_BUTTON_PIN
+      /* long-press at 700ms: long enough not to fire on a firm tap, short
+         enough that holding for it does not feel like a hang. */
+      , _btn1(UI_BUTTON_PIN, 700, true, true)
+#endif
+#ifdef UI_BUTTON2_PIN
+      , _btn2(UI_BUTTON2_PIN, 700, true, true)
+#endif
+  {
     _subtitle[0] = 0;
   }
 
@@ -198,15 +219,61 @@ public:
        DISP_BACKLIGHT, whose pinMode begin() has already done. */
     display.turnOn();
     NodePrefs* p = hydra.repeater().prefs();
-    _screen.setTitle(p->node_name);
+    _neighbours_page.setTitle(p->node_name);
     formatRadio(p);
-    _screen.setSubtitle(_subtitle);
+    _neighbours_page.setSubtitle(_subtitle);
+    _screen.addPage(&_neighbours_page);
+  #ifdef UI_BUTTON_PIN
+    _btn1.begin();
+  #endif
+  #ifdef UI_BUTTON2_PIN
+    _btn2.begin();
+  #endif
+  }
+
+  /* The mapping from a physical button to the KEY_* vocabulary lives HERE and
+     not in PagedScreen, which is why that class works unchanged on a node with
+     an encoder, a serial console or no input at all.
+
+       btn1 tap          next page
+       btn1 double-tap   previous page      (two buttons, but a page walk should
+       btn1 hold         first page          still work one-handed on either)
+       btn2 tap/hold     the page's own business -- forwarded, not consumed
+  */
+  void pollButtons() {
+  #if defined(UI_BUTTON_PIN) || defined(UI_BUTTON2_PIN)
+    char key = 0;
+  #endif
+  #ifdef UI_BUTTON_PIN
+    switch (_btn1.check()) {
+      case BUTTON_EVENT_CLICK:        key = KEY_NEXT; break;
+      case BUTTON_EVENT_DOUBLE_CLICK: key = KEY_PREV; break;
+      case BUTTON_EVENT_LONG_PRESS:   key = KEY_HOME; break;
+      default: break;
+    }
+  #endif
+  #ifdef UI_BUTTON2_PIN
+    if (key == 0) {
+      switch (_btn2.check()) {
+        case BUTTON_EVENT_CLICK:      key = KEY_SELECT; break;
+        case BUTTON_EVENT_LONG_PRESS: key = KEY_CONTEXT_MENU; break;
+        default: break;
+      }
+    }
+  #endif
+  #if defined(UI_BUTTON_PIN) || defined(UI_BUTTON2_PIN)
+    if (key != 0 && _screen.handleInput(key)) {
+      _next_render = 0;      // a press must show its result now, not in 5s
+    }
+  #endif
   }
 
   void onLoop() override {
     if (!_ok || !display.isOn()) return;
+    pollButtons();
+    _screen.poll();
     unsigned long now = millis();
-    if (now < _next_render) return;
+    if ((long)(now - _next_render) < 0) return;
     // Re-read the config every frame: the CLI can change it at runtime, and a
     // stale header is exactly the kind of quiet lie a status screen must not tell.
     formatRadio(hydra.repeater().prefs());
@@ -218,9 +285,11 @@ public:
   /* Answers "why is the panel blank?" without needing eyes on the glass, which
      is the only way this was diagnosable at all. */
   void status(char* reply, size_t sz) {
-    snprintf(reply, sz, "screen: begin=%d on=%d frames=%u rows=%d/%d cap=%d",
+    snprintf(reply, sz, "screen: begin=%d on=%d frames=%u page=%d/%d rows=%d/%d cap=%d",
              _ok ? 1 : 0, display.isOn() ? 1 : 0, (unsigned)_frames,
-             _neighbours.numNeighbours(), _obsPeers(), _screen.rowCapacity(display));
+             _screen.currentPage() + 1, _screen.numPages(),
+             _neighbours.numNeighbours(), _obsPeers(),
+             _neighbours_page.rowCapacity(display, _screen.pageHeight(display)));
   }
   int _obsPeers() const { return hydra.radio().observer().numPeers(); }
 };

@@ -5,6 +5,7 @@
 
 #include <Arduino.h>
 #include <helpers/ObserverNeighbours.h>
+#include <helpers/ui/PagedScreen.h>
 
 unsigned long g_fake_millis = 0;
 
@@ -39,6 +40,7 @@ public:
   int cur_x = 0, cur_y = 0;
   int frames = 0;
   int rects = 0;
+  int ends = 0;
   /* Character width in DISPLAY UNITS, which is not panel pixels. The M5 scales
      its 128-unit space onto a 200px panel, so the compact font's 6px cell is
      3.84 units, not 6. Getting this wrong is what makes a layout that measures
@@ -60,7 +62,7 @@ public:
   void drawRect(int x, int y, int w, int h) override { }
   void drawXbm(int x, int y, const uint8_t* b, int w, int h) override { }
   uint16_t getTextWidth(const char* s) override { return (uint16_t)(strlen(s) * char_w); }
-  void endFrame() override { }
+  void endFrame() override { ends++; }
 
   bool has(const std::string& s) const {
     for (auto& d : texts) if (d.s == s) return true;
@@ -404,6 +406,122 @@ TEST(Layout, TheDividerIsDrawnAsTextNotAsARect) {
     if (t.s.size() > 4 && t.s.find_first_not_of('-') == std::string::npos) rule = true;
   }
   EXPECT_TRUE(rule) << "the divider row of dashes must be drawn";
+}
+
+namespace {
+// A page that records what height it was given, and nothing else.
+class StubPage : public UIPage {
+public:
+  int calls = 0, last_avail = -1, want_ms = 1234;
+  char last_key = 0;
+  int renderBody(DisplayDriver& d, int avail_h) override {
+    calls++; last_avail = avail_h;
+    d.setCursor(0, 2); d.print("stub");
+    return want_ms;
+  }
+  bool handleInput(char c) override { last_key = c; return true; }
+};
+}  // namespace
+
+TEST(Paged, ASinglePageKeepsTheWholePanelAndShowsNoDots) {
+  FakeDisplay d(128, 118, 4);
+  StubPage a;
+  PagedScreen s(6, 0);
+  ASSERT_TRUE(s.addPage(&a));
+  EXPECT_EQ(118, s.pageHeight(d)) << "nothing to indicate, so nothing is spent";
+  s.render(d);
+  EXPECT_EQ(118, a.last_avail);
+  for (auto& t : d.texts) EXPECT_EQ(std::string("stub"), t.s) << "no indicator drawn";
+}
+
+TEST(Paged, TheIndicatorCostsOneRowAndMarksTheCurrentPage) {
+  FakeDisplay d(128, 118, 4);
+  StubPage a, b, c;
+  PagedScreen s(6, 0);
+  s.addPage(&a); s.addPage(&b); s.addPage(&c);
+  EXPECT_EQ(118 - 6, s.pageHeight(d)) << "the indicator takes exactly one pitch";
+  s.render(d);
+  EXPECT_EQ(112, a.last_avail);
+
+  bool found = false;
+  for (auto& t : d.texts) if (t.s == "O o o") found = true;
+  EXPECT_TRUE(found) << "page 1 of 3 should read 'O o o'";
+
+  s.nextPage();
+  s.render(d);
+  found = false;
+  for (auto& t : d.texts) if (t.s == "o O o") found = true;
+  EXPECT_TRUE(found) << "page 2 of 3 should read 'o O o'";
+}
+
+TEST(Paged, ExactlyOneFramePerRenderNoMatterHowManyPages) {
+  // startFrame() clears the panel and resets the change hash, so a page that
+  // opened its own frame would wipe whatever the container had drawn.
+  FakeDisplay d(128, 118, 4);
+  StubPage a, b;
+  PagedScreen s(6, 0);
+  s.addPage(&a); s.addPage(&b);
+  s.render(d);
+  EXPECT_EQ(1, d.frames);
+  EXPECT_EQ(1, d.ends);
+}
+
+TEST(Paged, NavigationKeysWrapAndEverythingElseReachesThePage) {
+  FakeDisplay d(128, 118, 4);
+  StubPage a, b, c;
+  PagedScreen s(6, 0);
+  s.addPage(&a); s.addPage(&b); s.addPage(&c);
+
+  EXPECT_TRUE(s.handleInput(KEY_NEXT));  EXPECT_EQ(1, s.currentPage());
+  EXPECT_TRUE(s.handleInput(KEY_NEXT));  EXPECT_EQ(2, s.currentPage());
+  EXPECT_TRUE(s.handleInput(KEY_NEXT));  EXPECT_EQ(0, s.currentPage()) << "wraps forward";
+  EXPECT_TRUE(s.handleInput(KEY_PREV));  EXPECT_EQ(2, s.currentPage()) << "wraps back";
+  EXPECT_TRUE(s.handleInput(KEY_HOME));  EXPECT_EQ(0, s.currentPage());
+
+  // Not a navigation key: the current page decides, the container does not eat it.
+  EXPECT_TRUE(s.handleInput(KEY_SELECT));
+  EXPECT_EQ(KEY_SELECT, a.last_key);
+  EXPECT_EQ(0, b.last_key) << "only the visible page hears it";
+}
+
+TEST(Paged, TheCurrentPageSetsTheRefreshCadence) {
+  FakeDisplay d(128, 118, 4);
+  StubPage a, b;
+  a.want_ms = 500; b.want_ms = 9000;
+  PagedScreen s(6, 0);
+  s.addPage(&a); s.addPage(&b);
+  EXPECT_EQ(500, s.render(d));
+  s.nextPage();
+  EXPECT_EQ(9000, s.render(d));
+}
+
+TEST(Paged, AFullContainerRefusesRatherThanDroppingAPage) {
+  StubPage pages[PagedScreen::MAX_PAGES + 1];
+  PagedScreen s(6, 0);
+  for (int i = 0; i < PagedScreen::MAX_PAGES; i++) EXPECT_TRUE(s.addPage(&pages[i]));
+  EXPECT_FALSE(s.addPage(&pages[PagedScreen::MAX_PAGES])) << "must not silently lose one";
+  EXPECT_FALSE(s.addPage(NULL));
+  EXPECT_EQ(PagedScreen::MAX_PAGES, s.numPages());
+}
+
+TEST(Paged, NeighboursScreenHonoursTheHeightItIsGiven) {
+  Obs o;
+  g_fake_millis = 10000;
+  for (uint8_t i = 0; i < 20; i++)
+    o.rx(floodWithPath({{(uint8_t)(0x60 + i), 0x01}}, 2), (int8_t)(30 - i));
+  ObserverNeighbours n(o.obs);
+  n.refresh(g_fake_millis);
+
+  FakeDisplay d(128, 118, 4);
+  NeighboursScreen page(n, "NODE", "cfg", 6, 5000, 0);
+  PagedScreen s(6, 0);
+  StubPage other;
+  s.addPage(&page); s.addPage(&other);
+
+  // Sharing the panel with an indicator must cost the page exactly one row.
+  EXPECT_EQ(page.rowCapacity(d, 118) - 1, page.rowCapacity(d, s.pageHeight(d)));
+  s.render(d);
+  for (auto& t : d.texts) EXPECT_LE(t.y, 118) << "nothing may run past the panel";
 }
 
 int main(int argc, char** argv) {
