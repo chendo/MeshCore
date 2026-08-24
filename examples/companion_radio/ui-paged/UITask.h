@@ -21,7 +21,14 @@
  * Two buttons, both confirmed against Elecrow's datasheet AND a press test:
  *
  *   B1 "Page Turn"  P1.10 = 42   tap next page, double previous, hold first
- *   B2 "Function"   P1.07 = 39   tap advert, hold Bluetooth, double page action
+ *   B2 "Function"   P1.07 = 39   acts on the page you are looking at
+ *
+ * ONE RULE for B2, everywhere: tap is the LIGHT action, hold is the HEAVY one.
+ * So a tap sends a zero-hop advert and a hold floods it; a hold powers the node
+ * down. Nothing is global, so no page has to remember what a button means
+ * somewhere else, and every page prints its own two labels -- declared by the
+ * page itself, because labels and behaviour drift apart the moment they live in
+ * different files.
  *
  * B2 is NOT PIN_BUTTON2. variant.h puts that at 11, which is wrong for this
  * board -- pin 11 produced no edge under either pull configuration, and nothing
@@ -78,9 +85,9 @@ class UITask : public AbstractUITask {
 
   void refreshContext();
   void pollButtons();
-  void pageAction();          // B2 double-tap
-  void sendAdvert();          // B2 tap
-  void toggleBluetooth();     // B2 hold
+  void pageAction(bool heavy);   // B2 tap (light) / hold (heavy)
+  void sendAdvert(bool flood);
+  void toggleBluetooth();
   void doShutdown();
 
 public:

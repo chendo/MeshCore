@@ -18,6 +18,14 @@ public:
   virtual int renderBody(DisplayDriver& display, int avail_h) = 0;
   virtual bool handleInput(char c) { return false; }
   virtual void poll() { }
+
+  /* What this page does when acted on. One rule everywhere: the LIGHT action is
+     a tap, the HEAVY one is a hold. Returning NULL means the page has no action
+     of that weight, and the caller prints nothing rather than an empty prompt.
+     Labels live with the page so a page cannot advertise something it does not
+     do -- the two drift apart the moment they are declared in different files. */
+  virtual const char* tapLabel() const { return NULL; }
+  virtual const char* holdLabel() const { return NULL; }
 };
 
 /**

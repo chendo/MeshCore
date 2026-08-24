@@ -26,8 +26,8 @@ UITask::UITask(mesh::MainBoard* board, MultiSerialInterface* serial)
     /* Same configuration as the button that works: plain INPUT, active low,
        trusting the board's external pull-up. */
     _btn2(UI_BUTTON2_PIN, 700, true, false),
-    _advert("ADVERT", "B2 or x2: send", UI_PITCH),
-    _bluetooth("BLUETOOTH", "B2 hold or x2", UI_PITCH, &_bt_status),
+    _advert("ADVERT", "zero-hop", "flood", UI_PITCH),
+    _bluetooth("BLUETOOTH", "toggle", NULL, UI_PITCH, &_bt_status),
     _bt_status("?"),
 #if ENV_INCLUDE_GPS == 1
     _gps(_ctx, UI_PITCH, &_screen),
@@ -108,15 +108,15 @@ void UITask::refreshContext() {
   _neigh.setTitle(_ctx.node_name);
 }
 
-void UITask::sendAdvert() {
-  /* MyMesh::advert() is the only advert entry that is public, and it sends
-     ZERO-HOP: createSelfAdvert + sendFloodScoped are both protected, so a
-     flooded advert from a button would need a small upstream seam
-     (`advert(bool flood)`). Zero-hop reaches direct neighbours only, so the
-     toast says which one it was rather than letting it be assumed. */
-  bool ok = the_mesh.advert();
+void UITask::sendAdvert(bool flood) {
+  /* Both kinds are worth having and they are very different on the air: a
+     zero-hop advert reaches whoever can hear this radio, a flood crosses the
+     mesh. The toast names which one went out -- "advert sent" would hide the
+     distinction that made two gestures worth spending. */
+  bool ok = the_mesh.advert(flood);
   notify(UIEventType::ack);
-  _screen.showToast(ok ? "advert (0-hop)" : "advert failed", millis());
+  _screen.showToast(ok ? (flood ? "flood advert sent" : "0-hop advert sent")
+                       : "advert failed", millis());
   _next_render = 0;
 }
 
@@ -142,14 +142,26 @@ void UITask::doShutdown() {
   _board->powerOff();
 }
 
-void UITask::pageAction() {
+void UITask::pageAction(bool heavy) {
   uint32_t now = millis();
   int idx = _screen.currentPage();
 
-  /* Dispatch on the index recorded when the page was added, not on arithmetic
-     over numPages(): the GPS page is conditional, so counting back from the end
-     silently pointed at the wrong page in builds without it. */
-  if (idx == _idx_home) {
+  /* Dispatch on the index recorded when the page was added, not arithmetic over
+     numPages(): the GPS page is conditional, so counting back from the end
+     pointed at the wrong page in builds without it. */
+  if (idx == _idx_advert) {
+    sendAdvert(heavy);                       // tap 0-hop, hold flood
+    return;
+  }
+  if (idx == _idx_bt && !heavy) {
+    toggleBluetooth();
+    return;
+  }
+  if (idx == _idx_shutdown && heavy) {
+    doShutdown();                            // does not return
+    return;
+  }
+  if (idx == _idx_home && !heavy) {
     if (_node_prefs) {
       _node_prefs->buzzer_quiet = _node_prefs->buzzer_quiet ? 0 : 1;
   #ifdef PIN_BUZZER
@@ -158,47 +170,26 @@ void UITask::pageAction() {
       the_mesh.savePrefs();
       _screen.showToast(_node_prefs->buzzer_quiet ? "buzzer muted" : "buzzer on", now);
     }
-  } else if (idx == _idx_advert) {
-    sendAdvert();
-    return;                              // sendAdvert() sets its own toast
-  } else if (idx == _idx_bt) {
-    toggleBluetooth();
+    _next_render = 0;
     return;
-  } else if (idx == _idx_shutdown) {
-    if (_shutdown.isArmed(now)) {
-      doShutdown();                       // does not return
-    } else {
-      _shutdown.arm(now);
-      _screen.showToast("armed - again to confirm", now, ShutdownPage::ARM_MS);
-    }
   }
 #if ENV_INCLUDE_GPS == 1
-  else if (_idx_gps >= 0 && idx == _idx_gps) {
+  if (_idx_gps >= 0 && idx == _idx_gps && !heavy) {
     if (_node_prefs != NULL) {
       _node_prefs->gps_enabled = _node_prefs->gps_enabled ? 0 : 1;
-      the_mesh.applyGpsPrefs();           // pushes the flag into SensorManager
+      the_mesh.applyGpsPrefs();              // pushes the flag into SensorManager
       the_mesh.savePrefs();
       _screen.showToast(_node_prefs->gps_enabled ? "gps on" : "gps off", now);
     }
+    _next_render = 0;
+    return;
   }
 #endif
+  /* A page with no action of this weight says so, rather than leaving the
+     press looking like a device that has stopped responding. */
+  _screen.showToast(heavy ? "nothing to hold here" : "nothing to tap here", now);
   _next_render = 0;
 }
-
-#ifdef UI_BUTTON_DEBUG
-/* Which physical button is on which pin is not answerable from variant.h:
-   PIN_BUTTON2 is declared there but nothing in the stock firmware reads it on
-   this board, so it may not be wired to anything. This prints every event with
-   its pin so one press-test settles it. */
-static void logBtn(const char* which, int pin, int ev) {
-  if (ev == BUTTON_EVENT_NONE) return;
-  const char* n = ev == BUTTON_EVENT_CLICK        ? "CLICK"
-                : ev == BUTTON_EVENT_DOUBLE_CLICK ? "DOUBLE"
-                : ev == BUTTON_EVENT_TRIPLE_CLICK ? "TRIPLE"
-                : ev == BUTTON_EVENT_LONG_PRESS   ? "LONG" : "?";
-  Serial.printf("BTN %s pin=%d %s\n", which, pin, n);
-}
-#endif
 
 void UITask::pollButtons() {
   /* Poll BOTH every pass. MomentaryButton's multi-click window only advances
@@ -220,15 +211,11 @@ void UITask::pollButtons() {
     default: break;
   }
   if (key != 0) {
-    /* Leaving the power-off page disarms it: a walk round the pages must not
-       come back to a screen one press from shutting down. */
-    _shutdown.disarm();
     _screen.handleInput(key);
   } else {
     switch (ev2) {
-      case BUTTON_EVENT_CLICK:        sendAdvert(); break;
-      case BUTTON_EVENT_LONG_PRESS:   toggleBluetooth(); break;
-      case BUTTON_EVENT_DOUBLE_CLICK: pageAction(); break;
+      case BUTTON_EVENT_CLICK:      pageAction(false); break;   // light
+      case BUTTON_EVENT_LONG_PRESS: pageAction(true);  break;   // heavy
       default: break;
     }
   }
