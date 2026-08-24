@@ -6,6 +6,7 @@
 /* The in-class initialiser is only a declaration; anything that binds this to a
    reference -- an EXPECT_EQ, for one -- needs a real object to point at. */
 const int PagedScreen::MAX_PAGES;
+const uint32_t PagedScreen::TOAST_MS;
 
 bool PagedScreen::addPage(UIPage* page) {
   if (page == NULL || _count >= MAX_PAGES) return false;
@@ -41,7 +42,30 @@ void PagedScreen::drawIndicator(DisplayDriver& display) {
   display.setColor(UIColor::primary_txt);
 }
 
-int PagedScreen::render(DisplayDriver& display) {
+void PagedScreen::showToast(const char* msg, uint32_t now_ms, uint32_t ms) {
+  if (msg == NULL) { _toast[0] = 0; _toast_until = now_ms; return; }
+  strncpy(_toast, msg, sizeof(_toast) - 1);
+  _toast[sizeof(_toast) - 1] = 0;
+  _toast_until = now_ms + ms;
+}
+
+bool PagedScreen::toastVisible(uint32_t now_ms) const {
+  return _toast[0] != 0 && (int32_t)(_toast_until - now_ms) > 0;
+}
+
+void PagedScreen::drawToast(DisplayDriver& display) {
+  /* Drawn on the indicator's row rather than over the page. The alternative --
+     a box in the middle -- needs fillRect, whose origin does not match text on
+     this driver, and would hide the very rows the reader was looking at. */
+  int y = display.height() - 1;
+  display.setColor(UIColor::warning_txt);
+  display.drawTextCentered(display.width() / 2, y, _toast);
+  display.setColor(UIColor::primary_txt);
+}
+
+int PagedScreen::render(DisplayDriver& display) { return render(display, 0); }
+
+int PagedScreen::render(DisplayDriver& display, uint32_t now_ms) {
   display.startFrame();
   display.setTextSize(_text_size);
   display.setColor(UIColor::primary_txt);
@@ -51,7 +75,16 @@ int PagedScreen::render(DisplayDriver& display) {
     display.drawTextCentered(display.width() / 2, _pitch, "no pages");
   } else {
     next_ms = _pages[_cur]->renderBody(display, pageHeight(display));
-    drawIndicator(display);
+    /* The toast takes the indicator's row while it is up: on a panel this size
+       there is no spare row, and a toast that pushed the page around would be
+       more disruptive than the missing dots for three seconds. */
+    if (toastVisible(now_ms)) {
+      drawToast(display);
+      uint32_t left = _toast_until - now_ms;
+      if ((uint32_t)next_ms > left) next_ms = (int)left;   // redraw as it expires
+    } else {
+      drawIndicator(display);
+    }
   }
 
   display.endFrame();

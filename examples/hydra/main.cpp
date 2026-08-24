@@ -146,6 +146,9 @@ static CompanionModule companion_module;
 #ifdef DISPLAY_CLASS
 #include <helpers/ObserverNeighbours.h>
 #include <helpers/ui/PagedScreen.h>
+#include <helpers/PowerMonitor.h>
+#include "ui/StatusPage.h"
+#include "ui/IdentityPage.h"
 #ifdef UI_BUTTON_PIN
   #include <helpers/ui/MomentaryButton.h>
 #endif
@@ -165,6 +168,12 @@ class NeighboursModule : public AppModule {
   ObserverNeighbours _neighbours;
   NeighboursScreen _neighbours_page;
   PagedScreen _screen;
+  PowerMonitor _power;
+  StatusPage _status_page;
+  /* One page per slot, built at setup and never resized. A slot can be enabled
+     later from the CLI, so every slot gets a page whether or not it is up yet;
+     the page reads its state live and says "down" until it is not. */
+  IdentityPage* _id_pages[HYDRA_NUM_SLOTS];
   char _subtitle[28];
   unsigned long _next_render;
   bool _ok;
@@ -193,7 +202,7 @@ public:
          characters of name -- not a table. The compact font makes it 33 by 25,
          and 6 units of pitch spends the drawable height on 16 peer rows. */
       _neighbours_page(_neighbours, NULL, NULL, 6, 5000, 0),
-      _screen(6, 0), _next_render(0), _ok(false), _frames(0)
+      _screen(6, 0), _status_page(_power, 6), _next_render(0), _ok(false), _frames(0)
 #ifdef UI_BUTTON_PIN
       /* long-press at 700ms: long enough not to fire on a firm tap, short
          enough that holding for it does not feel like a hang. */
@@ -222,7 +231,15 @@ public:
     _neighbours_page.setTitle(p->node_name);
     formatRadio(p);
     _neighbours_page.setSubtitle(_subtitle);
+    /* Order: neighbours first, because it is the page worth glancing at, then
+       the node, then one page per identity. */
     _screen.addPage(&_neighbours_page);
+    _screen.addPage(&_status_page);
+    for (int i = 0; i < HYDRA_NUM_SLOTS; i++) {
+      _id_pages[i] = new IdentityPage(i, 6, &_screen);
+      if (!_screen.addPage(_id_pages[i])) break;   // container full: stop cleanly
+    }
+    _power.begin(PowerMonitor::DEFAULT_MIN_MV, PowerMonitor::DEFAULT_MAX_MV);
   #ifdef UI_BUTTON_PIN
     _btn1.begin();
   #endif
@@ -270,15 +287,16 @@ public:
 
   void onLoop() override {
     if (!_ok || !display.isOn()) return;
+    unsigned long now = millis();
+    _power.sample(now, board.getBattMilliVolts());
     pollButtons();
     _screen.poll();
-    unsigned long now = millis();
     if ((long)(now - _next_render) < 0) return;
     // Re-read the config every frame: the CLI can change it at runtime, and a
     // stale header is exactly the kind of quiet lie a status screen must not tell.
     formatRadio(hydra.repeater().prefs());
     _neighbours.refresh(now);
-    _next_render = now + _screen.render(display);
+    _next_render = now + _screen.render(display, now);
     _frames++;
   }
 

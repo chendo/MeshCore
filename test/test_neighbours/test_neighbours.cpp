@@ -524,6 +524,55 @@ TEST(Paged, NeighboursScreenHonoursTheHeightItIsGiven) {
   for (auto& t : d.texts) EXPECT_LE(t.y, 118) << "nothing may run past the panel";
 }
 
+TEST(Toast, ItReplacesTheIndicatorAndThenExpires) {
+  FakeDisplay d(128, 118, 4);
+  StubPage a, b;
+  PagedScreen s(6, 0);
+  s.addPage(&a); s.addPage(&b);
+
+  s.render(d, 1000);
+  bool dots = false;
+  for (auto& t : d.texts) if (t.s == "O o") dots = true;
+  EXPECT_TRUE(dots) << "no toast, so the indicator is shown";
+
+  s.showToast("OK - Advert sent", 1000);
+  EXPECT_TRUE(s.toastVisible(1000));
+  s.render(d, 1000);
+  bool toast = false;
+  dots = false;
+  for (auto& t : d.texts) {
+    if (t.s == "OK - Advert sent") toast = true;
+    if (t.s == "O o") dots = true;
+  }
+  EXPECT_TRUE(toast) << "the confirmation must actually reach the panel";
+  EXPECT_FALSE(dots) << "it takes the indicator's row, not a row of its own";
+
+  // Once expired the indicator returns without any further prompting.
+  EXPECT_FALSE(s.toastVisible(1000 + PagedScreen::TOAST_MS));
+  s.render(d, 1000 + PagedScreen::TOAST_MS);
+  dots = false;
+  for (auto& t : d.texts) if (t.s == "O o") dots = true;
+  EXPECT_TRUE(dots);
+}
+
+TEST(Toast, ItShortensTheRefreshSoItCanDisappear) {
+  FakeDisplay d(128, 118, 4);
+  StubPage a, b;
+  a.want_ms = 60000;              // a page that would otherwise sit for a minute
+  PagedScreen s(6, 0);
+  s.addPage(&a); s.addPage(&b);
+  s.showToast("sent", 1000);
+  int next = s.render(d, 1000);
+  EXPECT_LE(next, (int)PagedScreen::TOAST_MS)
+      << "a toast that outlives its own redraw would stay on screen for a minute";
+}
+
+TEST(Toast, LongTextIsTruncatedNotOverflowed) {
+  PagedScreen s(6, 0);
+  s.showToast("a very long confirmation string that will not fit anywhere", 0);
+  EXPECT_TRUE(s.toastVisible(0));   // must not crash or run off its buffer
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
