@@ -456,6 +456,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Status, and what you can trust">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#changing-the-partition-table-destroys-the-filesystem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changing the partition table destroys the filesystem
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -916,6 +933,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Status, and what you can trust">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#changing-the-partition-table-destroys-the-filesystem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changing the partition table destroys the filesystem
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1210,6 +1244,74 @@ boots, adverts and collects contacts. It answers no messages yet.</p>
 The radio driver holds a receive-failure count for each cause. The packet trace records
 each receive error with its RadioLib code. No command prints either of those two. That
 work is still open.</p>
+<h3 id="changing-the-partition-table-destroys-the-filesystem">Changing the partition table destroys the filesystem</h3>
+<p><strong>This applies to the ESP32 boards. It has already cost one operator four identity
+keys.</strong> Read it before you flash an M5 with anything other than the image that is on it
+now.</p>
+<p>An ESP32 image carries its own partition table, and the table says where SPIFFS starts.
+The envs in this tree do not all use the same table:</p>
+<table>
+<thead>
+<tr>
+<th>env</th>
+<th>table</th>
+<th>SPIFFS offset</th>
+<th>SPIFFS size</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>every other <code>ThinkNode_M5_*</code> env, <code>_Repeater</code> and <code>_Repeater_hardened</code> included</td>
+<td>stock <code>default.csv</code></td>
+<td><code>0x290000</code></td>
+<td><code>0x160000</code></td>
+</tr>
+<tr>
+<td><code>ThinkNode_M5_hydra</code></td>
+<td><code>min_spiffs.csv</code></td>
+<td><code>0x3D0000</code></td>
+<td><code>0x20000</code></td>
+</tr>
+<tr>
+<td>(<code>huge_app.csv</code>, if anyone ever selects it)</td>
+<td><code>huge_app.csv</code></td>
+<td><code>0x310000</code></td>
+<td><code>0xE0000</code></td>
+</tr>
+</tbody>
+</table>
+<p>Flash a board from one row to another and the new firmware looks for its filesystem at an
+address where no filesystem has ever been. <strong>Everything in the old SPIFFS is orphaned:</strong></p>
+<ul>
+<li>every identity keypair — <code>_main</code> and each <code>_slotN</code></li>
+<li><code>prefs.json</code>: node name, frequency, bandwidth, spreading factor, TX power, region</li>
+<li>the repeater ACL and each room ACL</li>
+<li><code>/hydra_slots</code>, the slot configuration</li>
+</ul>
+<p><strong>It happens with no error and no prompt.</strong> <code>SPIFFS.begin(true)</code> formats what it finds at
+the new offset, the node boots clean, mints fresh keys and adverts under them. The old
+bytes are still on the chip, but nothing addresses them and no command reads them. The
+first sign is that the mesh no longer recognises the node.</p>
+<p><strong>Before you flash across a table change, save the keys.</strong> On the serial console:</p>
+<pre><code>get prv.key                 # slot 0
+slot 1 get prv.key          # and each other slot in turn
+slots                       # the type and name of each slot
+get name / get freq / ...   # anything you changed from the build default
+</code></pre>
+<p>Both <code>get prv.key</code> forms answer the console only, never a remote command. Write the
+output down somewhere off the board. After the flash, put each key back with
+<code>set prv.key &lt;hex&gt;</code> for slot 0 and <code>slot N set prv.key &lt;hex&gt;</code> for the others, then set
+the name and type of each slot again. <code>slot N set prv.key</code> needs the slot to be <strong>off</strong>
+for that boot, and it reads the key back and compares it before it reports success.</p>
+<p><strong>NVS survives, and it is not a safety net.</strong> All three tables above put <code>nvs</code> at
+<code>0x9000</code> with a size of <code>0x5000</code>, so a partition change never moves it. That is why the
+operator recovered: the firmware that had been on the board before mirrored its keys
+into NVS. Hydra writes nothing to NVS, deliberately. A second copy of a private key in a
+second store is a second thing to keep correct and a second thing to leak, and the
+answer to "I am about to change the partition table" is to save the keys, not to build a
+mirror. <strong>Do not rely on NVS holding anything.</strong></p>
+<p>An over-the-air update inside one env does not change the table and is safe. Only a full
+flash of an image built with a different <code>board_build.partitions</code> moves the filesystem.</p>
 <hr />
 <h2 id="two-upstream-bug-fixes">Two upstream bug fixes</h2>
 <p>Both are plain upstream bugs. Both sit on their own branch on top of <code>v1.17.1</code>, one
@@ -1344,13 +1446,17 @@ colour is the radio. The brightness is the direction.</strong></p>
 <p>Both LEDs go dim together one time every 5 s as a heartbeat. The brightness is true
 hardware PWM (<code>analogWrite</code>), so the levels do not change with how often <code>loop()</code> runs.
 The <code>WITH_STATUS_LED</code> flag turns it on.</p>
-<p><strong>Neither ThinkNode board turns it on, and each has its own reason.</strong> The M1 has one LED
-that this firmware can own: the green LED on P0.13, which <code>ThinkNodeM1Board</code> already
-lights for each LoRa transmit. Its other LED is the red charge indicator on P1.04, and
-the charger blinks that one in hardware. One LED cannot carry two axes. The <code>LED_RED</code>,
-<code>LED_GREEN</code>, <code>LED_BLUE</code> and <code>LED_STATE_ON</code> values in <code>variants/thinknode_m1/variant.h</code>
-come from a Seeed template, and they collide with <code>PIN_SPI1_MISO</code>, <code>PIN_GPS_PPS</code> and
-<code>PIN_NEOPIXEL</code> in that same file, so a status LED must not be built on them.</p>
+<p><strong>Neither ThinkNode board turns it on, and each has its own reason.</strong> The M1 has exactly
+two LEDs, and <strong>no green one</strong>: blue on P0.13 and red on P1.04. <code>StatusLed</code> wants a blue
+and a green pair, so it does not fit. Both M1 LEDs are also already spoken for. Blue is
+the LoRa transmit indicator that <code>ThinkNodeM1Board</code> drives, and Bluefruit blinks the same
+pin while it advertises. Red is the product-status LED, and the charger drives it in
+hardware -- steady when on, fast flash while charging, slow flash on low battery.</p>
+<p>This is worth revisiting. Until the pin-37 and LED patches landed, the values in
+<code>variants/thinknode_m1/variant.h</code> were a verbatim copy of <code>variants/lilygo_techo/</code>: they
+named a green LED that does not exist, put <code>LED_RED</code> on <code>PIN_SPI1_MISO</code>, and set
+<code>LED_STATE_ON</code> to the T-Echo's active-low polarity, so every LED on this board ran
+inverted.</p>
 <p>The M5 puts its LEDs behind a PCA9557 I2C expander, and <code>ThinknodeM5Board</code> reaches them
 with <code>expander.digitalWrite()</code>. <code>StatusLed</code> calls <code>pinMode()</code> and <code>analogWrite()</code> on a
 GPIO, and no hardware PWM reaches an I2C expander. The blue LED on expander pin 1 is
@@ -1390,10 +1496,20 @@ arbitrates between the ports. The limit is 8 ports.</p>
   in used to look the same as a node on a quiet band. Read the counters with
   <code>stats-txwait</code>.</li>
 <li><strong>Loopback.</strong> One antenna is half duplex, so two identities on the same board cannot
-  hear each other over the air. Slot 0 could therefore never repeat for slot 1. With
-  loopback on, the core also gives each transmitted frame to the sibling ports as a
-  received frame, and never back to the sender. Each identity then has the experience of
-  a second physical node in the same room. Hydra turns loopback on.</li>
+  hear each other over the air. A chat identity could therefore never address the
+  repeater or the room on its own board. With loopback on, the core also gives each
+  transmitted frame to the sibling ports as a received frame, and never back to the
+  sender. Each identity then has the experience of a second physical node in the same
+  room. Hydra turns loopback on.</li>
+<li><strong>Loopback frames are delivered but never relayed.</strong> A node that can hear the room slot
+  of this board can also hear the repeater of this board: one antenna, one radio horizon.
+  A relay of a sibling therefore adds no coverage. It only spends airtime from the pooled
+  duty budget and puts an extra hash in the path, which makes one board look like two
+  hops. So the arbiter marks each loopback frame, <code>RadioPort::lastRxWasLoopback()</code>
+  reports the mark to the identity that takes the frame, and <code>LoopbackForwardGuard</code>
+  carries it as far as <code>allowPacketForward()</code>, which is where a mesh decides to
+  retransmit. A frame off the air is forwarded exactly as before. <code>stats-shared</code> reports
+  <code>lbmiss</code>, which counts any mark that the guard could not hold; it should stay at zero.</li>
 <li><strong>Cross-slot priority</strong>, set for each port and not fixed in the arbiter, so the policy
   belongs to the caller. Hydra gives slot 0 priority 0 and gives the rest priority 1. The
   mesh depends on the repeater. It does not depend on chat.</li>
@@ -1421,9 +1537,27 @@ identities.</p>
 fork of it. <code>MyMesh</code> already takes a <code>mesh::Radio&amp;</code>, so the reuse is to hand it a
 <code>RadioPort</code> in place of <code>radio_driver</code>. The build compiles that directory's <code>MyMesh.cpp</code>
 and puts the directory on the include path. To upgrade a <code>simple_repeater</code> node
-therefore costs nothing: slot 0 keeps the <code>_main</code> identity key, so <code>prefs.json</code>,
-the ACL and the region map carry over. Flash hydra over a repeater and it comes back as
-the same node with slots 1 and above off.</p>
+therefore costs nothing on the nRF52 boards: slot 0 keeps the <code>_main</code> identity key, so
+<code>prefs.json</code>, the ACL and the region map carry over. Flash hydra over a repeater and it
+comes back as the same node with slots 1 and above off.</p>
+<blockquote>
+<p><strong>On the M5 that upgrade changes the partition table, and the filesystem does not
+carry over.</strong> <code>ThinkNode_M5_Repeater_hardened</code> uses the stock table and
+<code>ThinkNode_M5_hydra</code> uses <code>min_spiffs.csv</code>. The two put SPIFFS at different offsets,
+so every identity key on the board is orphaned by the flash. <strong>Save the keys first</strong>
+— see <a href="#changing-the-partition-table-destroys-the-filesystem">Changing the partition table destroys the filesystem</a>.</p>
+</blockquote>
+<p><strong>Where a keypair lives.</strong> <code>IdentityStore</code> files it at <code>&lt;dir&gt;/&lt;name&gt;.id</code>, and <code>&lt;dir&gt;</code>
+comes from the platform: <code>""</code> on nRF52 and STM32, <code>/identity</code> on ESP32 and RP2040. That
+is upstream's convention, and <code>src/helpers/IdentityPath.h</code> now holds it once for the
+whole of hydra. Hydra used to pass <code>""</code> everywhere, so on an M5 it wrote <code>/_main.id</code>
+where the stock firmware and upstream's own <code>saveIdentity()</code> used <code>/identity/_main.id</code>.
+An M5 that got hydra flashed over stock firmware therefore minted a fresh key with the
+filesystem intact, and <code>set prv.key</code> on slot 0 wrote a file that hydra never read back.
+<code>HydraNode::migrateIdentities()</code> runs before any slot starts and copies each key forward
+from the old path, once, printing <code>hydra: slot N identity moved ...</code> when it does. It
+never overwrites a key that is already at the current path, and it leaves the old file
+in place. Nothing changes on the nRF52 boards, where both paths are the same string.</p>
 <p>Slots 1 and above are much smaller than slot 0: a packet pool of 8 against 32, and a
 dedup table of 32 hashes against the 160 of <code>SimpleMeshTables</code>. <code>MAX_CONTACTS</code> is 16,
 against the 350 of the stock RAK3401 companion env. A chat identity is an end point and
@@ -1526,8 +1660,8 @@ on the M5.</p>
 <tr>
 <td><code>RAK_3401_hydra</code> (3 slots)</td>
 <td>builds</td>
-<td style="text-align: right;">392,876 B (48.2%)</td>
-<td style="text-align: right;">54,600 B (23.2%)</td>
+<td style="text-align: right;">403,868 B (49.5%)</td>
+<td style="text-align: right;">54,888 B (23.3%)</td>
 </tr>
 <tr>
 <td><code>RAK_3401_hydra_debug</code> (packet trace on)</td>
@@ -1550,8 +1684,8 @@ on the M5.</p>
 <tr>
 <td><code>ThinkNode_M1_hydra</code> (3 slots)</td>
 <td>builds</td>
-<td style="text-align: right;">330,128 B (40.5%)</td>
-<td style="text-align: right;">52,512 B (22.3%)</td>
+<td style="text-align: right;">341,624 B (41.9%)</td>
+<td style="text-align: right;">52,800 B (22.4%)</td>
 </tr>
 <tr>
 <td><code>ThinkNode_M5_Repeater_hardened</code></td>
@@ -1562,8 +1696,8 @@ on the M5.</p>
 <tr>
 <td><code>ThinkNode_M5_hydra</code> (5 slots)</td>
 <td>builds</td>
-<td style="text-align: right;">1,125,249 B (57.2% of 1,966,080)</td>
-<td style="text-align: right;">104,288 B (19.9%)</td>
+<td style="text-align: right;">1,135,597 B (57.8% of 1,966,080)</td>
+<td style="text-align: right;">104,864 B (20.0%)</td>
 </tr>
 </tbody>
 </table>
@@ -1582,7 +1716,12 @@ far more than the identities, the preferences, the ACLs and <code>/hydra_slots</
 <code>huge_app.csv</code> would give 3 MB, but it deletes the second OTA slot, and a repeater on a
 mast is the node that most needs to accept an image over the air. The hydra env also
 drops <code>DISPLAY_CLASS</code>, which keeps GxEPD2 and its fonts out of the image. That reduction
-is about the size of hydra itself, so the two envs land within 1,200 B of each other.</p>
+is about the size of hydra itself, so the two envs land within 10 KB of each other
+(1,126,385 B against 1,135,597 B).</p>
+<p>The two envs therefore have <strong>different</strong> tables, and moving a board between them
+destroys its filesystem and every identity key on it. See
+<a href="#changing-the-partition-table-destroys-the-filesystem">Changing the partition table destroys the filesystem</a>
+before you flash one over the other.</p>
 <p><strong>A build that passes is not a test on hardware.</strong> No firmware from this tree has gone
 onto a board.</p>
 <h3 id="the-cost-against-upstream">The cost against upstream</h3>
@@ -1660,7 +1799,9 @@ that.</p>
 <pre><code class="language-bash">pio test -e native -e native_ble -e native_radio -e native_multi \
          -e native_multi_notrace -e native_kiss_modem
 </code></pre>
-<p><strong>277 cases, and all of them pass.</strong> 229 are new here. 48 are upstream's.</p>
+<p><strong>449 cases, and all of them pass.</strong> 401 are new here. 48 are upstream's, in the six
+suites that upstream ships (<code>test_config_serializer</code>, <code>test_kiss_modem</code>,
+<code>test_mesh_tables</code>, <code>test_routing_policy</code>, <code>test_utf8_helpers</code>, <code>test_utils</code>).</p>
 <table>
 <thead>
 <tr>
@@ -1671,23 +1812,28 @@ that.</p>
 </thead>
 <tbody>
 <tr>
-<td><code>test_shared_radio</code></td>
-<td><code>native_multi</code></td>
-<td style="text-align: right;">90</td>
-</tr>
-<tr>
 <td><code>test_hydra_slots</code></td>
 <td><code>native_multi</code></td>
-<td style="text-align: right;">53</td>
+<td style="text-align: right;">147</td>
 </tr>
 <tr>
-<td><code>test_lora_watchdog</code></td>
+<td><code>test_shared_radio</code></td>
 <td><code>native_multi</code></td>
-<td style="text-align: right;">18</td>
+<td style="text-align: right;">97</td>
+</tr>
+<tr>
+<td><code>test_clock_policy</code></td>
+<td><code>native</code></td>
+<td style="text-align: right;">39</td>
 </tr>
 <tr>
 <td><code>test_ble_bridge</code></td>
 <td><code>native_ble</code></td>
+<td style="text-align: right;">34</td>
+</tr>
+<tr>
+<td><code>test_lora_watchdog</code></td>
+<td><code>native_multi</code></td>
 <td style="text-align: right;">18</td>
 </tr>
 <tr>
@@ -1696,9 +1842,34 @@ that.</p>
 <td style="text-align: right;">17</td>
 </tr>
 <tr>
+<td><code>test_gps_switch</code></td>
+<td><code>native</code></td>
+<td style="text-align: right;">16</td>
+</tr>
+<tr>
+<td><code>test_routing_policy</code></td>
+<td><code>native</code></td>
+<td style="text-align: right;">14</td>
+</tr>
+<tr>
 <td><code>test_mux</code></td>
 <td><code>native_multi</code></td>
 <td style="text-align: right;">14</td>
+</tr>
+<tr>
+<td><code>test_config_serializer</code></td>
+<td><code>native</code></td>
+<td style="text-align: right;">9</td>
+</tr>
+<tr>
+<td><code>test_kiss_modem</code></td>
+<td><code>native_kiss_modem</code></td>
+<td style="text-align: right;">8</td>
+</tr>
+<tr>
+<td><code>test_mesh_tables</code></td>
+<td><code>native</code></td>
+<td style="text-align: right;">8</td>
 </tr>
 <tr>
 <td><code>test_packet</code></td>
@@ -1711,12 +1882,24 @@ that.</p>
 <td style="text-align: right;">8</td>
 </tr>
 <tr>
+<td><code>test_utils</code></td>
+<td><code>native</code></td>
+<td style="text-align: right;">5</td>
+</tr>
+<tr>
+<td><code>test_utf8_helpers</code></td>
+<td><code>native</code></td>
+<td style="text-align: right;">4</td>
+</tr>
+<tr>
 <td><code>test_bridge</code></td>
 <td><code>native</code></td>
 <td style="text-align: right;">3</td>
 </tr>
 </tbody>
 </table>
+<p><code>test_companion_node_prefs</code> is upstream's and holds one case, but it supplies its own
+<code>main()</code> and PlatformIO reports it as zero. It is not in the 449.</p>
 <p><code>test_shared_radio_notrace</code> needs its own env, because a second binary is the only way
 to exercise the off state of a compile-time flag. <code>native_ble</code> supplies a real SHA-256
 in place of the deliberately fake one that the other host tests share, because the

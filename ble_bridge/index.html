@@ -484,6 +484,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#hardware-check" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Hardware check
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1041,6 +1052,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#hardware-check" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Hardware check
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1076,10 +1098,14 @@ on a narrow and fast one, where traffic and adverts must flow between them with
 no second radio and no internet link.</p>
 <p>This is the nRF52 counterpart to the ESP-NOW bridge. A board such as the RAK3401
 or the Elecrow ThinkNode M1 has no WiFi, so ESP-NOW is unavailable to it.</p>
-<p><strong>nRF52840 only.</strong> An ESP32 repeater cannot join a BLE bridge group.</p>
+<p><strong>nRF52840 and ESP32.</strong> Both families run the same bridge and interoperate,
+which matters because BLE is the only radio both carry: an nRF52 node has no
+WiFi and so cannot reach the ESP-NOW bridge, and this is the only transport that
+joins an nRF52 node to an ESP32 one.</p>
 <hr />
 <h2 id="how-it-works">How it works</h2>
-<p>Three layers, each in its own file under <code>src/helpers/</code>:</p>
+<p>Layers, each in its own file under <code>src/helpers/</code>. The top three are shared by
+every board; the bottom two are the transport, and the build picks one.</p>
 <table>
 <thead>
 <tr>
@@ -1090,21 +1116,6 @@ or the Elecrow ThinkNode M1 has no WiFi, so ESP-NOW is unavailable to it.</p>
 </thead>
 <tbody>
 <tr>
-<td>Stack</td>
-<td><code>nrf52/BleStack.{h,cpp}</code></td>
-<td>Starts the SoftDevice with the connection roles that a bridge needs, and steps down the buffer tier before it gives up a connection slot.</td>
-</tr>
-<tr>
-<td>Discovery</td>
-<td><code>nrf52/BleDiscovery.{h,cpp}</code></td>
-<td>Advertises a beacon that names the group, and scans for the same beacon from other nodes.</td>
-</tr>
-<tr>
-<td>Link</td>
-<td><code>nrf52/BleLink.{h,cpp}</code></td>
-<td>Opens the connection and carries the frames.</td>
-</tr>
-<tr>
 <td>Bridge</td>
 <td><code>bridges/BLEBridge.{h,cpp}</code></td>
 <td>Builds and checks the frames, and hands packets to the mesh.</td>
@@ -1114,8 +1125,37 @@ or the Elecrow ThinkNode M1 has no WiFi, so ESP-NOW is unavailable to it.</p>
 <td><code>bridges/BleBridgeFrame.h</code></td>
 <td>The wire format, the group marker and the deny list. Header only, so the host tests run it.</td>
 </tr>
+<tr>
+<td>Link</td>
+<td><code>bridges/BleLink.{h,cpp}</code></td>
+<td>The framing, the SYNC hunt, reassembly, the transmit queues, the authentication grace, the idle limit and the silent-peer sweep. Names no BLE stack.</td>
+</tr>
+<tr>
+<td>Link backend</td>
+<td><code>nrf52/BluefruitLinkBackend.{h,cpp}</code> · <code>esp32/NimBleLinkBackend.{h,cpp}</code></td>
+<td>Every call into a BLE stack that the link needs: connections, GATT, dialling out.</td>
+</tr>
+<tr>
+<td>Discovery</td>
+<td><code>nrf52/BleDiscovery.{h,cpp}</code> · <code>esp32/NimBleDiscovery.{h,cpp}</code></td>
+<td>Starts the stack, advertises a beacon that names the group, and scans for the same beacon from other nodes.</td>
+</tr>
+<tr>
+<td>Stack (nRF52)</td>
+<td><code>nrf52/BleStack.{h,cpp}</code></td>
+<td>Starts the SoftDevice with the connection roles that a bridge needs, and steps down the buffer tier before it gives up a connection slot.</td>
+</tr>
 </tbody>
 </table>
+<p><code>BleLink</code> is one implementation for both families. That is not tidiness: the two
+ends of a mixed bridge must agree on the framing to the byte, and one source
+file is the only way to be sure they do. The host tests in
+<code>test/test_ble_bridge/</code> therefore cover both backends' link behaviour at once.</p>
+<p>The backend and the discovery class are named by build flags, the same way a
+radio or a display is:</p>
+<pre><code class="language-ini">${bridge.ble_bluefruit}    ; nRF52: SoftDevice, through Adafruit Bluefruit
+${bridge.ble_nimble}       ; ESP32: NimBLE
+</code></pre>
 <h3 id="the-transport-is-a-connection-not-a-broadcast">The transport is a connection, not a broadcast</h3>
 <p>An earlier version of this bridge sent each frame as a BLE 5 extended advert.
 That cannot be made reliable. Measured on a live pair, a single advert lands
@@ -1207,13 +1247,20 @@ notices a radio that went away and not a peer that stopped to talk.</p>
 <hr />
 <h2 id="quickstart">Quickstart</h2>
 <h3 id="1-build-and-flash-both-nodes">1. Build and flash both nodes</h3>
-<pre><code class="language-sh">pio run -e RAK_3401_repeater_bridge_ble -t upload
-pio run -e ThinkNode_M1_repeater_bridge_ble -t upload   # the ThinkNode M1
+<pre><code class="language-sh">pio run -e RAK_3401_repeater_bridge_ble -t upload        # nRF52840
+pio run -e ThinkNode_M1_repeater_bridge_ble -t upload    # nRF52840
+pio run -e ThinkNode_M5_repeater_bridge_ble -t upload    # ESP32-S3
 </code></pre>
-<p>Both envs belong to this fork and are defined in <code>variants/hydra_rak3401</code> and
-<code>variants/hydra_m1</code>. The board definitions under <code>variants/rak3401</code> and
-<code>variants/thinknode_m1</code> are upstream's and carry no configuration of ours.</p>
-<p>Both ends must run the same build. The framing is part of the firmware.</p>
+<p>All three envs belong to this fork and are defined in <code>variants/hydra_rak3401</code>,
+<code>variants/hydra_m1</code> and <code>variants/hydra_m5</code>. The board definitions under
+<code>variants/rak3401</code>, <code>variants/thinknode_m1</code> and <code>variants/thinknode_m5</code> are
+upstream's and carry no configuration of ours.</p>
+<p>The two families interoperate. A ThinkNode M1 and a ThinkNode M5 with the same
+<code>bridge.secret</code> form one bridge group, which is the only way to join an nRF52
+node to an ESP32 one: an nRF52 board has no WiFi and so cannot reach the ESP-NOW
+bridge, and BLE is the only radio both carry.</p>
+<p>Both ends must run the SAME VERSION of this bridge. The framing is part of the
+firmware, and a frame version bump is deliberately not backward compatible.</p>
 <h3 id="2-set-a-shared-secret-and-do-this-first">2. Set a shared secret, and do this first</h3>
 <p>Every node in a bridge group shares one secret. It keys the HMAC over each
 frame, and it is the only thing that separates your group from anyone else's. It
@@ -1275,8 +1322,16 @@ repeater status reply is <code>0x04</code>; <code>0x01</code> is UART and <code>
 </thead>
 <tbody>
 <tr>
-<td><code>${bridge.ble}</code></td>
-<td>Selects this bridge. Put it in the env's <code>build_flags</code>.</td>
+<td><code>${bridge.ble_bluefruit}</code></td>
+<td>This bridge on nRF52, over the SoftDevice. <code>${bridge.ble}</code> is an alias for it.</td>
+</tr>
+<tr>
+<td><code>${bridge.ble_nimble}</code></td>
+<td>This bridge on ESP32, over NimBLE.</td>
+</tr>
+<tr>
+<td><code>CONFIG_BT_NIMBLE_MAX_CONNECTIONS</code></td>
+<td>ESP32 only. NimBLE sizes its connection pool at build time and defaults to 3. <strong>4</strong> is what a bridge needs: three outward clients and one inbound peer.</td>
 </tr>
 <tr>
 <td><code>BLE_PRPH_SLOTS</code></td>
@@ -1288,7 +1343,7 @@ repeater status reply is <code>0x04</code>; <code>0x01</code> is UART and <code>
 </tr>
 <tr>
 <td><code>BLE_LINK_SILENT_SWEEP</code></td>
-<td>Reclaims the inbound slot from a peer that connects and writes nothing. On by default. Set it to <strong>0</strong> in a build that also carries the BLE CLI.</td>
+<td>Reclaims the inbound slot from a peer that connects and writes nothing. On by default. Set it to <strong>0</strong> in a build that also carries the BLE CLI. No such build can exist on ESP32; see below.</td>
 </tr>
 <tr>
 <td><code>LOOP_WATCHDOG_MS</code></td>
@@ -1304,12 +1359,23 @@ repeater status reply is <code>0x04</code>; <code>0x01</code> is UART and <code>
 </tr>
 </tbody>
 </table>
-<p>The env also needs these in <code>build_src_filter</code>:</p>
+<p>The env also needs the transport's source files in <code>build_src_filter</code>. On nRF52:</p>
 <pre><code>+&lt;helpers/nrf52/BleStack.cpp&gt;
 +&lt;helpers/nrf52/BleDiscovery.cpp&gt;
-+&lt;helpers/nrf52/BleLink.cpp&gt;
++&lt;helpers/nrf52/BluefruitLinkBackend.cpp&gt;
++&lt;helpers/bridges/BleLink.cpp&gt;
 +&lt;helpers/bridges/BLEBridge.cpp&gt;
 </code></pre>
+<p>On ESP32:</p>
+<pre><code>+&lt;helpers/esp32/NimBleStack.cpp&gt;
++&lt;helpers/esp32/NimBleDiscovery.cpp&gt;
++&lt;helpers/esp32/NimBleLinkBackend.cpp&gt;
++&lt;helpers/bridges/BleLink.cpp&gt;
++&lt;helpers/bridges/BLEBridge.cpp&gt;
+</code></pre>
+<p>and <code>h2zero/NimBLE-Arduino @ 2.5.1</code> in <code>lib_deps</code>. The version is pinned
+exactly, not floated: a library release would otherwise be able to change the
+radio behaviour of a node already in the field.</p>
 <hr />
 <h2 id="do-not-add-a-ble-cli-to-a-bridge-build">Do not add a BLE CLI to a bridge build</h2>
 <p>This bridge owns the BLE stack. It drives advertising set 0 directly, because
@@ -1321,6 +1387,23 @@ a repeater with no cable unreachable.</p>
 a phone or laptop scanner sees it and DFU still works. When no slot is free the
 node falls back to a non-connectable beacon, so it stays visible even though it
 cannot be connected to.</p>
+<p><strong>On ESP32 the constraint is harder, not softer.</strong> NimBLE has one legacy
+advertiser and the same ownership rule applies to it — <code>NimBleDiscovery</code> is its
+only owner and turns off NimBLE's own advertise-on-disconnect for exactly the
+reason above. But there is a second, absolute reason: <code>SerialBLEInterface</code> is
+built on Bluedroid, and <strong>Bluedroid and NimBLE cannot both be linked into one
+binary</strong>. A build cannot carry this bridge and the BLE CLI at any price. That is
+also why <code>BLE_LINK_SILENT_SWEEP</code> is left on in the ESP32 env: the fault it
+trades against is a CLI client at the passkey prompt, and no such client can
+exist here.</p>
+<p>That is the reason <code>ThinkNode_M5_repeater_bridge_ble</code> is a SEPARATE env rather
+than a flag on an existing one. Every other M5 env stays on Bluedroid and is not
+touched, so nothing that works today can regress, and the NimBLE stack is proved
+on hardware before anything else is made to depend on it. Porting
+<code>SerialBLEInterface</code> to NimBLE — where the measured 394,596-byte flash saving
+actually lands — is a separate decision, and it needs a <code>BLE_SERIAL_CLASS</code> seam
+upstream first, because <code>examples/companion_radio/main.cpp</code> picks that class
+with an <code>#if/#elif</code> chain.</p>
 <hr />
 <h2 id="cost">Cost</h2>
 <p>Measured against <code>RAK_3401_repeater_hardened</code> on the same tree:</p>
@@ -1368,39 +1451,153 @@ SoftDevice:</p>
 </tr>
 <tr>
 <td><code>ThinkNode_M1_repeater_bridge_ble</code></td>
-<td>320,412</td>
-<td>38,904</td>
+<td>320,604</td>
+<td>38,920</td>
 </tr>
 <tr>
 <td><strong>Cost of the bridge</strong></td>
-<td><strong>+15,564</strong></td>
-<td><strong>+8,136</strong></td>
+<td><strong>+15,756</strong></td>
+<td><strong>+8,152</strong></td>
 </tr>
 </tbody>
 </table>
+<p>And on the ThinkNode M5, which is an ESP32-S3 and pays for a whole BLE host
+stack rather than for a SoftDevice the part already carries:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Flash</th>
+<th>RAM</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ThinkNode_M5_Repeater</code></td>
+<td>1,125,785</td>
+<td>60,856</td>
+</tr>
+<tr>
+<td><code>ThinkNode_M5_repeater_bridge_ble</code></td>
+<td>1,295,121</td>
+<td>71,900</td>
+</tr>
+<tr>
+<td><strong>Cost of the bridge</strong></td>
+<td><strong>+169,336</strong></td>
+<td><strong>+11,044</strong></td>
+</tr>
+</tbody>
+</table>
+<p>Two thirds of that flash is NimBLE itself. The comparison is not quite
+like-for-like: the bridge env also drops the e-paper display class, and it moves
+to <code>min_spiffs.csv</code> because the stock 4 MB table gives each OTA slot 1,310,720
+bytes and the stock repeater already fills 85.9% of one. With <code>min_spiffs.csv</code>
+each slot is 1,966,080 bytes and the bridge build sits at 65.9%, with both OTA
+slots kept.</p>
+<p>For reference, Bluedroid would cost far more: one call to <code>createServer()</code>
+transitively links about 94KB of unused ESP-BLE-MESH models through the static
+dispatch table in <code>btc_task.c</code>.</p>
 <p>For comparison, the two-transport experiment on <code>origin/ble-clean</code>, which also
 carried datagrams over extended advertising, measured +28,940 flash and +14,712
 RAM.</p>
-<p>The RAM figure is static allocation only. The SoftDevice takes its own 24KB,
-which the linker reserves whether or not this bridge is compiled in.</p>
+<p>The RAM figure is static allocation only. On nRF52 the SoftDevice takes its own
+24KB, which the linker reserves whether or not this bridge is compiled in; on
+ESP32 NimBLE takes its buffers from the heap, so its true cost at run time is
+higher than the number above.</p>
 <hr />
 <h2 id="tests">Tests</h2>
-<p><code>test/test_ble_bridge/</code> covers two parts. <code>BleBridgeFrame.h</code> is header only and
-free of the BLE stack: the frame layout and its tag, the beacon record and the
-group marker, the deny list, and the oversize guard with its counter.</p>
+<p><code>test/test_ble_bridge/</code> covers three parts.</p>
+<p><code>BleBridgeFrame.h</code> is header only and free of the BLE stack: the frame layout
+and its tag, the beacon record and the group marker, the deny list, and the
+oversize guard with its counter.</p>
 <p><code>BleLink.cpp</code> builds against a Bluefruit stand-in in <code>test/mocks_ble_link/</code>, so
-the shipped source file is what runs. That covers the framing and the teardown
-paths: a header split across two writes, a truncated frame, a hunt that lands on
-a payload byte that looks like SYNC, a reconnect with a part-drained queue, and
-the deny list and the silence limit on the inbound peer. The stand-in also
-presents a peripheral connection, so the sweep has cases of its own: a peer that
-writes nothing loses the slot and reaches the deny list, a peer that writes in
-time keeps it, a peer dropped for silence is not adopted again at once, and a
-paired connection is left to the CLI.</p>
-<p><code>BleStack</code>, <code>BleDiscovery</code> and <code>BLEBridge</code> itself still need a SoftDevice and
-have no host test.</p>
+the shipped source file is what runs — and since the refactor that file is the
+SAME source both families run, so these cases cover the ESP32 link behaviour as
+well as the nRF52 one. They cover the framing and the teardown paths: a header
+split across two writes, a truncated frame, a hunt that lands on a payload byte
+that looks like SYNC, a reconnect with a part-drained queue, and the deny list
+and the silence limit on the inbound peer. They cover the address tie-break,
+which is what an M1 and an M5 have to settle between themselves with no
+negotiation. The stand-in also presents a peripheral connection, so the sweep
+has cases of its own: a peer that writes nothing loses the slot and reaches the
+deny list, a peer that writes in time keeps it, a peer dropped for silence is
+not adopted again at once, and a paired connection is left to the CLI.</p>
+<p><code>test_ble_wire.cpp</code> covers what the two backends must agree on but no compiler
+checks: that the GATT service and characteristic UUIDs are the same 128 bits in
+their two spellings — a little-endian byte array for Bluefruit, a string for
+NimBLE — that <code>BleAddr</code> has the layout both pass around, and that an advert with
+a node name at the full budget still fits 31 bytes and still parses.</p>
+<p><code>BleStack</code>, <code>NimBleStack</code>, both discovery classes, <code>BluefruitLinkBackend</code>,
+<code>NimBleLinkBackend</code> and <code>BLEBridge</code> itself need a real BLE stack and have no
+host test. What that leaves unproven is listed under <strong>Hardware check</strong> below.</p>
 <pre><code class="language-sh">pio test -e native_ble
 </code></pre>
+<hr />
+<h2 id="hardware-check">Hardware check</h2>
+<p>Nothing above proves that the two families actually link. That needs one M1 and
+one M5, and it is the only way to find it out. Flash
+<code>ThinkNode_M1_repeater_bridge_ble</code> and <code>ThinkNode_M5_repeater_bridge_ble</code>, set
+the same <code>bridge.secret</code> on both, set the clock on both, and check these in
+order. Each step tells you which layer failed, so do not skip forward.</p>
+<p><strong>1. Both nodes advertise.</strong> Scan with a phone. Both must appear, by name. If
+the M5 does not appear at all, the advert was refused — most likely the node
+name overran the 31 bytes, which invalidates the whole advert rather than
+truncating it.</p>
+<p><strong>2. Each sees the other's beacon.</strong> <code>numBeacons()</code> must climb on both. If it
+stays at 0 while <code>numForeignBeacons()</code> climbs, the beacon is being heard and
+rejected: the two secrets differ, so the group markers differ. If both stay at
+0, the scanner is not running — check <code>reportCount()</code>, which counts every advert
+of anyone's, and <code>silenceMs()</code>.</p>
+<p><strong>3. Exactly one of them dials.</strong> Only the numerically lower BLE address dials.
+Check on both that just one reports an outward link. If both dial, the address
+comparison disagrees between the two builds, and that is a bug in <code>BleAddr</code> or
+in <code>weInitiateTo</code>.</p>
+<p><strong>4. The link comes up and stays up.</strong> <code>numLinks()</code> is 1 on each. It must stay 1
+for several minutes. A link that comes up and drops after about 45 seconds
+failed the authentication grace: no frame ever passed the group tag. A link that
+drops after about 60 seconds authenticated and then went silent, which means
+heartbeats stopped.</p>
+<p><strong>5. Frames pass the tag.</strong> <code>numRxOk()</code> and <code>numHeartbeatsRx()</code> must both climb,
+and <code>numBadTag()</code> must stay at 0 on both. <strong>This is the partial failure to watch
+for</strong>, and it looks like success from every other angle: the link forms, both
+nodes report a peer, the counters move — and <code>numBadTag()</code> climbs while
+<code>numRxOk()</code> does not. That means the two ends built the connection but disagree
+about the bytes on it. The causes, in the order to check them:</p>
+<ul>
+<li>a different <code>bridge.secret</code>, which is the innocent one — but then the link
+    would also be dropped and the address denied, so <code>numDenied()</code> would climb
+    with it. If <code>numDenied()</code> stays at 0 while <code>numBadTag()</code> climbs, it is not
+    the secret;</li>
+<li>a framing fault: reassembly delivering a frame that straddles a boundary.
+    <code>getLinkInfo()</code> reports resynchronisations, and a climbing count there with
+    a climbing bad-tag count is conclusive. This is the failure mode the SYNC
+    marker exists for, and the one a port is most likely to reintroduce, because
+    the two stacks report a partial write differently;</li>
+<li>a chunk that went out twice, which is what a stack that reports a partial
+    send as a failure produces. On NimBLE a write is all or nothing by
+    construction — <code>writeLink()</code> returns <code>len</code> or <code>0</code> — so if this appears, that
+    assumption is wrong on real hardware and is the first thing to re-examine.</li>
+</ul>
+<p><strong>6. A packet actually crosses.</strong> Put the two nodes on different LoRa bands,
+send an advert into one, and watch it come out of the other. <code>numSent()</code> climbs
+on the sending side and <code>numRxOk()</code> on the receiving side.</p>
+<p><strong>7. Both stay reachable.</strong> With the link up, both nodes must still be visible
+to a scanner. A node that vanishes once bridging works has lost the advert
+arbiter — it is the fault that made a production repeater unreachable while it
+relayed LoRa perfectly.</p>
+<p>Two more things that only hardware can show, both of them ESP32 side:</p>
+<ul>
+<li><strong>The main loop must not stall.</strong> The NimBLE connect is asynchronous and GATT
+  discovery runs from <code>BleLink::loop()</code> for that reason. If the M5's mesh goes
+  quiet for seconds at a time whenever it dials, that reasoning is wrong
+  somewhere and discovery is blocking the loop after all.</li>
+<li><strong>A dial that never completes.</strong> Neither stack reports a connect that timed
+  out in a way <code>BleLink</code> can match to a link slot, so a link can in principle
+  sit in <code>CONNECTING</code> and never retry. On ESP32 the connect timeout is set to 10
+  seconds to bound it. If a node stops dialling a peer it can plainly see, this
+  is the first thing to suspect on either family.</li>
+</ul>
 
 
 
