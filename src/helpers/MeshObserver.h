@@ -39,6 +39,10 @@
 class MeshObserver {
 public:
   static const int MAX_PEERS = 48;
+  /* Room for a full node_name. At 20 the tail that tells VIC-NorthcoteNW-EDG-01
+     from VIC-NorthcoteNW-DIS-01 apart is exactly what got clipped. 48 slots at
+     32 bytes is 1,536, which the ESP32 and the nRF52 both have to spare. */
+  static const uint8_t NAME_LEN = 32;
 
   struct PeerEntry {
     uint8_t  hash[3];          // the widest prefix seen
@@ -58,7 +62,7 @@ public:
     // prefix, a name and a location to it, and hold them.
     uint8_t  pub[6];           // the pubkey prefix; all zero while unknown
     int32_t  lat_e6, lon_e6;   // 0 when the node did not advertise them
-    char     name[20];
+    char     name[NAME_LEN];   // from its advert; empty until one arrives
     // The clock skew. The originator of an ADVERT signs it over a timestamp
     // that the originator chose. Therefore an advert heard at ZERO HOPS is a
     // direct reading of the clock of that node against ours. It is the only

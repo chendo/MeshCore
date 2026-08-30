@@ -143,6 +143,226 @@ public:
 static CompanionModule companion_module;
 #endif
 
+#ifdef DISPLAY_CLASS
+#include <helpers/ObserverNeighbours.h>
+#include <helpers/ui/PagedScreen.h>
+#include <helpers/PowerMonitor.h>
+#include "ui/StatusPage.h"
+#include "ui/IdentityPage.h"
+#ifdef UI_BUTTON_PIN
+  #include <helpers/ui/MomentaryButton.h>
+#endif
+
+/* The neighbours screen.
+
+   NODE scope: the peer table is the board's view of the air, built from every
+   frame the shared radio hears, so it belongs to the node and not to any one
+   identity. Per-identity pages sit on top of this later.
+
+   Cadence: an e-paper full refresh is around two seconds of blocking SPI, so
+   asking for one per loop would dominate the super-loop. render() returns the
+   interval it wants, and the driver's frame CRC drops the refresh entirely
+   when nothing on screen actually moved -- so a quiet mesh costs one CRC per
+   interval and no panel time at all. */
+class NeighboursModule : public AppModule {
+  ObserverNeighbours _neighbours;
+  NeighboursScreen _neighbours_page;
+  PagedScreen _screen;
+  PowerMonitor _power;
+  StatusPage _status_page;
+  /* One page per slot, built at setup and never resized. A slot can be enabled
+     later from the CLI, so every slot gets a page whether or not it is up yet;
+     the page reads its state live and says "down" until it is not. */
+  IdentityPage* _id_pages[HYDRA_NUM_SLOTS];
+  char _subtitle[28];
+  unsigned long _next_render;
+  bool _ok;
+  uint32_t _frames;
+#ifdef UI_BUTTON_PIN
+  MomentaryButton _btn1;
+#endif
+#ifdef UI_BUTTON2_PIN
+  MomentaryButton _btn2;
+#endif
+
+  void formatRadio(const NodePrefs* p) {
+    /* Integer formatting on purpose. Pulling %f into the link costs a few KB
+       of printf on the nRF52 builds, and this is the only float on screen. */
+    uint32_t khz = (uint32_t)(p->freq * 1000.0f + 0.5f);
+    snprintf(_subtitle, sizeof(_subtitle), "%u.%03u BW%u SF%u CR%u",
+             (unsigned)(khz / 1000), (unsigned)(khz % 1000),
+             (unsigned)(p->bw + 0.5f), (unsigned)p->sf, (unsigned)p->cr);
+  }
+
+public:
+  NeighboursModule()
+    : _neighbours(hydra.radio().observer()),
+      /* Text size 0 and a 6-unit pitch. At the stock FreeSans9pt the 200x200
+         panel is 20 columns by 9 lines, which is five peers and seven
+         characters of name -- not a table. The compact font makes it 33 by 25,
+         and 6 units of pitch spends the drawable height on 16 peer rows. */
+      _neighbours_page(_neighbours, NULL, NULL, 6, 5000, 0),
+      _screen(6, 0), _status_page(_power, 6), _next_render(0), _ok(false), _frames(0)
+#ifdef UI_BUTTON_PIN
+      /* long-press at 700ms: long enough not to fire on a firm tap, short
+         enough that holding for it does not feel like a hang. */
+      , _btn1(UI_BUTTON_PIN, 700, true, true)
+#endif
+#ifdef UI_BUTTON2_PIN
+      , _btn2(UI_BUTTON2_PIN, 700, true, true)
+#endif
+  {
+    _subtitle[0] = 0;
+  }
+
+  AppScope scope() const override { return AppScope::NODE; }
+
+  void onSetup() override {
+    _ok = display.begin();
+    if (!_ok) return;
+    /* begin() only brings the panel up: it sets _init and leaves _isOn false,
+       and isOn() is what gates every draw. Without this the screen stays blank
+       for ever and nothing anywhere reports an error. UITask does the same at
+       startup. On the M5 turnOn() only flips the flag (BACKLIGHT_BTN is set, so
+       the expander branch compiles out); on the M1 it also raises
+       DISP_BACKLIGHT, whose pinMode begin() has already done. */
+    display.turnOn();
+    NodePrefs* p = hydra.repeater().prefs();
+    _neighbours_page.setTitle(p->node_name);
+    formatRadio(p);
+    _neighbours_page.setSubtitle(_subtitle);
+    /* Order: neighbours first, because it is the page worth glancing at, then
+       the node, then one page per identity. */
+    _screen.addPage(&_neighbours_page);
+    _screen.addPage(&_status_page);
+    for (int i = 0; i < HYDRA_NUM_SLOTS; i++) {
+      _id_pages[i] = new IdentityPage(i, 6, &_screen);
+      if (!_screen.addPage(_id_pages[i])) break;   // container full: stop cleanly
+    }
+    _power.begin(PowerMonitor::DEFAULT_MIN_MV, PowerMonitor::DEFAULT_MAX_MV);
+  #ifdef UI_BUTTON_PIN
+    _btn1.begin();
+  #endif
+  #ifdef UI_BUTTON2_PIN
+    _btn2.begin();
+  #endif
+  }
+
+  /* The mapping from a physical button to the KEY_* vocabulary lives HERE and
+     not in PagedScreen, which is why that class works unchanged on a node with
+     an encoder, a serial console or no input at all.
+
+       btn1 tap          next page
+       btn1 double-tap   previous page      (two buttons, but a page walk should
+       btn1 hold         first page          still work one-handed on either)
+       btn2 tap/hold     the page's own business -- forwarded, not consumed
+  */
+  void pollButtons() {
+  #if defined(UI_BUTTON_PIN) || defined(UI_BUTTON2_PIN)
+    char key = 0;
+  #endif
+  #ifdef UI_BUTTON_PIN
+    switch (_btn1.check()) {
+      case BUTTON_EVENT_CLICK:        key = KEY_NEXT; break;
+      case BUTTON_EVENT_DOUBLE_CLICK: key = KEY_PREV; break;
+      case BUTTON_EVENT_LONG_PRESS:   key = KEY_HOME; break;
+      default: break;
+    }
+  #endif
+  #ifdef UI_BUTTON2_PIN
+    if (key == 0) {
+      switch (_btn2.check()) {
+        case BUTTON_EVENT_CLICK:      key = KEY_SELECT; break;
+        case BUTTON_EVENT_LONG_PRESS: key = KEY_CONTEXT_MENU; break;
+        default: break;
+      }
+    }
+  #endif
+  #if defined(UI_BUTTON_PIN) || defined(UI_BUTTON2_PIN)
+    if (key != 0 && _screen.handleInput(key)) {
+      _next_render = 0;      // a press must show its result now, not in 5s
+    }
+  #endif
+  }
+
+  void onLoop() override {
+    if (!_ok || !display.isOn()) return;
+    unsigned long now = millis();
+    _power.sample(now, board.getBattMilliVolts());
+    pollButtons();
+    _screen.poll();
+    if ((long)(now - _next_render) < 0) return;
+    // Re-read the config every frame: the CLI can change it at runtime, and a
+    // stale header is exactly the kind of quiet lie a status screen must not tell.
+    formatRadio(hydra.repeater().prefs());
+    _neighbours.refresh(now);
+    _next_render = now + _screen.render(display, now);
+    _frames++;
+  }
+
+  /* Answers "why is the panel blank?" without needing eyes on the glass, which
+     is the only way this was diagnosable at all. */
+  void status(char* reply, size_t sz) {
+    snprintf(reply, sz, "screen: begin=%d on=%d frames=%u page=%d/%d rows=%d/%d cap=%d",
+             _ok ? 1 : 0, display.isOn() ? 1 : 0, (unsigned)_frames,
+             _screen.currentPage() + 1, _screen.numPages(),
+             _neighbours.numNeighbours(), _obsPeers(),
+             _neighbours_page.rowCapacity(display, _screen.pageHeight(display)));
+  }
+  int _obsPeers() const { return hydra.radio().observer().numPeers(); }
+};
+static NeighboursModule neighbours_module;
+#endif
+
+#ifdef WITH_ACTIVITY_LED
+#include <helpers/ActivityLed.h>
+
+/* Radio traffic on the two LEDs.
+     BLUE  dark when idle, held dim while a BLE connection is up, and pulsed
+           bright on every transmission.
+     RED   lit when idle, blanked briefly on every reception.
+
+   NODE scope: it reports the shared radio, which belongs to the board rather
+   than to any one identity, and it must not fire once per slot.
+
+   The M1 variant hands P_LORA_TX_LED the same pin as LED_BLUE and its board
+   class drives it directly around each transmit, forcing the pin LOW when the
+   transmit ends. That would erase the BLE dim a few times a second, so the env
+   unflags P_LORA_TX_LED and the blue LED is driven from here alone. */
+class ActivityLedModule : public AppModule, public RadioActivitySink {
+  ActivityLed _led;
+public:
+  AppScope scope() const override { return AppScope::NODE; }
+
+  void onSetup() override {
+    _led.begin(ACTIVITY_LED_TX_PIN, ACTIVITY_LED_RX_PIN, ACTIVITY_LED_ON_HIGH);
+    hydra.radio().setActivitySink(this);
+  }
+
+  // Called from the radio path: stamp a deadline and return, never any I/O.
+  void onRadioTx() override { _led.notifyTx(millis()); }
+  void onRadioRx() override { _led.notifyRx(millis()); }
+
+  void onLoop() override {
+    /* What counts as "a BLE connection" differs per build, so it is resolved
+       here rather than inside the LED driver: a companion build means a phone
+       is attached, a bridge build means a peer link is carrying our traffic. */
+  #if defined(WITH_COMPANION_BLE)
+    _led.setBleConnected(companion_ble.isConnected());
+  #elif defined(WITH_BRIDGE) && defined(ACTIVITY_LED_BRIDGE_LINKS)
+    /* getBridge() hands back the AbstractBridge base, which has no link count.
+       The cast is safe only where the build really selected a BLE bridge, and
+       BRIDGE_CLASS cannot be compared in the preprocessor, so the env states it
+       outright rather than this file guessing from the class name. */
+    _led.setBleConnected(
+        ((BRIDGE_CLASS*)hydra.repeater().mesh().getBridge())->numLinks() > 0);
+  #endif
+    _led.loop(millis());
+  }
+};
+static ActivityLedModule activity_led_module;
+#endif
+
 static void registerModules() {
 #if WITH_STATUS_LED
   AppModules::add(&status_led_module);
@@ -153,6 +373,12 @@ static void registerModules() {
 #endif
 #ifdef WITH_COMPANION_BLE
   AppModules::add(&companion_module);
+#endif
+#ifdef DISPLAY_CLASS
+  AppModules::add(&neighbours_module);
+#endif
+#ifdef WITH_ACTIVITY_LED
+  AppModules::add(&activity_led_module);
 #endif
 }
 
@@ -181,6 +407,12 @@ static void dispatch(uint32_t sender, char* cmd, char* reply, size_t reply_sz) {
   if (strcmp(cmd, "wifi off") == 0) {
     wifi_console.setCredentials("", "");
     StrHelper::strncpy(reply, "OK - wifi off and forgotten", reply_sz);
+    return;
+  }
+#endif
+#ifdef DISPLAY_CLASS
+  if (strcmp(cmd, "screen") == 0) {
+    neighbours_module.status(reply, reply_sz);
     return;
   }
 #endif

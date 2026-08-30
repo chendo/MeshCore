@@ -82,6 +82,19 @@ void GxEPDDisplay::startFrame(ColorVal bkg) {
 void GxEPDDisplay::setTextSize(int sz) {
   display_crc.update<int>(sz);
   switch(sz) {
+    case 0:  // Compact. A 200px panel fits 33 columns at this size against 20 at
+             // FreeSans9pt -- the difference between a table and a headline.
+#ifdef COMPACT_FONT
+      /* A supplied GFX font draws from the BASELINE, exactly like the FreeSans
+         fonts, so it needs no correction -- unlike the built-in below. */
+      display.setFont(&COMPACT_FONT);
+      _y_px_adj = 0;
+#else
+      // The built-in 5x7: 6px advance, 8px lines, and a TOP-LEFT origin.
+      display.setFont(NULL);
+      _y_px_adj = -CLASSIC_FONT_BASELINE_PX;
+#endif
+      return;
     case 1:  // Small
       display.setFont(&FreeSans9pt7b);
       break;
@@ -95,6 +108,7 @@ void GxEPDDisplay::setTextSize(int sz) {
       display.setFont(&FreeSans9pt7b);
       break;
   }
+  _y_px_adj = 0;   // every FreeSans font here draws from the baseline
 }
 
 void GxEPDDisplay::setColor(ColorVal c) {
@@ -105,7 +119,7 @@ void GxEPDDisplay::setColor(ColorVal c) {
 void GxEPDDisplay::setCursor(int x, int y) {
   display_crc.update<int>(x);
   display_crc.update<int>(y);
-  display.setCursor((x+offset_x)*scale_x, (y+offset_y)*scale_y);
+  display.setCursor((x+offset_x)*scale_x, (y+offset_y)*scale_y + _y_px_adj);
 }
 
 void GxEPDDisplay::print(const char* str) {

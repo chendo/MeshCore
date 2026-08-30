@@ -90,6 +90,10 @@ public:
   // one that is off. See examples/hydra/HydraCompanion.h.
   HydraSlot* slot(int i) { return (i >= 0 && i < HYDRA_NUM_SLOTS) ? _slots[i] : NULL; }
 
+  // Pure mapping, no state. Public so a UI page can label a slot with the same
+  // word the `slots` command uses, instead of keeping its own copy that drifts.
+  static const char* typeName(SlotType t);
+
 private:
   SlotEnableResult startSlot(int idx);
   void stopSlot(int idx);
@@ -110,7 +114,6 @@ private:
   void loopClockConverge();
   void reportClocks(char* reply, size_t reply_sz);
 #endif
-  static const char* typeName(SlotType t);
   static void slotIdName(int idx, char* dest, size_t sz);
 
   SharedRadioCore _core;

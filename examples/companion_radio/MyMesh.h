@@ -97,7 +97,13 @@ public:
 
   void loop();
   void handleCmdFrame(size_t len);
-  bool advert();
+  /** \param flood  true sends a flooded advert on the default transport scope,
+   *                the same path CMD_SEND_SELF_ADVERT takes with its flag set.
+   *                false is zero-hop, which is what advert() has always done.
+   *  Added so a UI can offer both; createSelfAdvert and sendFloodScoped are
+   *  protected, so there was no way to flood from outside this class. */
+  bool advert(bool flood);
+  bool advert() { return advert(false); }   // unchanged behaviour for callers
   void enterCLIRescue();
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);

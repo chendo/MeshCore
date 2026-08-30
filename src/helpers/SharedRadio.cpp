@@ -83,6 +83,9 @@ void SharedRadioCore::pump() {
 
   uint8_t tmp[MAX_TRANS_UNIT];
   int len = _real->recvRaw(tmp, sizeof(tmp));   // ALWAYS empty the radio
+  // Once per frame off the air. takeFrame() would fire once per PORT, which on
+  // a five-identity node would report a single reception five times.
+  if (len > 0 && _activity) _activity->onRadioRx();
 
   // Report the RX decode and CRC failures as trace events. The driver only
   // counts them.
@@ -232,6 +235,7 @@ bool SharedRadioCore::tryStartSend(RadioPort* p, const uint8_t* bytes, int len) 
     }
   }
   bool ok = _real->startSendRaw(bytes, len);
+  if (ok && _activity) _activity->onRadioTx();
   if (!ok) {
     // The radio REFUSED the send with a RadioLib error. Before this change the
     // code reported nothing. There was no trace entry and no counter.
