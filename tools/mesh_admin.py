@@ -141,7 +141,7 @@ def wait_for(host, token, after, codes, secs):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("action", choices=["contacts", "add", "login", "cmd"])
+    ap.add_argument("action", choices=["contacts", "add", "login", "cmd", "status"])
     ap.add_argument("text", nargs="*", help="CLI command text, for `cmd`")
     ap.add_argument("--host", default="192.168.88.69")
     ap.add_argument("--panel-password", default="password")
@@ -185,6 +185,35 @@ def main():
             sys.exit(2)
         print("login OK" if hit[0] == 0x85 else "login REJECTED — wrong admin password")
         sys.exit(0 if hit[0] == 0x85 else 3)
+
+    if args.action == "status":
+        # CMD_SEND_STATUS_REQ. This is what the phone app uses, and unlike the
+        # CLI it returns a LIVE battery reading -- getBatteryMilliVolts(true) on
+        # the far node -- rather than a value latched at boot. Guests can call
+        # it too, so it works even without admin rights.
+        if args.password:
+            send_frame(args.host, tok, bytearray([26]) + bytes.fromhex(key) + args.password.encode())
+            wait_for(args.host, tok, latest, {0x85, 0x86}, 20)
+            latest, _ = archive_after(args.host, tok, latest)
+        send_frame(args.host, tok, bytearray([27]) + bytes.fromhex(key))
+        hit = wait_for(args.host, tok, latest, {0x87}, args.wait)
+        if not hit:
+            print("no status reply (out of range, or the node never answered)")
+            sys.exit(2)
+        f = hit[1]
+        # [0]=0x87 [1]=reserved [2:8]=key prefix [8:]=RepeaterStats, LE
+        v = struct.unpack_from("<HHhhIIIIIIIIHhHHII", f, 8)
+        (batt, txq, noise, rssi, precv, psent, air, up, sflood, sdirect,
+         rflood, rdirect, errs, snr4, ddups, fdups, rxair, rerrs) = v
+        pct_err = (100.0 * rerrs / (precv + rerrs)) if (precv + rerrs) else 0.0
+        print(f"  battery      {batt} mV        (live)")
+        print(f"  uptime       {up} s ({up/86400:.2f} d)")
+        print(f"  noise floor  {noise} dBm      last rssi {rssi} dBm  last snr {snr4/4:.2f} dB")
+        print(f"  packets      recv {precv}  sent {psent}  recv_errors {rerrs} ({pct_err:.1f}%)")
+        print(f"  flood/direct sent {sflood}/{sdirect}  recv {rflood}/{rdirect}")
+        print(f"  airtime      tx {air} s  rx {rxair} s   tx queue {txq}   err_events {errs}")
+        print(f"  duplicates   direct {ddups}  flood {fdups}")
+        return
 
     if args.action == "cmd":
         text = " ".join(args.text)
