@@ -37,7 +37,7 @@ DEFAULT_CSV = os.path.expanduser("~/prod-battery.csv")
 
 FIELDS = ["utc", "ok", "battery_mv", "uptime_s", "noise_floor", "last_rssi",
           "last_snr", "n_recv", "n_sent", "n_recv_errors", "tx_air_s", "rx_air_s",
-          "tx_queue", "err_events", "flood_dups", "error"]
+          "tx_queue", "err_events", "flood_dups", "attempts", "error"]
 
 # see examples/simple_repeater/MyMesh.h struct RepeaterStats — 56 bytes, LE
 STATS_FMT = "<HHhhIIIIIIIIHhHHII"
@@ -82,6 +82,27 @@ def poll_once(ma, host, panel_pw, key, admin_pw, wait):
     return row
 
 
+def poll_with_retry(ma, host, panel_pw, key, admin_pw, wait, tries, gap=20.0):
+    """Poll, retrying a lost flood before calling it a miss.
+
+    On a saturated band a single request is lost roughly 40% of the time, which
+    made the log mostly misses while prod was demonstrably healthy — unbroken
+    uptime, and it answered every manual query first time. Retrying separates
+    the two failures that looked identical: a dropped packet, and a node that is
+    actually unreachable. `attempts` records which, so the distinction survives
+    into the data rather than being smoothed away.
+    """
+    row = None
+    for n in range(1, tries + 1):
+        row = poll_once(ma, host, panel_pw, key, admin_pw, wait)
+        row["attempts"] = n
+        if row["ok"] == "yes":
+            return row
+        if n < tries:
+            time.sleep(gap)     # let the channel clear rather than pile on
+    return row
+
+
 def report(path, day=None):
     if not os.path.exists(path):
         print(f"no log at {path}")
@@ -107,6 +128,9 @@ def report(path, day=None):
         print("  no successful readings — prod did not answer all day")
         return 0
     print(f"  window   {ok[0]['_local'].strftime('%H:%M')} to {ok[-1]['_local'].strftime('%H:%M')}")
+    retried = sum(1 for r in ok if (r.get("attempts") or "1").isdigit() and int(r["attempts"]) > 1)
+    if retried:
+        print(f"  retries  {retried} of {len(ok)} answers needed a second attempt")
 
     first, last = mv[0], mv[-1]
     span_h = 0.0
@@ -152,6 +176,8 @@ def main():
     ap.add_argument("--panel-password", default="password")
     ap.add_argument("--key", default=PROD_KEY)
     ap.add_argument("--wait", type=float, default=45.0)
+    ap.add_argument("--tries", type=int, default=2,
+                    help="attempts per poll before recording a miss (default 2)")
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--report", action="store_true", help="summarise a day and exit")
     ap.add_argument("--day", help="YYYY-MM-DD for --report (default today, local)")
@@ -166,6 +192,22 @@ def main():
 
     ma = load_mesh_admin()
     fresh = not os.path.exists(args.csv)
+    if not fresh:
+        with open(args.csv, newline="") as f:
+            old_header = next(csv.reader(f), [])
+        if old_header and old_header != FIELDS:
+            # Adding a column would misalign every later row against the old
+            # header. Rewrite in place instead of starting a new file, so the
+            # running series stays in one place; keep a .bak regardless.
+            with open(args.csv, newline="") as f:
+                old_rows = list(csv.DictReader(f))
+            os.replace(args.csv, args.csv + ".bak")
+            with open(args.csv, "w", newline="") as f:
+                w0 = csv.DictWriter(f, fieldnames=FIELDS)
+                w0.writeheader()
+                for r in old_rows:
+                    w0.writerow({k: r.get(k, "") for k in FIELDS})
+            print(f"migrated log to new columns (previous kept at {args.csv}.bak)")
     fh = open(args.csv, "a", newline="")
     w = csv.DictWriter(fh, fieldnames=FIELDS)
     if fresh:
@@ -174,10 +216,11 @@ def main():
 
     print(f"prod_battery_watch: every {args.interval/60:.0f} min -> {args.csv}")
     while True:
-        row = poll_once(ma, args.host, args.panel_password, args.key.lower(),
-                        admin_pw, args.wait)
+        row = poll_with_retry(ma, args.host, args.panel_password, args.key.lower(),
+                              admin_pw, args.wait, args.tries)
         if row["ok"] == "yes":
-            print(f"  {row['utc']}  {row['battery_mv']} mV   up {int(row['uptime_s'])/86400:.2f} d",
+            retried = f"   (took {row['attempts']} tries)" if int(row.get("attempts") or 1) > 1 else ""
+            print(f"  {row['utc']}  {row['battery_mv']} mV   up {int(row['uptime_s'])/86400:.2f} d{retried}",
                   flush=True)
         else:
             print(f"  {row['utc']}  MISS: {row['error']}", flush=True)
