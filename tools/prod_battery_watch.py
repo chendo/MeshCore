@@ -128,7 +128,13 @@ def report(path, day=None):
         print("  no successful readings — prod did not answer all day")
         return 0
     print(f"  window   {ok[0]['_local'].strftime('%H:%M')} to {ok[-1]['_local'].strftime('%H:%M')}")
-    retried = sum(1 for r in ok if (r.get("attempts") or "1").isdigit() and int(r["attempts"]) > 1)
+    # rows logged before the attempts column exists carry "", so read the
+    # fallback rather than the raw field -- validating one and indexing the
+    # other is what broke this the first time
+    def _tries(r):
+        v = (r.get("attempts") or "").strip()
+        return int(v) if v.isdigit() else 1
+    retried = sum(1 for r in ok if _tries(r) > 1)
     if retried:
         print(f"  retries  {retried} of {len(ok)} answers needed a second attempt")
 
