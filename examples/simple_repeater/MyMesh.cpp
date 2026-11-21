@@ -1,6 +1,14 @@
 #include "MyMesh.h"
 #include <algorithm>
 
+#ifdef CLOCK_CONVERGE_MS
+  #include "helpers/MeshObserver.h"
+  /* Defined in helpers/ObservingWrapper.cpp. The node has one radio and so one
+     observer; the wrapper feeds it every raw frame the modem hands up. The env
+     selects ObservingSX1262Wrapper for WRAPPER_CLASS. */
+  MeshObserver& rfObserver();
+#endif
+
 #if WITH_STATUS_LED
 #include "helpers/StatusLed.h"
 #endif
@@ -507,8 +515,82 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 #endif
 }
 
+#if defined(WITH_BRIDGE) && defined(BLE_LINK_BACKEND_CLASS)
+/* Put a packet across the bridge with THIS node written into its path.
+ *
+ * The BLE bridge joins two radio configurations that cannot hear each other, so
+ * the pair has to behave like two ordinary relays in sequence rather than a
+ * hidden tunnel. Two things follow, and both are the reason this is not just
+ * bridge.sendPacket().
+ *
+ * FIRST, the path. logRx() runs in Dispatcher::onRecv BEFORE the node appends
+ * its own hash (Mesh.cpp does that only when it decides to repeat). A copy
+ * bridged from here therefore carries no evidence that we were ever involved,
+ * and the far side re-emits it with only ITSELF in the path. A client on the
+ * far band then has no route back through us. Appending our hash to the copy
+ * makes the crossing two honest hops: ours, then theirs.
+ *
+ * SECOND, the copy. The packet still belongs to the mesh, which is about to
+ * decide for itself whether to repeat it, so the path must not be mutated
+ * underneath it.
+ *
+ * Bridging at RX and not at TX is deliberate. A node declines to transmit for
+ * reasons that belong to ITS band -- a hop limit, a duty cycle, a flood cap --
+ * and none of those apply to a link that costs no airtime on that band. The
+ * far band has not seen the packet at all. Repeated HEARINGS of one packet
+ * still collapse, because BLEBridge::sendPacket() dedups on a hash taken over
+ * the payload only; the path is not part of it, so the copy and the original
+ * are the same packet as far as that check is concerned. That identity is also
+ * what stops logTx() bridging a second copy of anything already sent from here.
+ */
+bool MyMesh::bridgeHopsOk(const mesh::Packet *pkt) const {
+  /* bridge.max_hops. A packet already this far from its origin has little of
+     its flood budget left, and this link is the expensive part of the node --
+     measured at 45-58% datagram loss between the two boxes. Spending it on
+     traffic that is nearly exhausted anyway is the trade this exists to let an
+     operator make. 0 means make no such trade. */
+  if (_prefs.bridge_max_hops == 0) return true;
+  return pkt->getPathHashCount() < _prefs.bridge_max_hops;
+}
+
+void MyMesh::bridgeRelay(mesh::Packet *pkt) {
+  if (!bridgeHopsOk(pkt)) return;
+
+  /* bridge.path off: cross without writing ourselves in. One hop instead of
+     two, at the cost of a route that does not mention us -- so the far band
+     cannot address a reply back through this node. */
+  if (!_prefs.bridge_path) { bridge.sendPacket(pkt); return; }
+
+  /* A TRACE packet is the one type whose hash covers path_len (see
+     Packet::calculatePacketHash). Appending to it would make the copy a
+     different packet from the original, which would defeat the dedup that stops
+     logTx sending it again. Traces cross unaltered; showing the bridge in a
+     trace needs the trace format to carry it, not this. */
+  if (pkt->getPayloadType() == PAYLOAD_TYPE_TRACE) { bridge.sendPacket(pkt); return; }
+
+  const uint8_t sz = pkt->getPathHashSize();
+  const uint8_t n = pkt->getPathHashCount();
+
+  mesh::Packet *copy;
+  if ((n + 1) * sz > MAX_PATH_SIZE || (copy = _mgr->allocNew()) == NULL) {
+    /* No room in the path, or no spare packet. Crossing without our hash is
+       worse than crossing with it and far better than not crossing at all. */
+    bridge.sendPacket(pkt);
+    return;
+  }
+
+  *copy = *pkt;                                   // plain struct, no owned pointers
+  self_id.copyHashTo(&copy->path[n * sz], sz);
+  copy->setPathHashCount(n + 1);
+  bridge.sendPacket(copy);
+  _mgr->free(copy);
+}
+#endif
+
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
-#ifdef WITH_BRIDGE
+#if defined(WITH_BRIDGE) && defined(BLE_LINK_BACKEND_CLASS)
+  bridgeRelay(pkt);
+#elif defined(WITH_BRIDGE)
   if (_prefs.bridge_pkt_src == 1) {
     bridge.sendPacket(pkt);
   }
@@ -537,7 +619,31 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
 #if WITH_STATUS_LED
   StatusLed::loraTx();
 #endif
-#ifdef WITH_BRIDGE
+#ifdef CLOCK_CONVERGE_MS
+  /* Feed the observer what we put on the air. It reads our own adverts out of
+     this to keep sentHighWater(), which is the replay floor that clockDecide
+     refuses to take the clock below: a peer drops an advert of ours that is not
+     newer than the mark it already holds. Without it, a node that has been
+     running with a fast clock could walk itself back into being ignored. */
+  {
+    uint8_t frame[MAX_TRANS_UNIT];
+    int n = pkt->writeTo(frame);
+    if (n > 0) rfObserver().observeTx(frame, n);
+  }
+#endif
+#if defined(WITH_BRIDGE) && defined(BLE_LINK_BACKEND_CLASS)
+  /* Self-originated traffic only, in practice: our adverts and our replies.
+     Anything we are merely repeating was already bridged from logRx(), and
+     sendPacket() drops it here on the seen-packet check. Without this clause an
+     admin reply from this node could never reach the other band, which is what
+     "cannot log in to the far side" looks like from a client.
+
+     The hop gate is repeated here on purpose. A packet that logRx() declined to
+     bridge was never markSeen()'d, so without this it would slip across on its
+     TX pass and defeat the limit the operator asked for. Our own traffic starts
+     at zero hops, so this never blocks it. */
+  if (_prefs.bridge_self && bridgeHopsOk(pkt)) bridge.sendPacket(pkt);
+#elif defined(WITH_BRIDGE)
   if (_prefs.bridge_pkt_src == 0) {
     bridge.sendPacket(pkt);
   }
@@ -1310,6 +1416,62 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       sendNodeDiscoverReq();
       strcpy(reply, "OK - Discover sent");
     }
+#if defined(WITH_BRIDGE) && defined(BLE_LINK_BACKEND_CLASS)
+  } else if (strcmp(command, "bridge") == 0) {
+    /* Bridge state, because without it the only way to tell a bridge that is
+       working from one that is not is to notice that traffic stopped. Every
+       number here already existed on BLEBridge; nothing but a way to ask for
+       them was missing, and its absence cost hours on 2026-09-02.
+
+       Read it in three parts: `up`/`links` say whether the transport and a peer
+       link exist; `bcn`/`rpt`/`sil` say whether discovery can still SEE (a
+       rising rpt with sil small means the scanner is alive, and bcn counts
+       beacons carrying OUR marker); `dial-ref`/`deny` say whether we are
+       refusing to dial somebody we can see, which is the difference between
+       "cannot find the peer" and "will not talk to it". */
+    snprintf(reply, 160,
+             "ble up=%d links=%u mark=%04X path=%s hops=%u self=%s | bcn %lu/%lu rpt %lu sil %lus rec %lu | "
+             "dialref %lu deny %lu inref %lu | tx %lu rx %lu hb %lu bad %lu",
+             bridge.isTransportUp() ? 1 : 0, (unsigned)bridge.numLinks(),
+             (unsigned)bridge.groupMarker(),
+             /* The config sits next to the counters on purpose: every one of
+                these silently changes what "rx 0" means, and reading them from
+                a different command is how you convince yourself the link is
+                broken when it is merely configured not to carry anything. */
+             _prefs.bridge_path ? "y" : "n", (unsigned)_prefs.bridge_max_hops,
+             _prefs.bridge_self ? "y" : "n",
+             (unsigned long)bridge.numBeacons(), (unsigned long)bridge.numForeignBeacons(),
+             (unsigned long)bridge.reportCount(), (unsigned long)(bridge.silenceMs() / 1000),
+             (unsigned long)bridge.numRecoveries(),
+             (unsigned long)bridge.numDialsRefused(), (unsigned long)bridge.numDenied(),
+             (unsigned long)bridge.numInboundRefused(),
+             (unsigned long)bridge.numSent(), (unsigned long)bridge.numRxOk(),
+             (unsigned long)bridge.numHeartbeatsRx(), (unsigned long)bridge.numBadTag());
+#endif
+#ifdef CLOCK_CONVERGE_MS
+  } else if (strcmp(command, "clocks") == 0 || strncmp(command, "clocks ", 7) == 0) {
+    const char* arg = (command[6] == ' ') ? &command[7] : "";
+    if (strcmp(arg, "on") == 0) {
+      _prefs.clock_converge = 1;
+      _clock_due_ms = 0;             // look at the neighbourhood on the next pass
+      /* Release the admin hold too. Without this, setting the clock by hand
+         would silence convergence for the rest of the boot with no way back
+         short of a reboot -- "clocks on" has to mean what it says. */
+      _clock_admin_hold = false;
+      savePrefs();
+    } else if (strcmp(arg, "off") == 0) {
+      _prefs.clock_converge = 0;
+      savePrefs();
+    }
+    /* 160 is what every caller of handleCommand() allocates, and the report is
+       written longest-lived fact first, so a truncation loses the diagnostics
+       and never the state. */
+    if (strcmp(arg, "src") == 0) {
+      reportClockSources(reply, 160);
+    } else {
+      reportClocks(reply, 160);
+    }
+#endif
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }
@@ -1322,9 +1484,163 @@ void MyMesh::flushPendingWrites() {
   }
 }
 
+#ifdef CLOCK_CONVERGE_MS
+
+static const char* clockHoldName(uint8_t h) {
+  switch (h) {
+    case mesh::CLOCK_HOLD_NO_QUORUM: return "no-quorum";
+    case mesh::CLOCK_HOLD_IN_BAND:   return "in-band";
+    case mesh::CLOCK_HOLD_ADMIN:     return "admin";
+    case mesh::CLOCK_HOLD_REPLAY:    return "replay-floor";
+    case mesh::CLOCK_HOLD_RATE:      return "rate";
+    default:                         return "-";
+  }
+}
+
+void MyMesh::loopClockConverge() {
+  const uint32_t now_ms = millis();
+  /* Every counter advances from the DIFFERENCE between two passes, never from
+     an absolute millis(). An unsigned difference stays correct across the wrap
+     at 49.7 days, and a repeater is up for far longer than that. */
+  const uint32_t delta = mesh::clockPollDelta(now_ms, _clock_prev_ms);
+  _clock_prev_ms = now_ms;
+
+  _clock_since_move_ms = mesh::clockAdvanceElapsed(_clock_since_move_ms, delta);
+  // The due timer runs down whether or not convergence is on, so enabling it
+  // later does not fire an estimate immediately on a stale schedule. The admin
+  // hold is NOT a timer any more -- see _clock_admin_hold.
+  _clock_due_ms = mesh::clockReduceHold(_clock_due_ms, delta);
+
+  /* Did something else set the clock? Compare how far it moved against how far
+     it was owed. The expectation is reset to the true reading every pass, so an
+     RTC running fast against millis() never accumulates into a false detection
+     and a late pass is still measured correctly. */
+  const uint32_t reads = getRTCClock()->getCurrentTime();
+  if (_clock_expect_ok) {
+    const int32_t moved = (int32_t)(reads - _clock_expect_s);
+    const int32_t owed  = (int32_t)(delta / 1000);
+    const int32_t jump  = moved - owed;
+    if (jump > CLOCK_EXTERNAL_SET_S || jump < -CLOCK_EXTERNAL_SET_S) {
+      _clock_admin_hold = true;
+      _clock_admin_sets++;
+    }
+  } else {
+    _clock_expect_ok = true;         // the first pass only learns the value
+  }
+  _clock_expect_s = reads;
+
+  if (!_prefs.clock_converge || _clock_due_ms > 0) return;
+
+  const bool unset = mesh::clockIsUnset(reads);
+  _clock_due_ms = unset ? CLOCK_CONVERGE_FAST_MS : CLOCK_CONVERGE_MS;
+
+  mesh::ClockSample samples[mesh::CLOCK_POLICY_MAX_SAMPLES];
+  const int n = rfObserver().clockSamples(samples, mesh::CLOCK_POLICY_MAX_SAMPLES);
+  const mesh::ClockEstimate est =
+      mesh::clockEstimate(samples, n,
+                          unset ? mesh::CLOCK_UNSET_MIN_SOURCES : mesh::CLOCK_MIN_SOURCES,
+                          rfObserver().hopDelayMs(),
+                          /* trust_solo: an authenticated bridge peer may stand
+                             in for the quorum ONLY while our clock is unset.
+                             Once it is set the full quorum returns, so two
+                             bridged nodes cannot settle on a shared wrong
+                             time. */
+                          unset);
+
+  mesh::ClockContext ctx;
+  ctx.now_s = reads;
+  ctx.since_move_ms = _clock_since_move_ms;
+  /* The policy takes a duration; the stickiness lives here in the driver, so
+     ClockPolicy and its host tests are untouched by this. */
+  ctx.admin_hold_ms = _clock_admin_hold ? mesh::CLOCK_ADMIN_HOLD_MS : 0;
+  /* The newest timestamp we have put on the air. clockDecide will not take the
+     clock to or below it: a peer drops an advert that is not newer than the
+     mark it already holds for us. */
+  ctx.sent_high_s = rfObserver().sentHighWater();
+
+  const mesh::ClockDecision d = mesh::clockDecide(est, ctx);
+  _clock_last_hold = (uint8_t)d.hold;
+  if (d.action == mesh::CLOCK_HOLD) return;
+
+  getRTCClock()->setCurrentTime(mesh::clockApply(ctx.now_s, d.apply_s));
+  // Move the expectation with it, or the next pass reads this as an admin set.
+  _clock_expect_s = getRTCClock()->getCurrentTime();
+  _clock_last_adj_s = d.apply_s;
+  _clock_since_move_ms = 0;
+  if (d.action == mesh::CLOCK_STEP) _clock_steps++; else _clock_slews++;
+}
+
+/* The raw evidence behind the estimate, so the cluster rules can be judged
+   against a real neighbourhood instead of assumed. Offsets are printed relative
+   to the LOWEST of them: on a node whose clock is years out every absolute
+   offset is the same enormous number, and the only thing worth reading is how
+   far apart they are -- which is exactly what CLOCK_CLUSTER_BAND_S is measured
+   against. Each entry is <spread>/<hops>h. */
+void MyMesh::reportClockSources(char* reply, size_t reply_sz) {
+  mesh::ClockSample s[mesh::CLOCK_POLICY_MAX_SAMPLES];
+  const int n = rfObserver().clockSamples(s, mesh::CLOCK_POLICY_MAX_SAMPLES);
+  if (n <= 0) { StrHelper::strncpy(reply, "no clock samples", reply_sz); return; }
+
+  int32_t lo = s[0].offset_s;
+  for (int i = 1; i < n; i++) if (s[i].offset_s < lo) lo = s[i].offset_s;
+
+  int w = snprintf(reply, reply_sz, "n=%d base%+ld band=%ds |",
+                   n, (long)lo, (int)mesh::CLOCK_CLUSTER_BAND_S);
+  for (int i = 0; i < n && w > 0 && w < (int)reply_sz - 12; i++) {
+    w += snprintf(reply + w, reply_sz - w, " %+ld/%uh",
+                  (long)(s[i].offset_s - lo), (unsigned)s[i].hops);
+  }
+}
+
+void MyMesh::reportClocks(char* reply, size_t reply_sz) {
+  const uint32_t reads = getRTCClock()->getCurrentTime();
+  const bool unset = mesh::clockIsUnset(reads);
+
+  mesh::ClockSample samples[mesh::CLOCK_POLICY_MAX_SAMPLES];
+  const int n = rfObserver().clockSamples(samples, mesh::CLOCK_POLICY_MAX_SAMPLES);
+  const mesh::ClockEstimate est =
+      mesh::clockEstimate(samples, n,
+                          unset ? mesh::CLOCK_UNSET_MIN_SOURCES : mesh::CLOCK_MIN_SOURCES,
+                          rfObserver().hopDelayMs(),
+                          /* trust_solo: an authenticated bridge peer may stand
+                             in for the quorum ONLY while our clock is unset.
+                             Once it is set the full quorum returns, so two
+                             bridged nodes cannot settle on a shared wrong
+                             time. */
+                          unset);
+
+  const uint32_t mark = rfObserver().sentHighWater();
+  /* Compact on purpose. At 160 bytes the previous wording ran out mid-field and
+     lost `hold`, which is exactly the state somebody reads this to find. Every
+     field a decision depends on has to survive the buffer. */
+  snprintf(reply, reply_sz,
+           "clocks %s%s ep=%lu %+ld %u/%u%s d%u %u%% sp%ld hop%u/%lup "
+           "st%lu sw%lu last%+ld hold=%s adm%lu mark%+ld %s",
+           _prefs.clock_converge ? "on" : "off", unset ? " UNSET" : "",
+           (unsigned long)reads,
+           (long)est.offset_s, est.n_used, est.n_seen,
+           /* Whether the winning cluster holds the authenticated bridge peer.
+              Without this the report cannot explain why a node with 17%
+              agreement stepped anyway, which looks like the policy misfiring. */
+           est.trusted ? "+peer" : "", est.n_direct,
+           est.agree_pct, (long)est.spread_s,
+           rfObserver().hopDelayMs(), (unsigned long)rfObserver().hopDelayPairs(),
+           (unsigned long)_clock_steps, (unsigned long)_clock_slews,
+           (long)_clock_last_adj_s,
+           _clock_admin_hold ? "admin" : "no",
+           (unsigned long)_clock_admin_sets,
+           (long)(mark == 0 ? 0 : (int32_t)(mark - reads)),
+           clockHoldName(_clock_last_hold));
+}
+
+#endif  // CLOCK_CONVERGE_MS
+
 void MyMesh::loop() {
 #ifdef WITH_BRIDGE
   bridge.loop();
+#endif
+#ifdef CLOCK_CONVERGE_MS
+  loopClockConverge();   // this paces itself
 #endif
 
   mesh::Mesh::loop();
