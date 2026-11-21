@@ -59,6 +59,7 @@ void BleLink::resetInbound() {
     _in_dropped_ms = millis();
   }
   _in_conn = Backend::NO_CONN;
+  for (uint8_t i = 0; i < Backend::SWEEP_SLOTS; i++) _sweep_conn[i] = Backend::NO_CONN;
   _in_txq_count = 0; _in_txq_head = 0; _in_tx_off = 0;
   _in_expect = _in_have = 0; _in_hdr_have = 0;
   _in_authed = false; _in_up_ms = 0;
@@ -445,12 +446,24 @@ void BleLink::sweepInbound() {
 #if BLE_LINK_SILENT_SWEEP
   if (_in_conn != Backend::NO_CONN) return;    // the slot is already ours
 
+  const uint32_t now = millis();
   for (uint8_t i = 0; i < Backend::SWEEP_SLOTS; i++) {
     uint16_t h = Backend::peripheralConnAt(i);
-    if (h == Backend::NO_CONN) continue;
-    if (!Backend::exists(h)) continue;
-    if (Backend::paired(h)) continue;                 // the CLI, or DFU
-    if (adoptInbound(h)) return;
+    if (h == Backend::NO_CONN || !Backend::exists(h) || Backend::paired(h)) {
+      /* Gone, or secured and therefore the CLI or DFU. Either way it is not a
+         candidate, and forgetting it now means a later connection on the same
+         slot starts its own grace rather than inheriting this one. */
+      _sweep_conn[i] = Backend::NO_CONN;
+      continue;
+    }
+    if (_sweep_conn[i] != h) {                 // first sight of this connection
+      _sweep_conn[i] = h;
+      _sweep_since_ms[i] = now;
+      continue;
+    }
+    /* Unsigned difference, correct across the millis() wrap. */
+    if ((uint32_t)(now - _sweep_since_ms[i]) < BLE_LINK_PAIRING_GRACE_MS) continue;
+    if (adoptInbound(h)) return;               // the auth and silence timers take it from here
   }
 #endif
 }

@@ -4,6 +4,23 @@
 #include "ble_gap.h"
 #include "ble_hci.h"
 
+/* BLE_LINK_BACKEND_CLASS is defined only by ${bridge.ble}, so it is the one
+   signal that the BLE bridge shares this stack. On such a build the bridge owns
+   the SoftDevice and the advertising set, and this interface becomes a GATT
+   service and nothing more. See the two blocks marked SHARED STACK below. */
+#ifdef BLE_LINK_BACKEND_CLASS
+  #include "BleStack.h"
+  /* The same counts that BLEBridge.h defaults to. Whichever subsystem starts
+     the stack first fixes them for the life of the boot, so both must ask for
+     the same thing. */
+  #ifndef BLE_PRPH_SLOTS
+    #define BLE_PRPH_SLOTS 2
+  #endif
+  #ifndef BLE_CENTRAL_SLOTS
+    #define BLE_CENTRAL_SLOTS 2
+  #endif
+#endif
+
 // Magic numbers came from actual testing
 #define BLE_HEALTH_CHECK_INTERVAL  10000  // Advertising watchdog check every 10 seconds
 #define BLE_RETRY_THROTTLE_MS      250    // Throttle retries to 250ms when queue buildup detected
@@ -135,9 +152,24 @@ void SerialBLEInterface::begin(const char* prefix, char* name, uint32_t pin_code
     Bluefruit.autoConnLed(true);  // true leaves the default automatic control of the LED by the Bluefruit library
   #endif
   
+#ifdef BLE_LINK_BACKEND_CLASS
+  /* SHARED STACK: ask BleStack for the roles, and never call Bluefruit.begin()
+     here.
+
+     Two reasons, both of which end with a node nobody can reach. A bare
+     Bluefruit.begin() asks for one peripheral and NO central, so the bridge
+     could never dial a peer for the rest of the boot -- role counts are fixed
+     once the SoftDevice is enabled. And in the other order, begin() returns
+     false the moment the SoftDevice is already up (sd_softdevice_enable gives
+     INVALID_STATE), skipping every service registration below, so the CLI and
+     the DFU port would silently not exist. BleStack::ensure() is the one place
+     that decides, and it is a no-op once somebody has started the stack. */
+  if (!BleStack::ensure(nullptr, BLE_PRPH_SLOTS, BLE_CENTRAL_SLOTS)) return;
+#else
   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
   Bluefruit.begin();
- 
+#endif
+
   char dev_name[32+16];
   if (strcmp(name, "@@MAC") == 0) {
     ble_gap_addr_t addr;
@@ -192,6 +224,7 @@ void SerialBLEInterface::begin(const char* prefix, char* name, uint32_t pin_code
   bledfu.setPermission(SECMODE_ENC_WITH_MITM, SECMODE_ENC_WITH_MITM);
   bledfu.begin();
 
+#ifndef BLE_LINK_BACKEND_CLASS
   Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
   Bluefruit.Advertising.addTxPower();
   Bluefruit.Advertising.addService(bleuart);
@@ -202,7 +235,21 @@ void SerialBLEInterface::begin(const char* prefix, char* name, uint32_t pin_code
   Bluefruit.Advertising.setFastTimeout(BLE_ADV_FAST_TIMEOUT);
 
   Bluefruit.Advertising.restartOnDisconnect(true);
+#endif
+  /* SHARED STACK: not one advertising call above runs, and that is the whole
+     arrangement. There is ONE advertising set on the SoftDevice, and
+     BleDiscovery::loop() is its single authority -- it alternates the bridge's
+     connectable beacon with a non-connectable presence beacon and asserts the
+     choice on every pass. A second owner here would undo that: clearData()
+     would drop the group marker the peers scan for, restartOnDisconnect(true)
+     would start a plain advert over the beacon, and the ten-second watchdog in
+     checkRecvFrame() would do it again every ten seconds after that.
 
+     Losing the service UUID from the advert costs nothing. Advertising data is
+     a discovery hint, not the service list: BleDiscovery's beacon is
+     CONNECTABLE and carries the node name, and a client that connects to it
+     discovers this UART and the DFU service from the GATT table like any
+     other. The permissions below are what actually gate them. */
 }
 
 void SerialBLEInterface::clearBuffers() {
@@ -257,8 +304,10 @@ void SerialBLEInterface::enable() {
   clearBuffers();
   _last_health_check = millis();
 
+#ifndef BLE_LINK_BACKEND_CLASS      // SHARED STACK: BleDiscovery::loop() advertises
   Bluefruit.Advertising.restartOnDisconnect(true);
   Bluefruit.Advertising.start(0);
+#endif
 }
 
 void SerialBLEInterface::disconnect() {
@@ -271,8 +320,10 @@ void SerialBLEInterface::disable() {
   _isEnabled = false;
   BLE_DEBUG_PRINTLN("SerialBLEInterface: disable");
 
+#ifndef BLE_LINK_BACKEND_CLASS      // SHARED STACK: stopping the set would take the bridge beacon down too
   Bluefruit.Advertising.restartOnDisconnect(false);
   Bluefruit.Advertising.stop();
+#endif
   disconnect();
   _last_health_check = 0;
 }
@@ -344,19 +395,26 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
     return len;
   }
   
+#ifndef BLE_LINK_BACKEND_CLASS
   // Advertising watchdog: periodically check if advertising is running, restart if not
   // Only run when truly disconnected (no connection handle), not during connection establishment
   unsigned long now = millis();
   if (_isEnabled && !isConnected() && _conn_handle == BLE_CONN_HANDLE_INVALID) {
     if (now - _last_health_check >= BLE_HEALTH_CHECK_INTERVAL) {
       _last_health_check = now;
-      
+
       if (!isAdvertising()) {
         BLE_DEBUG_PRINTLN("SerialBLEInterface: advertising watchdog - advertising stopped, restarting");
         Bluefruit.Advertising.start(0);
       }
     }
   }
+#endif
+  /* SHARED STACK: no watchdog here. isAdvertising() only asks whether SOME
+     advert owns set 0, so it cannot tell the bridge's beacon from ours, and a
+     restart on that reading is precisely what stomps the beacon. BleDiscovery
+     re-asserts the advert on every pass of its own loop and counts what the
+     stack refuses. */
   
   return 0;
 }

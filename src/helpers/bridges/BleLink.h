@@ -30,6 +30,25 @@
 #define BLE_LINK_SILENT_SWEEP 1
 #endif
 
+/* How long an UNPAIRED inbound connection is left alone before the sweep will
+   adopt it.
+
+   This is what makes the sweep and a BLE CLI able to share a build. A client at
+   a passkey prompt is not secured yet and is indistinguishable, in that instant,
+   from a peer that says nothing -- so the sweep waits instead of guessing. A
+   person answers a passkey prompt in seconds; a connection that was abandoned
+   part way through pairing never answers at all, and after this window it stops
+   being given the benefit of the doubt.
+
+   Turning the sweep OFF instead is what used to be recommended here, and it
+   cost a production node its remote access on 2026-09-01: two stale
+   half-open connections from failed pairings held both peripheral slots, so
+   BleDiscovery fell back to a NON-CONNECTABLE beacon and the only way back in
+   was a reboot over the mesh. A bounded wait is the better of the two faults. */
+#ifndef BLE_LINK_PAIRING_GRACE_MS
+#define BLE_LINK_PAIRING_GRACE_MS 60000
+#endif
+
 /**
  * @brief  Connection-oriented peer links, which carry the bridge frames.
  *
@@ -353,6 +372,12 @@ private:
   /* Inbound peer link. The peripheral role also carries the CLI, so at most one
      slot is left for a peer that dials us. That is enough, because a peer that
      we cannot accept is dialled BY us instead. */
+  /* First-sight time of each unpaired peripheral connection, so the sweep can
+     tell a client part way through pairing from one that will never finish.
+     The backend reports no connection age, so it is kept here. */
+  uint16_t _sweep_conn[Backend::SWEEP_SLOTS];
+  uint32_t _sweep_since_ms[Backend::SWEEP_SLOTS];
+
   uint16_t _in_conn = Backend::NO_CONN;
   /* The handle we dropped last, and when. See IN_DROP_HOLD_MS. */
   uint16_t _in_dropped_conn = Backend::NO_CONN;

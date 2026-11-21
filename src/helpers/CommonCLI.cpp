@@ -50,6 +50,24 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
     if (file) {
       _prefs->loadSerial(file);   // new Serial prefs
       file.close();
+
+      /* Sanitise what the JSON path loads, exactly as loadPrefsInt() does for
+         the legacy binary file. Only the legacy loader clamped, and a value
+         that migrated from it into prefs.json was never checked again.
+         bridge_pkt_src is the one that bites: an older firmware had a third
+         state, "both" == 2. It matches NEITHER of the tests that forward a
+         packet -- logRx asks for 1 and logTx asks for 0 -- so a node carrying it
+         bridges NOTHING, while `get bridge.source` prints "logRx" because 2 is
+         truthy. Silent, and it reports the opposite of the truth.
+         Measured on the production node 2026-09-02: rx 0 for the life of the
+         link, then 5 frames within 90s of forcing the value to 1. */
+      _prefs->bridge_pkt_src = constrain(_prefs->bridge_pkt_src, 0, 1);
+      _prefs->bridge_enabled = constrain(_prefs->bridge_enabled, 0, 1);
+      _prefs->powersaving_enabled = constrain(_prefs->powersaving_enabled, 0, 1);
+      _prefs->clock_converge = constrain(_prefs->clock_converge, 0, 1);
+      _prefs->bridge_path = constrain(_prefs->bridge_path, 0, 1);
+      _prefs->bridge_self = constrain(_prefs->bridge_self, 0, 1);
+      _prefs->bridge_max_hops = constrain(_prefs->bridge_max_hops, 0, 8);
     }
   } else if (fs->exists("/com_prefs")) {
     loadPrefsInt(fs, "/com_prefs");
@@ -485,11 +503,19 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     } else if (sender_timestamp == 0 && memcmp(command, "log", 3) == 0) {
       _callbacks->dumpLogFile();
       strcpy(reply, "   EOF");
-    } else if (sender_timestamp == 0 && memcmp(command, "stats-packets", 13) == 0 && (command[13] == 0 || command[13] == ' ')) {
+    /* The three stats commands READ and change nothing, so they are not gated to
+       the serial line the way `erase`, `log`, `set freq` and `set prv.key` are.
+       Those four destroy state or move key material; these report a battery
+       reading, an uptime, a queue depth, a noise floor and some counters.
+       Gating them cost more than it bought: a node reached only over BLE or
+       only over the mesh could not be asked how it was, and a repeater on a
+       roof is exactly the node nobody can put a cable into. The BLE link is
+       paired and MITM-encrypted, and a mesh sender has already met the ACL. */
+    } else if (memcmp(command, "stats-packets", 13) == 0 && (command[13] == 0 || command[13] == ' ')) {
       _callbacks->formatPacketStatsReply(reply);
-    } else if (sender_timestamp == 0 && memcmp(command, "stats-radio", 11) == 0 && (command[11] == 0 || command[11] == ' ')) {
+    } else if (memcmp(command, "stats-radio", 11) == 0 && (command[11] == 0 || command[11] == ' ')) {
       _callbacks->formatRadioStatsReply(reply);
-    } else if (sender_timestamp == 0 && memcmp(command, "stats-core", 10) == 0 && (command[10] == 0 || command[10] == ' ')) {
+    } else if (memcmp(command, "stats-core", 10) == 0 && (command[10] == 0 || command[10] == ' ')) {
       _callbacks->formatStatsReply(reply);
     } else {
       strcpy(reply, "Unknown command");
@@ -643,6 +669,27 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     _prefs->bridge_pkt_src = memcmp(&config[14], "rx", 2) == 0;
     savePrefs();
     strcpy(reply, "OK");
+  } else if (memcmp(config, "bridge.path ", 12) == 0) {
+    _prefs->bridge_path = memcmp(&config[12], "on", 2) == 0;
+    savePrefs();
+    strcpy(reply, _prefs->bridge_path ? "OK - this node appears in the path (2 hops)"
+                                      : "OK - transparent bridge (1 hop)");
+  } else if (memcmp(config, "bridge.max_hops ", 16) == 0) {
+    int n = atoi(&config[16]);
+    if (n < 0 || n > 8) {   // mesh::CLOCK_MAX_HOPS is 8; a path cannot usefully exceed it
+      strcpy(reply, "Error: max_hops is 0 (no limit) or 1-8");
+    } else {
+      _prefs->bridge_max_hops = (uint8_t)n;
+      savePrefs();
+      strcpy(reply, "OK");
+    }
+  } else if (memcmp(config, "bridge.self ", 12) == 0) {
+    _prefs->bridge_self = memcmp(&config[12], "on", 2) == 0;
+    savePrefs();
+    /* Say what turning it off costs, at the moment it is turned off. This is
+       the setting that silently makes a node unreachable from the far band. */
+    strcpy(reply, _prefs->bridge_self ? "OK"
+                 : "OK - WARNING: our adverts and admin replies no longer cross the bridge");
 #endif
 #ifdef BRIDGE_HAS_BAUD
   } else if (memcmp(config, "bridge.baud ", 12) == 0) {
@@ -783,7 +830,27 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "bridge.delay", 12) == 0) {
     sprintf(reply, "> %d", (uint32_t)_prefs->bridge_delay);
   } else if (memcmp(config, "bridge.source", 13) == 0) {
+#ifdef BLE_LINK_BACKEND_CLASS
+    /* The BLE relay does not read this pref: it bridges everything it HEARS
+       (with this node written into the path) plus everything it ORIGINATES, and
+       lets the seen-packet check stop the two overlapping. Reporting a stored
+       value that changes nothing is how the last fault hid for weeks -- a node
+       held the legacy "both" (2), forwarded nothing at all, and printed
+       "logRx". Say plainly that it is not in use. */
+    strcpy(reply, "> n/a - BLE relay bridges heard + originated");
+#else
     sprintf(reply, "> %s", _prefs->bridge_pkt_src ? "logRx" : "logTx");
+#endif
+  } else if (memcmp(config, "bridge.path", 11) == 0) {
+    sprintf(reply, "> %s", _prefs->bridge_path ? "on (2 hops)" : "off (transparent)");
+  } else if (memcmp(config, "bridge.max_hops", 15) == 0) {
+    if (_prefs->bridge_max_hops == 0) {
+      strcpy(reply, "> 0 (no limit)");
+    } else {
+      sprintf(reply, "> %d", (int)_prefs->bridge_max_hops);
+    }
+  } else if (memcmp(config, "bridge.self", 11) == 0) {
+    sprintf(reply, "> %s", _prefs->bridge_self ? "on" : "off (we are invisible across the bridge)");
 #endif
 #ifdef BRIDGE_HAS_BAUD
   } else if (memcmp(config, "bridge.baud", 11) == 0) {

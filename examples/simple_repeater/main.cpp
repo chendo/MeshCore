@@ -2,6 +2,24 @@
 #include <Mesh.h>
 
 #include "MyMesh.h"
+#if WITH_BLE_CLI
+  /* The diagnostic and firmware-update port. On a build that also carries the
+     BLE bridge the two share one SoftDevice: the interface registers the UART
+     and the DFU service, and BleDiscovery keeps sole ownership of the
+     advertising set. See the SHARED STACK notes in SerialBLEInterface.cpp. */
+  #include <helpers/nrf52/SerialBLEInterface.h>
+  #ifndef BLE_PIN_CODE
+    #error "WITH_BLE_CLI needs a BLE_PIN_CODE. A random per-boot PIN is only printable over USB serial, and a node reached over BLE has no way to report it."
+  #endif
+  /* Normally BLEBridge.h supplies this, and the bridge renames the stack when
+     its transport comes up. This is the name the node wears until then, and the
+     name it keeps for good if the bridge never starts. */
+  #ifndef BLE_ADV_NAME_PREFIX
+    #define BLE_ADV_NAME_PREFIX "MeshCore-"
+  #endif
+  static SerialBLEInterface ble_cli;
+  static uint32_t ble_cli_seq = 0;
+#endif
 #if WITH_STATUS_LED
   #include <helpers/StatusLed.h>
   static StatusLed status_led;
@@ -196,6 +214,29 @@ void setup() {
   lora_watchdog.begin(LORA_WATCHDOG_MS, NULL, lora_wd_airtime, lora_wd_probe,
                       lora_wd_reinit, lora_wd_reboot);
 #endif
+#ifdef CLOCK_CONVERGE_MS
+  /* The observer needs both of these before it can turn adverts into clock
+     samples: the clock so a peer's timestamp has something to be measured
+     against, and our own key so it can tell OUR adverts from a peer's when it
+     keeps the replay high-water mark. */
+  rfObserver().setClock(&rtc_clock);
+  rfObserver().addSelfKey(the_mesh.self_id.pub_key);
+  WDOG_FEED();
+#endif
+#if WITH_BLE_CLI
+  /* After the_mesh.begin(), because the node name is what the stack advertises,
+     and before the first the_mesh.loop(), which is where BLEBridge starts the
+     stack. Either order gives the same roles -- both ask BleStack for the same
+     counts -- but starting here means the CLI exists even if the bridge never
+     manages to come up. That is the way back in when the bridge is the fault. */
+  {
+    static char ble_name[32];
+    strncpy(ble_name, "@@MAC", sizeof(ble_name) - 1);   // resolved to the MAC by begin()
+    ble_cli.begin(BLE_ADV_NAME_PREFIX, ble_name, BLE_PIN_CODE);
+    ble_cli.enable();
+  }
+  WDOG_FEED();
+#endif
 #if WITH_STATUS_LED
   // The colour shows the radio. The brightness shows the direction. Green is
   // LoRa. Blue is the BLE bridge. Dim is receive. Bright is transmit. Both LEDs
@@ -276,6 +317,26 @@ void loop() {
     }
     ethernet_send_reply(reply);
     ethernet_command[0] = 0;
+  }
+#endif
+
+#if WITH_BLE_CLI
+  if (ble_cli.isConnected() && !ble_cli.isWriteBusy()) {
+    uint8_t frame[MAX_FRAME_SIZE + 1];
+    size_t n = ble_cli.checkRecvFrame(frame);
+    if (n > 0) {
+      if (n > MAX_FRAME_SIZE) n = MAX_FRAME_SIZE;
+      frame[n] = 0;                       // the CLI wants a C string
+
+      /* A NON-ZERO sender timestamp deliberately withholds the commands that
+         CommonCLI gates to local serial: erase, log, set freq, set prv.key.
+         BLE reaches tens of metres, so those stay behind physical USB access
+         even though this link is paired and MITM-protected. */
+      char reply[MAX_FRAME_SIZE];
+      reply[0] = 0;
+      the_mesh.handleCommand(++ble_cli_seq, (char *) frame, reply);
+      if (reply[0]) ble_cli.writeFrame((const uint8_t *) reply, strlen(reply));
+    }
   }
 #endif
 

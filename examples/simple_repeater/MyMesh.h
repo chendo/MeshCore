@@ -103,6 +103,55 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   int  matching_peer_indexes[MAX_CLIENTS];
 #ifdef WITH_BRIDGE
   BRIDGE_CLASS bridge;
+  #ifdef BLE_LINK_BACKEND_CLASS
+  void bridgeRelay(mesh::Packet* pkt);
+  bool bridgeHopsOk(const mesh::Packet* pkt) const;
+  #endif
+#endif
+#ifdef CLOCK_CONVERGE_MS
+  /* CLOCK CONVERGENCE. The node steers its own clock towards what its
+     neighbours say the time is. The rules are free functions in
+     helpers/ClockPolicy.h with a host test over every one of them; this is only
+     the plumbing. Ported from examples/hydra, which carries the same driver
+     against its own observer -- see HydraNode::loopClockConverge().
+
+     A repeater needs this more than a hydra node does, not less. Its clock only
+     ever becomes wrong quietly, and a wrong clock is not a cosmetic fault:
+     admin login is timestamped, so a node whose clock has fallen back to the
+     2024 default rejects every login and looks like a routing or bridge
+     problem. That is exactly what happened on 2026-09-02.
+
+     Defining CLOCK_CONVERGE_MS compiles it in and sets the cadence. It is ON by
+     default and the setting PERSISTS (NodePrefs::clock_converge, "clk_conv" in
+     prefs.json), so "clocks off" survives a reboot and a node that was never
+     configured still corrects itself. It used to be a RAM flag defaulting to
+     off, which meant every flash silently stopped a node converging. */
+  static const uint32_t CLOCK_CONVERGE_FAST_MS = 30UL * 1000UL;
+  /* A jump larger than this between passes did not come from a crystal:
+     something SET the clock (a person, a client app, GPS). Convergence then
+     stands down for mesh::CLOCK_ADMIN_HOLD_MS rather than argue with them. */
+  static const int32_t CLOCK_EXTERNAL_SET_S = 5;
+
+  void loopClockConverge();
+  void reportClocks(char* reply, size_t reply_sz);
+  void reportClockSources(char* reply, size_t reply_sz);
+
+  uint32_t _clock_prev_ms = 0;
+  uint32_t _clock_due_ms = 0;
+  uint32_t _clock_since_move_ms = 0;
+  /* Sticky, and cleared only by a reboot or an explicit "clocks on".
+     A person who sets the clock by hand has said what the time is, and on this
+     hardware they are the ONLY authority there is: the RAK3401 has no RTC chip,
+     so rtc_clock falls through to VolatileRTCClock (base_time + millis(), pure
+     RAM, default 1715770351 = 15 May 2024) and nothing survives a power cut.
+     A countdown would hand the decision back to the neighbourhood after seven
+     days -- the same neighbourhood measured 28 hours apart on 2026-09-03. */
+  bool     _clock_admin_hold = false;
+  uint32_t _clock_expect_s = 0;
+  bool     _clock_expect_ok = false;
+  uint32_t _clock_steps = 0, _clock_slews = 0, _clock_admin_sets = 0;
+  int32_t  _clock_last_adj_s = 0;
+  uint8_t  _clock_last_hold = 0;
 #endif
 
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);

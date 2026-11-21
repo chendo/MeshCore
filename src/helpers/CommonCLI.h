@@ -54,12 +54,42 @@ public:
   // Bridge settings
   uint8_t bridge_enabled = 0; // boolean
   uint16_t bridge_delay = 0;  // milliseconds (default 500 ms)
-  uint8_t bridge_pkt_src = 0; // 0 = logTx, 1 = logRx (default logTx)
+  uint8_t bridge_pkt_src = 0; // 0 = logTx, 1 = logRx (default logTx). RS232/ESP-NOW only; the BLE relay ignores it.
+  /* BLE relay behaviour. The defaults are the correct behaviour and an operator
+     never has to touch them; each one exists to trade away something specific.
+
+     bridge_path   1 = write this node into the path of what it bridges, so the
+                   crossing is two honest hops and the far band can route back
+                   through us. 0 = transparent, one hop, cheaper on the flood
+                   budget but the topology it reports is a fiction.
+     bridge_max_hops  0 = bridge whatever we hear. Otherwise skip a packet that
+                   is already past N hops, so a lossy link is not spent on
+                   floods that are nearly exhausted anyway.
+     bridge_self   1 = bridge what this node ORIGINATES, which is how its
+                   adverts and its admin replies reach the far band. Setting
+                   this to 0 makes the node relay for others while being
+                   unreachable across the bridge itself -- it is what "cannot
+                   log in to the far side" looks like. */
+  uint8_t bridge_path = 1;      // boolean
+  uint8_t bridge_max_hops = 0;  // 0 = no limit
+  uint8_t bridge_self = 1;      // boolean
   uint32_t bridge_baud = 0;   // 9600, 19200, 38400, 57600, 115200 (default 115200)
   uint8_t bridge_channel = 0; // 1-14 (ESP-NOW only)
   char bridge_secret[16]; // for XOR encryption of bridge packets (ESP-NOW only)
   // Power setting
   uint8_t powersaving_enabled = 0; // boolean
+  /* Clock convergence, ON by default. It only does anything on a build that
+     defines CLOCK_CONVERGE_MS, so a build without the feature carries the
+     setting harmlessly and prefs.json stays the same shape across both.
+
+     The default is ON rather than OFF because the failure it prevents is
+     silent: a repeater whose clock has fallen back to the 2024 default rejects
+     every admin login, and presents as a routing or bridge fault. A node that
+     has never been told about this setting should still fix itself. An operator
+     who wants it off says so, and that choice now survives a reboot -- it did
+     not before, which meant a node stopped converging at the next flash without
+     anybody being told. */
+  uint8_t clock_converge = 1; // boolean
   // Gps settings
   uint8_t gps_enabled = 0;
   uint32_t gps_interval = 0; // in seconds
@@ -148,6 +178,12 @@ private:
       def("baud", _parent->bridge_baud);   // 9600, 19200, 38400, 57600, 115200 (default 115200)
       def("ch", _parent->bridge_channel); // 1-14 (ESP-NOW only)
       def("secret", _parent->bridge_secret, sizeof(_parent->bridge_secret)); // for XOR encryption of bridge packets (ESP-NOW only)
+      /* The three below steer the BLE relay. It needs none of them to be
+         correct -- the defaults ARE the correct behaviour -- so each exists for
+         one specific thing an operator might have to trade away. */
+      def("path", _parent->bridge_path);         // boolean, default on
+      def("max_hops", _parent->bridge_max_hops); // 0 = no limit
+      def("self", _parent->bridge_self);         // boolean, default on
     }
   public:
     BridgePrefs(NodePrefs* parent) : _parent(parent) { }
@@ -173,6 +209,7 @@ private:
     void structure() override {
       def("adc_mult", _parent->adc_multiplier);
       def("pwr_sav_en", _parent->powersaving_enabled);
+      def("clk_conv", _parent->clock_converge); // boolean, default on
     }
   public:
     PowerPrefs(NodePrefs* parent) : _parent(parent) { }
