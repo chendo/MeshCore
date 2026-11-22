@@ -1,7 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
-#include <helpers/esp32/SerialWifiInterface.h>
+#include <helpers/wifi/SerialWifiInterface.h>
 
 // This class lets a second local client drive the app protocol of a companion
 // identity. That client can be a web UI or a bot. It uses the SAME serial
