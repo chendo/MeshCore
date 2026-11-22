@@ -13,9 +13,10 @@
   #endif
   /* Normally BLEBridge.h supplies this, and the bridge renames the stack when
      its transport comes up. This is the name the node wears until then, and the
-     name it keeps for good if the bridge never starts. */
+     name it keeps for good if the bridge never starts. Empty, so the name does
+     not say the node runs MeshCore. */
   #ifndef BLE_ADV_NAME_PREFIX
-    #define BLE_ADV_NAME_PREFIX "MeshCore-"
+    #define BLE_ADV_NAME_PREFIX ""
   #endif
   static SerialBLEInterface ble_cli;
   static uint32_t ble_cli_seq = 0;

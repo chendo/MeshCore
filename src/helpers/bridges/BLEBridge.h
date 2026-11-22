@@ -38,22 +38,23 @@
 
 /* The advertised GAP name.
  *
- * The default embeds the node name, and on a sited repeater the node name is
- * usually where it is: "MeshCore-VIC-NorthcoteNW-DIS" tells anyone within
- * radio range the operator's suburb, and the "MeshCore" prefix tells them what
- * it is worth. A name is a convenience, not an identifier: the group marker in
- * the beacon is what tells an operator which nodes are theirs, and it is
- * derived from `bridge.secret`, so the name can say nothing at all.
+ * On a sited repeater the node name is usually where it is:
+ * "MeshCore-VIC-NorthcoteNW-DIS" tells anyone within radio range the
+ * operator's suburb, and the "MeshCore" prefix tells them what it is worth. A
+ * name is a convenience, not an identifier: the group marker in the beacon is
+ * what tells an operator which nodes are theirs, and it is derived from
+ * `bridge.secret`, so the name can say nothing at all.
  *
- * Set BLE_ADV_NAME_FROM_NODE to 0 and the name becomes the prefix plus the low
- * two bytes of the BLE address: unique per node, stable across reboots, and it
- * carries no location. Put the prefix somewhere untracked -- what a node calls
- * itself on air should not be in a public repository either. */
+ * So by default the name is the prefix, empty, plus the low two bytes of the
+ * BLE address: unique per node, stable across reboots, and it carries neither
+ * a location nor the word MeshCore. Set a prefix somewhere untracked -- what a
+ * node calls itself on air should not be in a public repository either. Set
+ * BLE_ADV_NAME_FROM_NODE to 1 for the old "<prefix><node name>". */
 #ifndef BLE_ADV_NAME_PREFIX
-  #define BLE_ADV_NAME_PREFIX "MeshCore-"
+  #define BLE_ADV_NAME_PREFIX ""
 #endif
 #ifndef BLE_ADV_NAME_FROM_NODE
-  #define BLE_ADV_NAME_FROM_NODE 1
+  #define BLE_ADV_NAME_FROM_NODE 0
 #endif
 
 /**
