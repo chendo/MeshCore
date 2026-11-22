@@ -6,8 +6,8 @@
 /**
  * \brief  The last few messages, contacts and channels together.
  *
- * AbstractUITask::newMsg() is called for BOTH -- MyMesh.cpp:471 passes a contact
- * name and :588 passes a channel name -- so one list covers both without
+ * The listener calls in UITask feed BOTH -- onMessageRecv() passes a contact
+ * name and onChannelMessageRecv() a channel name -- so one list covers both without
  * needing to know which is which. Nothing here distinguishes them, on purpose:
  * the only signal that would tell them apart is notify(), which MyMesh skips
  * entirely while the phone app is connected, so a label built from it would be
