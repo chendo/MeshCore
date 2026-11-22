@@ -60,8 +60,7 @@ static void lora_wd_reinit(void*) {
   radio_driver.setParams(p->freq, p->bw, p->sf, p->cr);
   radio_driver.setTxPower(p->tx_power_dbm);
   radio_driver.setRxBoostedGainMode(p->rx_boosted_gain);
-  board.setLoRaFemLnaEnabled(p->radio_fem_rxgain);
-  board.setLoRaFemPaGainEnabled(p->radio_fem_txgain);
+  board.attachDynamicPrefs(p->getCustom());   // the board applies its own FEM prefs, as MyMesh::begin() does
 }
 static void lora_wd_reboot(void*) {
   the_mesh.flushPendingWrites();

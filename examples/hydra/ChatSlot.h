@@ -76,6 +76,10 @@ protected:
   ContactInfo* processAck(const uint8_t* data) override { return NULL; }
   void onMessageRecv(const ContactInfo& from, mesh::Packet* pkt, uint32_t ts, const char* text) override { _diag.onText(*this, from, pkt, ts, text); }
   void onCommandDataRecv(const ContactInfo& from, mesh::Packet* pkt, uint32_t ts, const char* text) override {}
+  // A CLI command sent as a text message (upstream v1.18) gets no reply. A chat
+  // slot has no CLI of its own: the node is administered through slot 0's
+  // admin login and the BLE companion facade, so this stays as it was before.
+  void onCLICommandRecv(const ContactInfo& from, mesh::Packet* pkt, uint32_t ts, const char* text, char* reply) override {}
   void onSignedMessageRecv(const ContactInfo& from, mesh::Packet* pkt, uint32_t ts, const uint8_t* prefix, const char* text) override {}
   void onChannelMessageRecv(const mesh::GroupChannel& ch, mesh::Packet* pkt, uint32_t ts, const char* text) override {}
   uint8_t onContactRequest(const ContactInfo& c, uint32_t ts, const uint8_t* data, uint8_t len, uint8_t* reply) override { return 0; }
