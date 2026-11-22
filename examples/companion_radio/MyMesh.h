@@ -63,7 +63,8 @@
 #endif
 
 #ifndef BLE_NAME_PREFIX
-#define BLE_NAME_PREFIX "MeshCore-"
+// Empty, so the default BLE name does not say the device runs MeshCore. Build with -D BLE_NAME_PREFIX='"MeshCore-"' for the old name.
+#define BLE_NAME_PREFIX ""
 #endif
 
 #include <helpers/BaseChatMesh.h>
@@ -118,6 +119,8 @@ public:
   NodePrefs *getNodePrefs();
   uint32_t getBLEPin();
   void setBLEPin(uint32_t active_pin);
+  // Suffix of the default BLE name. Holds "@@MAC" until SerialBLEInterface::begin() rewrites it to the BLE MAC.
+  char *getBLEDefaultSuffix() { return _ble_default_suffix; }
 
   void loop();
   void handleCmdFrame(size_t len);
@@ -252,6 +255,7 @@ private:
   uint32_t _iter_filter_since;
   uint32_t _most_recent_lastmod;
   uint32_t _active_ble_pin;
+  char _ble_default_suffix[13] = "@@MAC";
   bool _iter_started;
   bool _cli_rescue;
   bool send_unscoped;   // force un-scoped flood (instead of using send_scope)
