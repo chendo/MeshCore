@@ -1449,6 +1449,17 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
              (unsigned long)bridge.numInboundRefused(),
              (unsigned long)bridge.numSent(), (unsigned long)bridge.numRxOk(),
              (unsigned long)bridge.numHeartbeatsRx(), (unsigned long)bridge.numBadTag());
+  } else if (strcmp(command, "bridge stats") == 0) {
+    /* The traffic counters alone. `bridge` puts them last, and its 160-byte
+       reply cuts them off once the discovery counters grow. tx is what we sent
+       to the peer, rx the data frames it sent us (heartbeats excluded). All of
+       them count from this boot, so `up` says how long that is. */
+    snprintf(reply, 160,
+             "bridge tx %lu rx %lu hb %lu bad %lu foreign %lu nolink %lu oversize %lu up %lus",
+             (unsigned long)bridge.numSent(), (unsigned long)bridge.numRxOk(),
+             (unsigned long)bridge.numHeartbeatsRx(), (unsigned long)bridge.numBadTag(),
+             (unsigned long)bridge.numForeign(), (unsigned long)bridge.numTxNoLink(),
+             (unsigned long)bridge.numTxOversize(), (unsigned long)(millis() / 1000));
 #endif
 #ifdef CLOCK_CONVERGE_MS
   } else if (strcmp(command, "clocks") == 0 || strncmp(command, "clocks ", 7) == 0) {
