@@ -3,7 +3,7 @@
 /* TEST SCAFFOLDING. The companion facade over TCP instead of BLE.
  *
  * The facade consumes a BaseSerialInterface and does not care what carries the
- * frames. helpers/esp32/SerialWifiInterface is already such a transport and
+ * frames. helpers/wifi/SerialWifiInterface is already such a transport and
  * already speaks the framing the phone app's desktop tooling uses, so pointing
  * BLE_SERIAL_CLASS at this adapter lets a script on the LAN drive the facade
  * exactly as the app drives it -- CMD_APP_START, CMD_GET_CONTACTS,
@@ -23,7 +23,7 @@
  * unauthenticated TCP port. Guarded by WITH_COMPANION_TCP.
  */
 
-#include <helpers/esp32/SerialWifiInterface.h>
+#include <helpers/wifi/SerialWifiInterface.h>
 #include <WiFi.h>
 
 #ifndef COMPANION_TCP_PORT

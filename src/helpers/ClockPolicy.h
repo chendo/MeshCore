@@ -101,6 +101,26 @@ static const uint8_t  CLOCK_MAX_HOPS = 8;
    the division stays exact for the first four hops: 12, 6, 4, 3. */
 static const uint16_t CLOCK_WEIGHT_DIRECT = 12;
 
+/* The source weight of an authenticated bridge peer's OWN advert.
+ *
+ * Large on purpose, and it has to be: measured on the Northcote pair 2026-09-03,
+ * two ordinary samples from the same neighbourhood disagreed by 100,669 s --
+ * 28 hours. A mesh does not necessarily hold a majority that knows the time, so
+ * asking one to vote can produce no answer at all: at 21 sources the winning
+ * cluster held 17% of the weight, far under CLOCK_MIN_AGREE_PCT, and the node
+ * simply stayed at its 2024 default for ever.
+ *
+ * A bridge peer is different in kind from an advert overheard off the air. Its
+ * frames carry an HMAC over the shared secret, so an attacker without that
+ * secret cannot produce one; the operator runs both ends; and it is zero real
+ * hops away. Weighted this way it dominates weight_seen, so the agreement test
+ * passes on its own evidence rather than in spite of the neighbourhood.
+ *
+ * ONLY the peer's own advert earns this. Everything the peer RELAYS is ordinary
+ * neighbourhood traffic -- and on this link it is precisely the traffic that was
+ * 28 hours out. See MeshObserver::observeBridgedAdvert. */
+static const uint8_t  CLOCK_WEIGHT_TRUSTED = 200;
+
 /* The default per-hop propagation delay, in milliseconds. A repeater waits
    rng(0, 5*airtime*tx_delay_factor) before it relays, and then spends the
    airtime on the transmission. At the repeater default factor of 0.5 the mean
@@ -129,6 +149,12 @@ struct ClockSample {
   int32_t offset_s;
   uint8_t hops;      // 0 = we heard the transmission of the originator itself
   uint8_t weight;
+  /* 1 = this reading came from an AUTHENTICATED bridge peer's own advert.
+     It is not an anonymous advert: it crossed a link whose every frame carries
+     an HMAC over the shared bridge secret, from a node the same operator runs,
+     zero real hops away. A node alone on its band has no other evidence worth
+     the name -- see CLOCK_WEIGHT_TRUSTED. */
+  uint8_t trusted;
 };
 
 /**
@@ -169,6 +195,7 @@ struct ClockEstimate {
   uint8_t  n_used;        // the peers inside the winning cluster
   uint8_t  n_direct;      // how many of those we heard at zero hops
   uint8_t  agree_pct;     // weight_used * 100 / weight_seen
+  bool     trusted;       // the winning cluster holds an authenticated bridge peer
 };
 
 /**
@@ -213,11 +240,13 @@ struct ClockEstimate {
  */
 inline ClockEstimate clockEstimate(const ClockSample* in, int n,
                                    uint8_t min_sources = CLOCK_MIN_SOURCES,
-                                   uint16_t hop_delay_ms = CLOCK_HOP_DELAY_DEFAULT_MS) {
+                                   uint16_t hop_delay_ms = CLOCK_HOP_DELAY_DEFAULT_MS,
+                                   bool trust_solo = false) {
   ClockEstimate e;
   e.valid = false; e.offset_s = 0; e.spread_s = 0;
   e.weight_seen = 0; e.weight_used = 0;
   e.n_seen = 0; e.n_used = 0; e.n_direct = 0; e.agree_pct = 0;
+  e.trusted = false;
 
   if (in == NULL || n <= 0) return e;
   if (n > CLOCK_POLICY_MAX_SAMPLES) n = CLOCK_POLICY_MAX_SAMPLES;
@@ -225,17 +254,29 @@ inline ClockEstimate clockEstimate(const ClockSample* in, int n,
   int32_t  v[CLOCK_POLICY_MAX_SAMPLES];    // the corrected readings, oldest first
   uint16_t w[CLOCK_POLICY_MAX_SAMPLES];
   uint8_t  z[CLOCK_POLICY_MAX_SAMPLES];    // 1 = the node heard it at zero hops
+  uint8_t  t[CLOCK_POLICY_MAX_SAMPLES];    // 1 = an authenticated bridge peer
   int m = 0;
 
   for (int i = 0; i < n; i++) {
     uint16_t cw = clockSampleWeight(in[i].hops, in[i].weight);
     if (cw == 0) continue;
+    /* The trust multiplier is applied HERE and not folded into ClockSample's
+       weight, because that field means "how many peers collapsed onto this
+       reading" and MeshObserver needs it to keep meaning that. Trust is a
+       property of where the reading came from, not of how many said it. */
+    if (in[i].trusted) {
+      uint32_t tw = (uint32_t)cw * CLOCK_WEIGHT_TRUSTED;
+      cw = (tw > 0xFFFFu) ? 0xFFFFu : (uint16_t)tw;
+    }
     int32_t cv = in[i].offset_s + clockHopCorrectionS(in[i].hops, hop_delay_ms);
     // An insertion sort. CLOCK_POLICY_MAX_SAMPLES bounds n, so the cost is
     // small, and the sort keeps the parallel arrays together.
     int k = m++;
-    while (k > 0 && v[k - 1] > cv) { v[k] = v[k - 1]; w[k] = w[k - 1]; z[k] = z[k - 1]; k--; }
+    while (k > 0 && v[k - 1] > cv) {
+      v[k] = v[k - 1]; w[k] = w[k - 1]; z[k] = z[k - 1]; t[k] = t[k - 1]; k--;
+    }
     v[k] = cv; w[k] = cw; z[k] = (in[i].hops == 0) ? 1 : 0;
+    t[k] = in[i].trusted ? 1 : 0;
     e.weight_seen += cw;
   }
   e.n_seen = (uint8_t)(m > 255 ? 255 : m);
@@ -261,7 +302,7 @@ inline ClockEstimate clockEstimate(const ClockSample* in, int n,
   e.n_used     = (uint8_t)(used > 255 ? 255 : used);
   e.weight_used = best_w;
   e.spread_s   = v[best_hi] - v[best_lo];
-  for (int i = best_lo; i <= best_hi; i++) if (z[i]) e.n_direct++;
+  for (int i = best_lo; i <= best_hi; i++) { if (z[i]) e.n_direct++; if (t[i]) e.trusted = true; }
   e.agree_pct  = (uint8_t)((e.weight_seen == 0) ? 0 : (best_w * 100) / e.weight_seen);
 
   // The weighted lower quartile of the cluster. See the note above on why the
@@ -274,7 +315,24 @@ inline ClockEstimate clockEstimate(const ClockSample* in, int n,
     if (acc >= need) { e.offset_s = v[i]; break; }
   }
 
-  if (used < (int)min_sources) return e;
+  /* One authenticated bridge peer can stand in for the quorum, but ONLY when
+     the caller says so -- and the only caller that does is a node whose clock
+     is unset.
+
+     Why it is allowed there: an unset node is not merely wrong, it is invisible.
+     Every advert it sends carries a 2024 stamp that peers reject as a replay,
+     so it cannot be seen, cannot be logged into, and cannot recover on its own.
+     Against that, one HMAC-authenticated peer is far better evidence than the
+     nothing it otherwise has.
+
+     Why it is NOT allowed once the clock is set: two nodes that each accept the
+     other alone can lock onto a shared wrong time with nothing to break the
+     tie. A set clock therefore keeps the full quorum, and the bridge peer votes
+     heavily instead of deciding. The rest of the design already leans this way
+     -- only an unset clock STEPS, and the replay floor in clockDecide refuses
+     to move a clock back below timestamps this node has already transmitted. */
+  const int need_sources = (trust_solo && e.trusted) ? 1 : (int)min_sources;
+  if (used < need_sources) return e;
   if (e.agree_pct < CLOCK_MIN_AGREE_PCT) return e;
   e.valid = true;
   return e;

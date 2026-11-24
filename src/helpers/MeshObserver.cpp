@@ -264,7 +264,20 @@ void MeshObserver::observeBridgedAdvert(const uint8_t* frame, int len) {
      Therefore an advert that reaches us over both the radio and the bridge
      updates one slot. It does not count as two sources that agree. */
   noteSighting(pub, their_ts, hops);
-  noteClockSample(pub, hops, their_ts);
+  /* Zero hops over the bridge means the PEER ITSELF originated this advert:
+     nobody relayed it, so nobody appended a hash. That is the one reading here
+     that an HMAC over the shared secret actually vouches for, and it is the
+     only one that earns CLOCK_WEIGHT_TRUSTED.
+
+     Anything at one hop or more is the peer's own neighbourhood passing
+     through. It deserves no more trust than an advert off our own radio -- and
+     on this link it is exactly the traffic measured 28 hours out on 2026-09-03.
+
+     NOTE this rests on the peer appending its hash to what it relays. A peer
+     running a bridge that forwards at RX without doing so would present relayed
+     adverts at zero hops and they would be wrongly trusted. Both ends must run
+     the path-appending relay. */
+  noteClockSample(pub, hops, their_ts, hops == 0);
 }
 
 void MeshObserver::noteAdvert(const uint8_t* frame, int len, int8_t snr4) {
@@ -393,7 +406,7 @@ uint16_t MeshObserver::hopDelayMs() const {
   return d > 60000 ? 60000 : (uint16_t)d;      // one minute for each hop is already too much
 }
 
-void MeshObserver::noteClockSample(const uint8_t* pub, uint8_t hops, uint32_t their_ts) {
+void MeshObserver::noteClockSample(const uint8_t* pub, uint8_t hops, uint32_t their_ts, bool trusted) {
   uint32_t now = millis();
   int idx = -1, oldest = 0;
   for (int i = 0; i < _num_clock_samples; i++) {
@@ -423,6 +436,11 @@ void MeshObserver::noteClockSample(const uint8_t* pub, uint8_t hops, uint32_t th
   s.their_ts = their_ts;
   s.hops = hops;
   s.ms = now;
+  /* Trust belongs to THIS reading, so it is assigned and never OR-ed in. The
+     same node can reach us both over the bridge and off the air, and the slot
+     is keyed on the originator; a reading that arrives the ordinary way must be
+     able to take the trust back off. */
+  s.trusted = trusted ? 1 : 0;
 }
 
 int MeshObserver::clockSamples(mesh::ClockSample* out, int max) const {
@@ -479,6 +497,9 @@ int MeshObserver::clockSamples(mesh::ClockSample* out, int max) const {
       if (out[j].weight < 255) out[j].weight++;
       // Keep the shortest path of the group, because it carries the most weight.
       if (s.hops < out[j].hops) { out[j].hops = s.hops; out[j].offset_s = off; }
+      /* If the authenticated peer is anywhere in this group, the group carries
+         its trust: the reading is the same, and one member vouches for it. */
+      if (s.trusted) out[j].trusted = 1;
       dup = true; break;
     }
     if (dup) continue;
@@ -486,6 +507,7 @@ int MeshObserver::clockSamples(mesh::ClockSample* out, int max) const {
     out[n].offset_s = off;
     out[n].hops = s.hops;
     out[n].weight = 1;
+    out[n].trusted = s.trusted;
     n++;
   }
   return n;

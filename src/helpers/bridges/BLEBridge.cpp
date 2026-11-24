@@ -52,7 +52,13 @@ void BLEBridge::loop() {
     if (_next_start_attempt != 0 && (long)(now - _next_start_attempt) < 0) return;
 
     char ble_name[40];
-    snprintf(ble_name, sizeof(ble_name), "MeshCore-%s", _prefs->node_name);
+#if BLE_ADV_NAME_FROM_NODE
+    snprintf(ble_name, sizeof(ble_name), BLE_ADV_NAME_PREFIX "%s", _prefs->node_name);
+#else
+    /* Provisional. The address is not readable until the SoftDevice is up, so
+       the final name is set below, once selfAddr() has answered. */
+    snprintf(ble_name, sizeof(ble_name), "%s", BLE_ADV_NAME_PREFIX);
+#endif
     if (!BLE_DISCOVERY_CLASS::stackBegin(ble_name, BLE_PRPH_SLOTS, BLE_CENTRAL_SLOTS)) {
       _next_start_attempt = now + START_RETRY_MS;
       BRIDGE_DEBUG_PRINTLN("BLE: stack failed to start, retrying later\n");
@@ -64,6 +70,15 @@ void BLEBridge::loop() {
       _next_start_attempt = now + START_RETRY_MS;
       return;
     }
+#if !BLE_ADV_NAME_FROM_NODE
+    /* The real name, now that the address is known. Set it BEFORE _disc.begin()
+       because startConnectableAdvert() copies the name into the advert and then
+       caches it. The low two bytes are enough to tell a handful of sited nodes
+       apart, and they say nothing about where any of them is. */
+    snprintf(ble_name, sizeof(ble_name), BLE_ADV_NAME_PREFIX "%02X%02X",
+             self.addr[1], self.addr[0]);
+    BLE_DISCOVERY_CLASS::stackBegin(ble_name, BLE_PRPH_SLOTS, BLE_CENTRAL_SLOTS);
+#endif
     if (!_disc.begin(COMPANY_ID, _codec.groupMarker(), beacon_cb)) {
       _next_start_attempt = now + START_RETRY_MS;
       BRIDGE_DEBUG_PRINTLN("BLE: discovery failed to start, retrying later\n");

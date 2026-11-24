@@ -263,13 +263,13 @@ void UITask::pollButtons() {
 #endif
 }
 
-void UITask::msgRead(int msgcount) {
+void UITask::onQueueSizeChanged(int msgcount) {
   _msgcount = msgcount;
   _next_render = 0;
 }
 
-void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) {
-  _msgcount = msgcount;
+void UITask::addRecent(mesh::Packet* pkt, const char* from_name, const char* text) {
+  uint8_t path_len = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
   _recent.add(path_len, from_name, text, millis());
   /* No screen takeover: the message lands on the messages page and the count
      on the home page. A page that seizes the display would also seize it while
@@ -279,6 +279,18 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
   if (_display != NULL && !_display->isOn() && !hasConnection()) _display->turnOn();
   _auto_off = millis() + AUTO_OFF_MILLIS;
 #endif
+}
+
+void UITask::onMessageRecv(mesh::Packet* pkt, const ContactInfo& from, uint8_t txt_type, uint32_t sender_timestamp, const char* text) {
+  // Text messages only, not CLI data.
+  if (!(txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN)) return;
+  addRecent(pkt, from.name, text);
+  if (!hasConnection()) notify(UIEventType::contactMessage);
+}
+
+void UITask::onChannelMessageRecv(mesh::Packet* pkt, ChannelDetails& channel_details, const char* text) {
+  addRecent(pkt, channel_details.name, text);
+  if (!hasConnection()) notify(UIEventType::channelMessage);
 }
 
 void UITask::notify(UIEventType t) {

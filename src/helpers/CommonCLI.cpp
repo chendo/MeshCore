@@ -50,6 +50,24 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
     if (file) {
       _prefs->loadSerial(file);   // new Serial prefs
       file.close();
+
+      /* Sanitise what the JSON path loads, exactly as loadPrefsInt() does for
+         the legacy binary file. Only the legacy loader clamped, and a value
+         that migrated from it into prefs.json was never checked again.
+         bridge_pkt_src is the one that bites: an older firmware had a third
+         state, "both" == 2. It matches NEITHER of the tests that forward a
+         packet -- logRx asks for 1 and logTx asks for 0 -- so a node carrying it
+         bridges NOTHING, while `get bridge.source` prints "logRx" because 2 is
+         truthy. Silent, and it reports the opposite of the truth.
+         Measured on the production node 2026-09-02: rx 0 for the life of the
+         link, then 5 frames within 90s of forcing the value to 1. */
+      _prefs->bridge_pkt_src = constrain(_prefs->bridge_pkt_src, 0, 1);
+      _prefs->bridge_enabled = constrain(_prefs->bridge_enabled, 0, 1);
+      _prefs->powersaving_enabled = constrain(_prefs->powersaving_enabled, 0, 1);
+      _prefs->clock_converge = constrain(_prefs->clock_converge, 0, 1);
+      _prefs->bridge_path = constrain(_prefs->bridge_path, 0, 1);
+      _prefs->bridge_self = constrain(_prefs->bridge_self, 0, 1);
+      _prefs->bridge_max_hops = constrain(_prefs->bridge_max_hops, 0, 8);
     }
   } else if (fs->exists("/com_prefs")) {
     loadPrefsInt(fs, "/com_prefs");
@@ -177,6 +195,7 @@ void CommonCLI::savePrefs() {
     _prefs->advert_interval = 0;  // turn it off, now that device has been manually configured
   }
   _callbacks->savePrefs();
+  _prefs->clearDirty();
 }
 
 uint8_t CommonCLI::buildAdvertData(uint8_t node_type, uint8_t* app_data) {
@@ -193,6 +212,16 @@ uint8_t CommonCLI::buildAdvertData(uint8_t node_type, uint8_t* app_data) {
 }
 
 void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* reply) {
+    if (_prefs->getRadioPrefs()->handleCommand(command, sender_timestamp, reply)) {   // is a radio CLI command?
+      if (_prefs->getRadioPrefs()->isDirty()) { savePrefs(); }
+      return;
+    }
+    // hook for variant-specific CLI processing
+    if (_board->handleCommand(command, sender_timestamp, reply)) {
+      if (_prefs->isDirty()) { savePrefs(); }
+      return;
+    }
+
     if (memcmp(command, "poweroff", 8) == 0 || memcmp(command, "shutdown", 8) == 0) {
       _board->powerOff();  // doesn't return
     } else if (memcmp(command, "reboot", 6) == 0) {
@@ -286,6 +315,19 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       sprintf(reply, "%s (Build: %s)", _callbacks->getFirmwareVer(), _callbacks->getBuildDate());
     } else if (memcmp(command, "board", 5) == 0) {
       sprintf(reply, "%s", _board->getManufacturerName());
+    } else if (strcmp(command, "power") == 0) {
+      const char* usb_state = _board->hasUsbPowerDetect()
+                                  ? (_board->isUsbPowered() ? "yes" : "no")
+                                  : "n/a";
+      const char* solar_state = _board->hasSolarChargerDetect()
+                                    ? (_board->isSolarChargerActive() ? "yes" : "no")
+                                    : "n/a";
+      snprintf(reply, 160, "batt:%u mV usb:%s solar_chg:%s ext:%s charger:%s",
+              (unsigned)_board->getBattMilliVolts(),
+              usb_state,
+              solar_state,
+              _board->isExternalPowered() ? "yes" : "no",
+              _board->isChargerActive() ? "yes" : "no");
     } else if (memcmp(command, "sensor get ", 11) == 0) {
       const char* key = command + 11;
       const char* val = _sensors->getSettingByKey(key);
@@ -354,6 +396,20 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       if (l != NULL) {
         l->syncTime();
         strcpy(reply, "ok");
+      } else {
+        strcpy(reply, "gps provider not found");
+      }
+    } else if (strcmp(command, "gps diag") == 0) {
+      LocationProvider * l = _sensors->getLocationProvider();
+      if (l != NULL) {
+        const char* setting = _sensors->getSettingByKey("gps");
+        bool requested = setting != NULL && strcmp(setting, "1") == 0;
+        int prefix_len = snprintf(reply, 160, "req:%u ", requested ? 1U : 0U);
+        if (prefix_len < 0 || prefix_len >= 160) {
+          reply[159] = 0;
+        } else {
+          l->formatDiagnostics(reply + prefix_len, 160 - prefix_len);
+        }
       } else {
         strcpy(reply, "gps provider not found");
       }
@@ -447,11 +503,19 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     } else if (sender_timestamp == 0 && memcmp(command, "log", 3) == 0) {
       _callbacks->dumpLogFile();
       strcpy(reply, "   EOF");
-    } else if (sender_timestamp == 0 && memcmp(command, "stats-packets", 13) == 0 && (command[13] == 0 || command[13] == ' ')) {
+    /* The three stats commands READ and change nothing, so they are not gated to
+       the serial line the way `erase`, `log`, `set freq` and `set prv.key` are.
+       Those four destroy state or move key material; these report a battery
+       reading, an uptime, a queue depth, a noise floor and some counters.
+       Gating them cost more than it bought: a node reached only over BLE or
+       only over the mesh could not be asked how it was, and a repeater on a
+       roof is exactly the node nobody can put a cable into. The BLE link is
+       paired and MITM-encrypted, and a mesh sender has already met the ACL. */
+    } else if (memcmp(command, "stats-packets", 13) == 0 && (command[13] == 0 || command[13] == ' ')) {
       _callbacks->formatPacketStatsReply(reply);
-    } else if (sender_timestamp == 0 && memcmp(command, "stats-radio", 11) == 0 && (command[11] == 0 || command[11] == ' ')) {
+    } else if (memcmp(command, "stats-radio", 11) == 0 && (command[11] == 0 || command[11] == ' ')) {
       _callbacks->formatRadioStatsReply(reply);
-    } else if (sender_timestamp == 0 && memcmp(command, "stats-core", 10) == 0 && (command[10] == 0 || command[10] == ' ')) {
+    } else if (memcmp(command, "stats-core", 10) == 0 && (command[10] == 0 || command[10] == ' ')) {
       _callbacks->formatStatsReply(reply);
     } else {
       strcpy(reply, "Unknown command");
@@ -460,39 +524,8 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
 
 void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* reply) {
   const char* config = &command[4];
-  if (memcmp(config, "dutycycle ", 10) == 0) {
-    float dc = atof(&config[10]);
-    if (dc < 1 || dc > 100) {
-      strcpy(reply, "ERROR: dutycycle must be 1-100");
-    } else {
-      _prefs->airtime_factor = (100.0f / dc) - 1.0f;
-      savePrefs();
-      float actual = 100.0f / (_prefs->airtime_factor + 1.0f);
-      int a_int = (int)actual;
-      int a_frac = (int)((actual - a_int) * 10.0f + 0.5f);
-      sprintf(reply, "OK - %d.%d%%", a_int, a_frac);
-    }
-  } else if (memcmp(config, "af ", 3) == 0) {
-    _prefs->airtime_factor = atof(&config[3]);
-    savePrefs();
-    strcpy(reply, "OK");
-  } else if (memcmp(config, "int.thresh ", 11) == 0) {
-    _prefs->interference_threshold = atoi(&config[11]);
-    savePrefs();
-    strcpy(reply, "OK");
-  } else if (memcmp(config, "cad ", 4) == 0) {
-    _prefs->cad_enabled = memcmp(&config[4], "on", 2) == 0;
-    savePrefs();
-    strcpy(reply, "OK");
-  } else if (memcmp(config, "agc.reset.interval ", 19) == 0) {
-    _prefs->agc_reset_interval = atoi(&config[19]) / 4;
-    savePrefs();
-    sprintf(reply, "OK - interval rounded to %d", ((uint32_t) _prefs->agc_reset_interval) * 4);
-  } else if (memcmp(config, "multi.acks ", 11) == 0) {
-    _prefs->multi_acks = atoi(&config[11]);
-    savePrefs();
-    strcpy(reply, "OK");
-  } else if (memcmp(config, "allow.read.only ", 16) == 0) {
+
+  if (memcmp(config, "allow.read.only ", 16) == 0) {
     _prefs->allow_read_only = memcmp(&config[16], "on", 2) == 0;
     savePrefs();
     strcpy(reply, "OK");
@@ -545,77 +578,6 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     _prefs->disable_fwd = memcmp(&config[7], "off", 3) == 0;
     savePrefs();
     strcpy(reply, _prefs->disable_fwd ? "OK - repeat is now OFF" : "OK - repeat is now ON");
-  } else if (memcmp(config, "radio.rxgain ", 13) == 0) {
-    bool enabled = memcmp(&config[13], "on", 2) == 0;
-    _prefs->rx_boosted_gain = enabled;
-    savePrefs();
-    if (_callbacks->setRxBoostedGain(enabled)) {
-      strcpy(reply, "OK");
-    } else {
-      strcpy(reply, "Error: unsupported");
-    }
-  } else if (memcmp(config, "radio.fem.rxgain ", 17) == 0) {
-    if (!_board->canControlLoRaFemLna()) {
-      strcpy(reply, "Error: unsupported");
-    } else if (memcmp(&config[17], "on", 2) == 0) {
-      if (_board->setLoRaFemLnaEnabled(true)) {
-        _prefs->radio_fem_rxgain = 1;
-        savePrefs();
-        strcpy(reply, "OK - LoRa FEM RX gain on");
-      } else {
-        strcpy(reply, "Error: failed to apply LoRa FEM RX gain");
-      }
-    } else if (memcmp(&config[17], "off", 3) == 0) {
-      if (_board->setLoRaFemLnaEnabled(false)) {
-        _prefs->radio_fem_rxgain = 0;
-        savePrefs();
-        strcpy(reply, "OK - LoRa FEM RX gain off");
-      } else {
-        strcpy(reply, "Error: failed to apply LoRa FEM RX gain");
-      }
-    } else {
-      strcpy(reply, "Error: state must be on or off");
-    }
-  } else if (memcmp(config, "radio.fem.txgain ", 17) == 0) {
-    if (!_board->canControlLoRaFemPaGain()) {
-      strcpy(reply, "Error: unsupported");
-    } else if (memcmp(&config[17], "on", 2) == 0) {
-      if (_board->setLoRaFemPaGainEnabled(true)) {
-        _prefs->radio_fem_txgain = 1;
-        savePrefs();
-        strcpy(reply, "OK - LoRa FEM TX gain on");
-      } else {
-        strcpy(reply, "Error: failed to apply LoRa FEM TX gain");
-      }
-    } else if (memcmp(&config[17], "off", 3) == 0) {
-      if (_board->setLoRaFemPaGainEnabled(false)) {
-        _prefs->radio_fem_txgain = 0;
-        savePrefs();
-        strcpy(reply, "OK - LoRa FEM TX gain off");
-      } else {
-        strcpy(reply, "Error: failed to apply LoRa FEM TX gain");
-      }
-    } else {
-      strcpy(reply, "Error: state must be on or off");
-    }
-  } else if (memcmp(config, "radio ", 6) == 0) {
-    strcpy(tmp, &config[6]);
-    const char *parts[4];
-    int num = mesh::Utils::parseTextParts(tmp, parts, 4);
-    float freq  = num > 0 ? strtof(parts[0], nullptr) : 0.0f;
-    float bw    = num > 1 ? strtof(parts[1], nullptr) : 0.0f;
-    uint8_t sf  = num > 2 ? atoi(parts[2]) : 0;
-    uint8_t cr  = num > 3 ? atoi(parts[3]) : 0;
-    if (freq >= 150.0f && freq <= 2500.0f && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8 && bw >= 7.0f && bw <= 500.0f) {
-      _prefs->sf = sf;
-      _prefs->cr = cr;
-      _prefs->freq = freq;
-      _prefs->bw = bw;
-      _callbacks->savePrefs();
-      strcpy(reply, "OK - reboot to apply");
-    } else {
-      strcpy(reply, "Error, invalid radio params");
-    }
   } else if (memcmp(config, "lat ", 4) == 0) {
     _prefs->node_lat = atof(&config[4]);
     savePrefs();
@@ -624,24 +586,6 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     _prefs->node_lon = atof(&config[4]);
     savePrefs();
     strcpy(reply, "OK");
-  } else if (memcmp(config, "rxdelay ", 8) == 0) {
-    float db = atof(&config[8]);
-    if (db >= 0 && db <= 20.0f) {
-      _prefs->rx_delay_base = db;
-      savePrefs();
-      strcpy(reply, "OK");
-    } else {
-      strcpy(reply, "Error, must be 0-20");
-    }
-  } else if (memcmp(config, "txdelay ", 8) == 0) {
-    float f = atof(&config[8]);
-    if (f >= 0 && f <= 2.0f) {
-      _prefs->tx_delay_factor = f;
-      savePrefs();
-      strcpy(reply, "OK");
-    } else {
-      strcpy(reply, "Error, must be 0-2");
-    }
   } else if (memcmp(config, "flood.max.unscoped ", 19) == 0) {
     uint8_t m = atoi(&config[19]);
     if (m <= 64) {
@@ -669,15 +613,6 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       strcpy(reply, "Error, max 64");
     }
-  } else if (memcmp(config, "direct.txdelay ", 15) == 0) {
-    float f = atof(&config[15]);
-    if (f >= 0 && f <= 2.0f) {
-      _prefs->direct_tx_delay_factor = f;
-      savePrefs();
-      strcpy(reply, "OK");
-    } else {
-      strcpy(reply, "Error, must be 0-2");
-    }
   } else if (memcmp(config, "owner.info ", 11) == 0) {
     config += 11;
     char *dp = _prefs->owner_info;
@@ -688,16 +623,6 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     *dp = 0;
     savePrefs();
     strcpy(reply, "OK");
-  } else if (memcmp(config, "path.hash.mode ", 15) == 0) {
-    config += 15;
-    uint8_t mode = atoi(config);
-    if (mode < 3) {
-      _prefs->path_hash_mode = mode;
-      savePrefs();
-      strcpy(reply, "OK");
-    } else {
-      strcpy(reply, "Error, must be 0,1, or 2");
-    }
   } else if (memcmp(config, "loop.detect ", 12) == 0) {
     config += 12;
     uint8_t mode;
@@ -718,11 +643,6 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       savePrefs();
       strcpy(reply, "OK");
     }
-  } else if (memcmp(config, "tx ", 3) == 0) {
-    _prefs->tx_power_dbm = atoi(&config[3]);
-    savePrefs();
-    _callbacks->setTxPower(_prefs->tx_power_dbm);
-    strcpy(reply, "OK");
   } else if (sender_timestamp == 0 && memcmp(config, "freq ", 5) == 0) {
     _prefs->freq = atof(&config[5]);
     savePrefs();
@@ -749,6 +669,27 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     _prefs->bridge_pkt_src = memcmp(&config[14], "rx", 2) == 0;
     savePrefs();
     strcpy(reply, "OK");
+  } else if (memcmp(config, "bridge.path ", 12) == 0) {
+    _prefs->bridge_path = memcmp(&config[12], "on", 2) == 0;
+    savePrefs();
+    strcpy(reply, _prefs->bridge_path ? "OK - this node appears in the path (2 hops)"
+                                      : "OK - transparent bridge (1 hop)");
+  } else if (memcmp(config, "bridge.max_hops ", 16) == 0) {
+    int n = atoi(&config[16]);
+    if (n < 0 || n > 8) {   // mesh::CLOCK_MAX_HOPS is 8; a path cannot usefully exceed it
+      strcpy(reply, "Error: max_hops is 0 (no limit) or 1-8");
+    } else {
+      _prefs->bridge_max_hops = (uint8_t)n;
+      savePrefs();
+      strcpy(reply, "OK");
+    }
+  } else if (memcmp(config, "bridge.self ", 12) == 0) {
+    _prefs->bridge_self = memcmp(&config[12], "on", 2) == 0;
+    savePrefs();
+    /* Say what turning it off costs, at the moment it is turned off. This is
+       the setting that silently makes a node unreachable from the far band. */
+    strcpy(reply, _prefs->bridge_self ? "OK"
+                 : "OK - WARNING: our adverts and admin replies no longer cross the bridge");
 #endif
 #ifdef BRIDGE_HAS_BAUD
   } else if (memcmp(config, "bridge.baud ", 12) == 0) {
@@ -824,22 +765,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
 
 void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* reply) {
   const char* config = &command[4];
-  if (memcmp(config, "dutycycle", 9) == 0) {
-    float dc = 100.0f / (_prefs->airtime_factor + 1.0f);
-    int dc_int = (int)dc;
-    int dc_frac = (int)((dc - dc_int) * 10.0f + 0.5f);
-    sprintf(reply, "> %d.%d%%", dc_int, dc_frac);
-  } else if (memcmp(config, "af", 2) == 0) {
-    sprintf(reply, "> %s", StrHelper::ftoa(_prefs->airtime_factor));
-  } else if (memcmp(config, "int.thresh", 10) == 0) {
-    sprintf(reply, "> %d", (uint32_t) _prefs->interference_threshold);
-  } else if (memcmp(config, "cad", 3) == 0) {
-    sprintf(reply, "> %s", _prefs->cad_enabled ? "on" : "off");
-  } else if (memcmp(config, "agc.reset.interval", 18) == 0) {
-    sprintf(reply, "> %d", ((uint32_t) _prefs->agc_reset_interval) * 4);
-  } else if (memcmp(config, "multi.acks", 10) == 0) {
-    sprintf(reply, "> %d", (uint32_t) _prefs->multi_acks);
-  } else if (memcmp(config, "allow.read.only", 15) == 0) {
+  if (memcmp(config, "allow.read.only", 15) == 0) {
     sprintf(reply, "> %s", _prefs->allow_read_only ? "on" : "off");
   } else if (memcmp(config, "flood.advert.interval", 21) == 0) {
     sprintf(reply, "> %d", ((uint32_t) _prefs->flood_advert_interval));
@@ -860,37 +786,12 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", StrHelper::ftoa(_prefs->node_lat));
   } else if (memcmp(config, "lon", 3) == 0) {
     sprintf(reply, "> %s", StrHelper::ftoa(_prefs->node_lon));
-  } else if (memcmp(config, "radio.rxgain", 12) == 0) {
-    sprintf(reply, "> %s", _prefs->rx_boosted_gain ? "on" : "off");
-  } else if (memcmp(config, "radio.fem.rxgain", 16) == 0) {
-    if (!_board->canControlLoRaFemLna()) {
-      strcpy(reply, "Error: unsupported");
-    } else {
-      sprintf(reply, "> %s", _board->isLoRaFemLnaEnabled() ? "on" : "off");
-    }
-  } else if (memcmp(config, "radio.fem.txgain", 16) == 0) {
-    if (!_board->canControlLoRaFemPaGain()) {
-      strcpy(reply, "Error: unsupported");
-    } else {
-      sprintf(reply, "> %s", _board->isLoRaFemPaGainEnabled() ? "on" : "off");
-    }
-  } else if (memcmp(config, "radio", 5) == 0) {
-    char freq[16], bw[16];
-    strcpy(freq, StrHelper::ftoa(_prefs->freq));
-    strcpy(bw, StrHelper::ftoa3(_prefs->bw));
-    sprintf(reply, "> %s,%s,%d,%d", freq, bw, (uint32_t)_prefs->sf, (uint32_t)_prefs->cr);
-  } else if (memcmp(config, "rxdelay", 7) == 0) {
-    sprintf(reply, "> %s", StrHelper::ftoa(_prefs->rx_delay_base));
-  } else if (memcmp(config, "txdelay", 7) == 0) {
-    sprintf(reply, "> %s", StrHelper::ftoa(_prefs->tx_delay_factor));
   } else if (memcmp(config, "flood.max.advert", 16) == 0) {
     sprintf(reply, "> %d", (uint32_t)_prefs->flood_max_advert);
   } else if (memcmp(config, "flood.max.unscoped", 18) == 0) {
     sprintf(reply, "> %d", (uint32_t)_prefs->flood_max_unscoped);
   } else if (memcmp(config, "flood.max", 9) == 0) {
     sprintf(reply, "> %d", (uint32_t)_prefs->flood_max);
-  } else if (memcmp(config, "direct.txdelay", 14) == 0) {
-    sprintf(reply, "> %s", StrHelper::ftoa(_prefs->direct_tx_delay_factor));
   } else if (memcmp(config, "owner.info", 10) == 0) {
     auto start = reply;
     *reply++ = '>';
@@ -901,8 +802,6 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
       sp++;
     }
     *reply = 0;  // set null terminator
-  } else if (memcmp(config, "path.hash.mode", 14) == 0) {
-    sprintf(reply, "> %d", (uint32_t)_prefs->path_hash_mode);
   } else if (memcmp(config, "loop.detect", 11) == 0) {
     if (_prefs->loop_detect == LOOP_DETECT_OFF) {
       strcpy(reply, "> off");
@@ -913,10 +812,6 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       strcpy(reply, "> strict");
     }
-  } else if (memcmp(config, "tx", 2) == 0 && (config[2] == 0 || config[2] == ' ')) {
-    sprintf(reply, "> %d", (int32_t) _prefs->tx_power_dbm);
-  } else if (memcmp(config, "freq", 4) == 0) {
-    sprintf(reply, "> %s", StrHelper::ftoa(_prefs->freq));
   } else if (memcmp(config, "public.key", 10) == 0) {
     strcpy(reply, "> ");
     mesh::Utils::toHex(&reply[2], _callbacks->getSelfId().pub_key, PUB_KEY_SIZE);
@@ -935,7 +830,27 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "bridge.delay", 12) == 0) {
     sprintf(reply, "> %d", (uint32_t)_prefs->bridge_delay);
   } else if (memcmp(config, "bridge.source", 13) == 0) {
+#ifdef BLE_LINK_BACKEND_CLASS
+    /* The BLE relay does not read this pref: it bridges everything it HEARS
+       (with this node written into the path) plus everything it ORIGINATES, and
+       lets the seen-packet check stop the two overlapping. Reporting a stored
+       value that changes nothing is how the last fault hid for weeks -- a node
+       held the legacy "both" (2), forwarded nothing at all, and printed
+       "logRx". Say plainly that it is not in use. */
+    strcpy(reply, "> n/a - BLE relay bridges heard + originated");
+#else
     sprintf(reply, "> %s", _prefs->bridge_pkt_src ? "logRx" : "logTx");
+#endif
+  } else if (memcmp(config, "bridge.path", 11) == 0) {
+    sprintf(reply, "> %s", _prefs->bridge_path ? "on (2 hops)" : "off (transparent)");
+  } else if (memcmp(config, "bridge.max_hops", 15) == 0) {
+    if (_prefs->bridge_max_hops == 0) {
+      strcpy(reply, "> 0 (no limit)");
+    } else {
+      sprintf(reply, "> %d", (int)_prefs->bridge_max_hops);
+    }
+  } else if (memcmp(config, "bridge.self", 11) == 0) {
+    sprintf(reply, "> %s", _prefs->bridge_self ? "on" : "off (we are invisible across the bridge)");
 #endif
 #ifdef BRIDGE_HAS_BAUD
   } else if (memcmp(config, "bridge.baud", 11) == 0) {

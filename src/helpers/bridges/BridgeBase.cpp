@@ -1,5 +1,10 @@
 #include "BridgeBase.h"
 
+#ifdef CLOCK_CONVERGE_MS
+  #include "helpers/MeshObserver.h"
+  MeshObserver& rfObserver();     // helpers/ObservingWrapper.cpp
+#endif
+
 #include <Arduino.h>
 
 bool BridgeBase::isRunning() const {
@@ -41,6 +46,19 @@ void BridgeBase::handleReceivedPacket(mesh::Packet *packet) {
 
   if (!_seen_packets.wasSeen(packet)) {
     _seen_packets.markSeen(packet);
+#ifdef CLOCK_CONVERGE_MS
+    /* Clock samples only -- observeBridgedAdvert() deliberately touches no peer
+       table, hop histogram or SNR statistic, because our radio never heard this
+       and a neighbour list must not fill with nodes on the other band.
+       This is the whole reason a bridge node can hold a clock at all: a node
+       alone on its band overhears no adverts, so the ones its bridge peer
+       relays are its ONLY evidence of the time. See MeshObserver.h. */
+    {
+      uint8_t frame[MAX_TRANS_UNIT];
+      int n = packet->writeTo(frame);
+      if (n > 0) rfObserver().observeBridgedAdvert(frame, n);
+    }
+#endif
     // bridge_delay provides a buffer to prevent immediate processing conflicts in the mesh network.
     _mgr->queueInbound(packet, millis() + _prefs->bridge_delay);
   } else {

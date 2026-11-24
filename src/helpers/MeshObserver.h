@@ -127,6 +127,11 @@ public:
     uint32_t prev_their_ts;  // the reading that this one replaced, for a drift estimate
     uint32_t prev_ms;
     uint8_t  hops;           // 0 = directly off their radio
+    /* 1 = this reading is the BRIDGE PEER'S OWN advert, arriving over an
+       HMAC-authenticated link at zero hops. Not set for anything the peer
+       merely relays: that is ordinary neighbourhood traffic and gets no extra
+       trust. See observeBridgedAdvert(). */
+    uint8_t  trusted;
   };
   /* Both clocks read to the second. Therefore a drift verdict over a short
      span is mostly quantisation. To separate 50 s/day from the noise, the two
@@ -350,7 +355,7 @@ private:
 
   ClockReading _clock_samples[CLOCK_SAMPLES];
   uint8_t     _num_clock_samples = 0;
-  void noteClockSample(const uint8_t* pub, uint8_t hops, uint32_t their_ts);
+  void noteClockSample(const uint8_t* pub, uint8_t hops, uint32_t their_ts, bool trusted = false);
 
   /* One advert in flight. The code can then time the later copies of that
      advert against the first copy. The key is the originator plus the advert

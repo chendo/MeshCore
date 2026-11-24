@@ -89,6 +89,7 @@ class UITask : public AbstractUITask {
   void sendAdvert(bool flood);
   void toggleBluetooth();
   void doShutdown();
+  void addRecent(mesh::Packet* pkt, const char* from_name, const char* text);
 
 public:
   UITask(mesh::MainBoard* board, MultiSerialInterface* serial);
@@ -103,9 +104,11 @@ public:
   bool isBuzzerQuiet() { return true; }
 #endif
 
+  // MyMesh::Listener
+  void onMessageRecv(mesh::Packet* pkt, const ContactInfo& from, uint8_t txt_type, uint32_t sender_timestamp, const char* text) override;
+  void onChannelMessageRecv(mesh::Packet* pkt, ChannelDetails& channel_details, const char* text) override;
+  void onQueueSizeChanged(int msgcount) override;
   // AbstractUITask
-  void msgRead(int msgcount) override;
-  void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) override;
   void notify(UIEventType t = UIEventType::none) override;
   void loop() override;
 };

@@ -11,10 +11,15 @@ static const uint32_t SET_CLOCK = 2000000000UL;
 static const uint32_t VOLATILE_DEFAULT = 1715770351UL;
 
 static ClockSample direct(int32_t off, uint8_t weight = 1) {
-  ClockSample s; s.offset_s = off; s.hops = 0; s.weight = weight; return s;
+  ClockSample s; s.offset_s = off; s.hops = 0; s.weight = weight; s.trusted = 0; return s;
 }
 static ClockSample relayed(int32_t off, uint8_t hops, uint8_t weight = 1) {
-  ClockSample s; s.offset_s = off; s.hops = hops; s.weight = weight; return s;
+  ClockSample s; s.offset_s = off; s.hops = hops; s.weight = weight; s.trusted = 0; return s;
+}
+// An authenticated bridge peer's OWN advert: zero hops, over a link whose every
+// frame carries an HMAC over the shared secret.
+static ClockSample peer(int32_t off, uint8_t weight = 1) {
+  ClockSample s; s.offset_s = off; s.hops = 0; s.weight = weight; s.trusted = 1; return s;
 }
 
 // A node that has been up a long time, has never been told the time by a
@@ -580,6 +585,83 @@ TEST(ClockWrap, AMarkThatSitsAheadOfOurClockBlocksEveryBackwardMove) {
   EXPECT_EQ(CLOCK_HOLD, d.action);
   EXPECT_EQ(CLOCK_HOLD_REPLAY, d.hold);
   EXPECT_EQ(0, d.apply_s);
+}
+
+/* ---- the authenticated bridge peer ------------------------------------------
+
+   Measured on the Northcote pair 2026-09-03: two ordinary samples from the same
+   neighbourhood disagreed by 100,669 s, and at 21 sources the winning cluster
+   held 17% of the weight. A mesh does not necessarily contain a majority that
+   knows the time, so a node alone on its band can wait for a quorum for ever.
+   These cover the way out and, just as importantly, its limits. */
+
+TEST(ClockTrustedPeer, OnePeerCarriesTheQuorumWhenTheClockIsUnset) {
+  // One trusted reading, nothing else. Without trust_solo this is one source
+  // against a minimum of two and the estimate is refused.
+  ClockSample v[1] = { peer(+72569038) };
+  auto without = clockEstimate(v, 1, CLOCK_UNSET_MIN_SOURCES,
+                               CLOCK_HOP_DELAY_DEFAULT_MS, false);
+  EXPECT_FALSE(without.valid);
+
+  auto with = clockEstimate(v, 1, CLOCK_UNSET_MIN_SOURCES,
+                            CLOCK_HOP_DELAY_DEFAULT_MS, true);
+  EXPECT_TRUE(with.valid);
+  EXPECT_TRUE(with.trusted);
+  EXPECT_EQ(+72569038, with.offset_s);
+}
+
+TEST(ClockTrustedPeer, ASetClockStillNeedsTheFullQuorum) {
+  /* The guard against two bridged nodes settling on a shared wrong time. Only a
+     node whose clock is unset passes trust_solo, so a set clock cannot be moved
+     by its peer alone however much that peer is trusted. */
+  ClockSample v[1] = { peer(+40) };
+  auto est = clockEstimate(v, 1, CLOCK_MIN_SOURCES,
+                           CLOCK_HOP_DELAY_DEFAULT_MS, false);
+  EXPECT_FALSE(est.valid);
+}
+
+TEST(ClockTrustedPeer, ThePeerOutweighsASkewedNeighbourhood) {
+  /* The real shape of the problem: a peer that knows the time, among neighbours
+     that do not agree with each other at all. The trusted reading has to carry
+     the agreement test on its own, or the cluster holding it is thrown out for
+     holding too little of the evidence. */
+  ClockSample v[5] = {
+    peer(+72569038),
+    direct(+72469038), direct(+72669038),   // ~28 hours either side
+    relayed(+72500000, 2), relayed(+72600000, 3),
+  };
+  auto est = clockEstimate(v, 5, CLOCK_UNSET_MIN_SOURCES,
+                           CLOCK_HOP_DELAY_DEFAULT_MS, true);
+  EXPECT_TRUE(est.valid);
+  EXPECT_TRUE(est.trusted);
+  EXPECT_EQ(+72569038, est.offset_s);
+  EXPECT_GE(est.agree_pct, CLOCK_MIN_AGREE_PCT);
+}
+
+TEST(ClockTrustedPeer, AnUntrustedSampleAloneIsStillRefused) {
+  // trust_solo relaxes the quorum only for a reading that is actually trusted.
+  // An ordinary advert gains nothing from it.
+  ClockSample v[1] = { direct(+72569038) };
+  auto est = clockEstimate(v, 1, CLOCK_UNSET_MIN_SOURCES,
+                           CLOCK_HOP_DELAY_DEFAULT_MS, true);
+  EXPECT_FALSE(est.valid);
+  EXPECT_FALSE(est.trusted);
+}
+
+TEST(ClockTrustedPeer, AnUnsetNodeStepsOntoItsPeer) {
+  // End to end: the case that kept a live node at its 2024 default.
+  ClockSample v[1] = { peer(+72569038) };
+  auto est = clockEstimate(v, 1, CLOCK_UNSET_MIN_SOURCES,
+                           CLOCK_HOP_DELAY_DEFAULT_MS, true);
+  ClockContext ctx;
+  ctx.now_s = 1715770400;          // the 2024 default: unset
+  ctx.since_move_ms = 0;
+  ctx.admin_hold_ms = 0;
+  ctx.sent_high_s = 0;
+
+  auto d = clockDecide(est, ctx);
+  EXPECT_EQ(CLOCK_STEP, d.action);
+  EXPECT_EQ(+72569038, d.apply_s);
 }
 
 int main(int argc, char** argv) {
