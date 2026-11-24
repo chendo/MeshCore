@@ -206,7 +206,14 @@ void setup() {
 
 // add bluetooth interface
 #if defined(BLE_PIN_CODE)
-  bluetooth_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
+  // Default to the BLE MAC, which the radio broadcasts anyway, so the name reveals neither the node name nor MeshCore.
+  char *prefix = BLE_NAME_PREFIX;
+  char *ble_name = the_mesh.getBLEDefaultSuffix();
+  if (the_mesh.getNodePrefs()->ble_name[0]) {
+    prefix = "";
+    ble_name = the_mesh.getNodePrefs()->ble_name;
+  }
+  bluetooth_interface.begin((const char *) prefix, ble_name, the_mesh.getBLEPin());
   interface_manager.addInterface(InterfaceType::Bluetooth, &bluetooth_interface);
 #endif
 
