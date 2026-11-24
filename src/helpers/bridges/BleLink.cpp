@@ -315,6 +315,14 @@ void BleLink::onConnected(uint16_t conn) {
     }
     return;
   }
+
+  /* No link is waiting for this one: a dial that we gave up on (the connect
+     deadline, then a redial) completed after all, or a second dial to a peer
+     whose link is already up. Nothing owns the handle, so nothing would ever
+     close it, and the peer would keep that peripheral slot for good -- on
+     2026-11-24 that left the production node non-connectable until the other
+     end rebooted. */
+  Backend::disconnect(conn);
 }
 
 void BleLink::onDisconnected(uint16_t conn, uint8_t reason) {
@@ -444,11 +452,16 @@ bool BleLink::adoptInbound(uint16_t conn) {
    is what keeps the sweep away from the CLI. */
 void BleLink::sweepInbound() {
 #if BLE_LINK_SILENT_SWEEP
-  if (_in_conn != Backend::NO_CONN) return;    // the slot is already ours
-
+  /* This walks every pass, even with an inbound peer adopted. A connection
+     that is neither our inbound peer nor paired is owned by nobody: an
+     earlier connection of a peer that has since dialled in again, or one that
+     the far end itself has forgotten. Left alone it holds a peripheral slot
+     until reboot, and with both slots held the node stops advertising as
+     connectable, which locks out the CLI. Past the pairing grace it is closed. */
   const uint32_t now = millis();
   for (uint8_t i = 0; i < Backend::SWEEP_SLOTS; i++) {
     uint16_t h = Backend::peripheralConnAt(i);
+    if (h != Backend::NO_CONN && h == _in_conn) continue;   // ours; its timers apply
     if (h == Backend::NO_CONN || !Backend::exists(h) || Backend::paired(h)) {
       /* Gone, or secured and therefore the CLI or DFU. Either way it is not a
          candidate, and forgetting it now means a later connection on the same
@@ -463,7 +476,12 @@ void BleLink::sweepInbound() {
     }
     /* Unsigned difference, correct across the millis() wrap. */
     if ((uint32_t)(now - _sweep_since_ms[i]) < BLE_LINK_PAIRING_GRACE_MS) continue;
-    if (adoptInbound(h)) return;               // the auth and silence timers take it from here
+    if (_in_conn == Backend::NO_CONN) {
+      if (adoptInbound(h)) return;             // the auth and silence timers take it from here
+    } else {
+      Backend::disconnect(h);
+      _sweep_conn[i] = Backend::NO_CONN;       // a disconnect still in flight waits a fresh grace
+    }
   }
 #endif
 }

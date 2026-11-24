@@ -391,11 +391,19 @@ TEST_F(BleLinkTest, aFrameForTheInboundPeerGoesToThatPeerAlone) {
    connections, which needs no Bluefruit callback and thus cannot take one from
    the BLE CLI. */
 
+/* The sweep leaves an unpaired connection alone for the pairing grace, because
+   a CLI client at its passkey prompt looks exactly like a silent peer. */
+static void sweepPastPairingGrace(BleLink& link) {
+  link.loop();                                    // first sight
+  BleMock::advance(BLE_LINK_PAIRING_GRACE_MS);
+  link.loop();
+}
+
 TEST_F(BleLinkTest, aPeerThatConnectsAndNeverWritesLosesTheSlot) {
   uint16_t h = BleMock::openConn(inbound_addr());
 
   /* Not one byte from this peer. The sweep is what makes it known. */
-  link.loop();
+  sweepPastPairingGrace(link);
   ble_gap_addr_t a;
   ASSERT_TRUE(link.getInboundAddr(a));
 
@@ -410,7 +418,7 @@ TEST_F(BleLinkTest, aPeerThatConnectsAndNeverWritesLosesTheSlot) {
 
 TEST_F(BleLinkTest, aPeerThatWritesInsideTheLimitKeepsTheSlot) {
   uint16_t h = BleMock::openConn(inbound_addr());
-  link.loop();
+  sweepPastPairingGrace(link);
   ble_gap_addr_t a;
   ASSERT_TRUE(link.getInboundAddr(a));
 
@@ -432,7 +440,7 @@ TEST_F(BleLinkTest, aPeerThatWritesInsideTheLimitKeepsTheSlot) {
 
 TEST_F(BleLinkTest, aPeerDroppedForSilenceIsNotAdoptedAgainAtOnce) {
   uint16_t h = BleMock::openConn(inbound_addr());
-  link.loop();
+  sweepPastPairingGrace(link);
   ble_gap_addr_t a;
   ASSERT_TRUE(link.getInboundAddr(a));
 
@@ -447,15 +455,20 @@ TEST_F(BleLinkTest, aPeerDroppedForSilenceIsNotAdoptedAgainAtOnce) {
   link.loop();
   EXPECT_FALSE(link.getInboundAddr(a));
 
-  /* The hold is short on purpose: the SoftDevice reuses handles. */
+  /* A connection still there after the hold is treated as new: the drop
+     forgets every first sighting, so it waits out a fresh pairing grace like
+     any unpaired connection, and only then is it adopted. */
   BleMock::advance(2001);
+  link.loop();
+  EXPECT_FALSE(link.getInboundAddr(a));
+  BleMock::advance(BLE_LINK_PAIRING_GRACE_MS);
   link.loop();
   EXPECT_TRUE(link.getInboundAddr(a));
 }
 
 TEST_F(BleLinkTest, aPeerThatSaysNothingReachesTheDenyList) {
   BleMock::openConn(inbound_addr());
-  link.loop();
+  sweepPastPairingGrace(link);
 
   BleMock::advance(45001);
   link.loop();
@@ -478,7 +491,7 @@ TEST_F(BleLinkTest, theCliConnectionIsNotTakenForTheInboundPeer) {
   BleMock::pair(cli);
   uint16_t peer = BleMock::openConn(inbound_addr());
 
-  link.loop();
+  sweepPastPairingGrace(link);
   ble_gap_addr_t a;
   ASSERT_TRUE(link.getInboundAddr(a));
   EXPECT_EQ(memcmp(a.addr, inbound_addr().addr, 6), 0);
@@ -487,4 +500,52 @@ TEST_F(BleLinkTest, theCliConnectionIsNotTakenForTheInboundPeer) {
   link.loop();
   EXPECT_TRUE(BleMock::conns[cli].connected);
   EXPECT_FALSE(BleMock::conns[peer].connected);
+}
+
+/* ---- Connections nobody owns -------------------------------------------- */
+
+/* On 2026-11-24 the production node advertised NON-CONNECTABLE with its bridge
+   link up: one peripheral slot held by the peer, the other by a connection no
+   state machine tracked, until the peer rebooted. These are the two ways that
+   such a connection arises, one per end. */
+
+TEST_F(BleLinkTest, anUnpairedConnectionBesideTheInboundPeerIsClosed) {
+  uint16_t peer = bringUpInbound(inbound_addr());
+  link.markAuthed(BleLink::INBOUND_LINK);
+  /* An extra connection from the same peer that never writes, such as the
+     earlier one of a peer that has dialled in again. */
+  uint16_t stale = BleMock::openConn(inbound_addr());
+
+  link.loop();
+  BleMock::advance(BLE_LINK_PAIRING_GRACE_MS - 1000);
+  std::vector<uint8_t> f = framed(payloadOf(16));
+  BleMock::writeFrom(peer, f.data(), (uint16_t)f.size());   // the real link keeps talking
+  link.loop();
+  ASSERT_TRUE(BleMock::conns[stale].connected);             // inside the pairing grace
+
+  BleMock::advance(1001);
+  link.loop();
+  EXPECT_FALSE(BleMock::conns[stale].connected);
+  EXPECT_TRUE(BleMock::conns[peer].connected);
+  ble_gap_addr_t a;
+  EXPECT_TRUE(link.getInboundAddr(a));
+}
+
+TEST_F(BleLinkTest, aPairedClientBesideTheInboundPeerIsLeftAlone) {
+  bringUpInbound(inbound_addr());
+  link.markAuthed(BleLink::INBOUND_LINK);
+  uint16_t cli = BleMock::openConn(addrEndingIn(0x55));
+  BleMock::pair(cli);
+
+  sweepPastPairingGrace(link);
+  EXPECT_TRUE(BleMock::conns[cli].connected);
+}
+
+TEST_F(BleLinkTest, aDialThatAnswersWhenNoLinkWaitsIsClosed) {
+  bringUpLink0();
+  /* A second answer for a peer whose link is already up: the late completion
+     of a dial that the connect deadline gave up on. */
+  uint16_t late = BleMock::completeDial();
+  EXPECT_FALSE(BleMock::conns[late].connected);
+  EXPECT_EQ(link.numUp(), 1);
 }
