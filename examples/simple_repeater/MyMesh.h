@@ -35,6 +35,9 @@
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/RegionMap.h>
 #include <helpers/RoutingPolicy.h>
+#ifdef CLOCK_CONVERGE_MS
+  #include <helpers/ClockSampler.h>
+#endif
 #include "RateLimiter.h"
 
 #ifdef WITH_BRIDGE
@@ -82,6 +85,31 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint64_t uptime_millis;
   unsigned long next_local_advert, next_flood_advert;
   bool _logging;
+
+#ifdef CLOCK_CONVERGE_MS
+  /* Clock convergence: steer the RTC towards what neighbouring nodes' adverts
+     say the time is. The rules live in helpers/ClockPolicy.h with host tests;
+     this is the plumbing. CLOCK_CONVERGE_MS compiles it in and sets how often
+     it looks; 'clocks off' turns it off and persists. */
+  static const uint32_t CLOCK_CONVERGE_FAST_MS = 30UL * 1000UL;   // while unset
+  /* A jump larger than this between two passes, beyond the elapsed time, means
+     something else SET the clock (an admin, a client app, GPS). Convergence
+     then stands down until 'clocks on' or a reboot. */
+  static const int32_t CLOCK_EXTERNAL_SET_S = 5;
+  mesh::ClockSampler _clock_sampler;
+  uint32_t _clock_prev_ms = 0;
+  uint32_t _clock_due_ms = 0;
+  uint32_t _clock_since_move_ms = 0;
+  uint32_t _clock_expect_s = 0;
+  bool     _clock_expect_ok = false;
+  bool     _clock_admin_hold = false;
+  uint32_t _clock_steps = 0, _clock_slews = 0;
+  int32_t  _clock_last_adj_s = 0;
+  uint8_t  _clock_last_hold = 0;
+  mesh::ClockEstimate clockEstimateNow(uint32_t now_s);
+  void loopClockConverge();
+  void reportClocks(char* reply, size_t reply_sz);
+#endif
   NodePrefs _prefs;
   ClientACL  acl;
   CommonCLI _cli;

@@ -623,6 +623,16 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 }
 
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
+#ifdef CLOCK_CONVERGE_MS
+  // Record our own advert timestamps: the replay floor that convergence must
+  // not take the clock below. See mesh::clockDecide.
+  if (pkt->getPayloadType() == PAYLOAD_TYPE_ADVERT && pkt->payload_len >= PUB_KEY_SIZE + 4
+      && self_id.matches(pkt->payload)) {
+    uint32_t ts;
+    memcpy(&ts, &pkt->payload[PUB_KEY_SIZE], 4);
+    _clock_sampler.noteSent(ts);
+  }
+#endif
 #ifdef WITH_BRIDGE
   if (_prefs.bridge_pkt_src == 0) {
     bridge.sendPacket(pkt);
@@ -770,6 +780,13 @@ static bool isShare(const mesh::Packet *packet) {
 void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32_t timestamp,
                           const uint8_t *app_data, size_t app_data_len) {
   mesh::Mesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len); // chain to super impl
+
+#ifdef CLOCK_CONVERGE_MS
+  // Every signed advert is one reading of its originator's clock.
+  if (!isShare(packet)) {
+    _clock_sampler.noteAdvert(id.pub_key, timestamp, packet->getPathHashCount(), millis());
+  }
+#endif
 
   // if this a zero hop advert (and not via 'Share'), add it to neighbours
   if (packet->getPathHashCount() == 0 && !isShare(packet)) {
@@ -1403,10 +1420,96 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       sendNodeDiscoverReq();
       strcpy(reply, "OK - Discover sent");
     }
+#ifdef CLOCK_CONVERGE_MS
+  } else if (strcmp(command, "clocks") == 0 || strcmp(command, "clocks on") == 0
+             || strcmp(command, "clocks off") == 0) {
+    if (strcmp(command, "clocks on") == 0) {
+      _prefs.clock_converge = 1;
+      _clock_admin_hold = false;   // 'on' also releases a hold from a manual set
+      _clock_due_ms = 0;           // look on the next pass
+      savePrefs();
+    } else if (strcmp(command, "clocks off") == 0) {
+      _prefs.clock_converge = 0;
+      savePrefs();
+    }
+    reportClocks(reply, 160);
+#endif
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }
 }
+
+#ifdef CLOCK_CONVERGE_MS
+mesh::ClockEstimate MyMesh::clockEstimateNow(uint32_t now_s) {
+  mesh::ClockSample samples[mesh::CLOCK_POLICY_MAX_SAMPLES];
+  const int n = _clock_sampler.samples(samples, mesh::CLOCK_POLICY_MAX_SAMPLES, now_s, millis());
+  return mesh::clockEstimate(samples, n,
+      mesh::clockIsUnset(now_s) ? mesh::CLOCK_UNSET_MIN_SOURCES : mesh::CLOCK_MIN_SOURCES);
+}
+
+void MyMesh::loopClockConverge() {
+  const uint32_t now_ms = millis();
+  // Counters advance by the difference between passes, so they survive the
+  // millis() wrap.
+  const uint32_t delta = mesh::clockPollDelta(now_ms, _clock_prev_ms);
+  _clock_prev_ms = now_ms;
+  _clock_since_move_ms = mesh::clockAdvanceElapsed(_clock_since_move_ms, delta);
+  _clock_due_ms = mesh::clockReduceHold(_clock_due_ms, delta);
+
+  /* Did something else set the clock? Compare how far it moved with how far it
+     was owed. Watching the clock catches every way to set it ('clock sync',
+     'time', a client app, GPS) without hooks into each of them. */
+  const uint32_t reads = getRTCClock()->getCurrentTime();
+  if (_clock_expect_ok) {
+    const int32_t jump = (int32_t)(reads - _clock_expect_s) - (int32_t)(delta / 1000);
+    if (jump > CLOCK_EXTERNAL_SET_S || jump < -CLOCK_EXTERNAL_SET_S) _clock_admin_hold = true;
+  } else {
+    _clock_expect_ok = true;   // the first pass only learns the value
+  }
+  _clock_expect_s = reads;
+
+  if (!_prefs.clock_converge || _clock_due_ms > 0) return;
+  _clock_due_ms = mesh::clockIsUnset(reads) ? CLOCK_CONVERGE_FAST_MS : CLOCK_CONVERGE_MS;
+
+  mesh::ClockContext ctx;
+  ctx.now_s = reads;
+  ctx.since_move_ms = _clock_since_move_ms;
+  ctx.admin_hold_ms = _clock_admin_hold ? mesh::CLOCK_ADMIN_HOLD_MS : 0;
+  ctx.sent_high_s = _clock_sampler.sentHighWater();
+
+  const mesh::ClockDecision d = mesh::clockDecide(clockEstimateNow(reads), ctx);
+  _clock_last_hold = (uint8_t)d.hold;
+  if (d.action == mesh::CLOCK_HOLD) return;
+
+  getRTCClock()->setCurrentTime(mesh::clockApply(reads, d.apply_s));
+  _clock_expect_s = getRTCClock()->getCurrentTime();   // or the next pass sees an admin set
+  _clock_last_adj_s = d.apply_s;
+  _clock_since_move_ms = 0;
+  if (d.action == mesh::CLOCK_STEP) _clock_steps++; else _clock_slews++;
+}
+
+static const char* clockHoldName(uint8_t h) {
+  switch (h) {
+    case mesh::CLOCK_HOLD_NO_QUORUM: return "no-quorum";
+    case mesh::CLOCK_HOLD_IN_BAND:   return "in-band";
+    case mesh::CLOCK_HOLD_ADMIN:     return "admin";
+    case mesh::CLOCK_HOLD_REPLAY:    return "replay-floor";
+    case mesh::CLOCK_HOLD_RATE:      return "rate";
+    default:                         return "-";
+  }
+}
+
+void MyMesh::reportClocks(char* reply, size_t reply_sz) {
+  const uint32_t reads = getRTCClock()->getCurrentTime();
+  const mesh::ClockEstimate est = clockEstimateNow(reads);
+  // offset, peers in the winning cluster / peers seen, agreement, steps, slews
+  snprintf(reply, reply_sz, "clocks %s%s est%+ld %u/%u %u%% steps %lu slews %lu last%+ld%s hold=%s",
+           _prefs.clock_converge ? "on" : "off", mesh::clockIsUnset(reads) ? " UNSET" : "",
+           (long)est.offset_s, est.n_used, est.n_seen, est.agree_pct,
+           (unsigned long)_clock_steps, (unsigned long)_clock_slews, (long)_clock_last_adj_s,
+           _clock_admin_hold ? " admin-set" : "", clockHoldName(_clock_last_hold));
+}
+#endif
 
 void MyMesh::loop() {
 #ifdef WITH_BRIDGE
@@ -1414,6 +1517,10 @@ void MyMesh::loop() {
 #endif
 
   mesh::Mesh::loop();
+
+#ifdef CLOCK_CONVERGE_MS
+  loopClockConverge();   // paces itself
+#endif
 
   if (next_flood_advert && millisHasNowPassed(next_flood_advert)) {
     mesh::Packet *pkt = createSelfAdvert();

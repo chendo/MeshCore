@@ -59,6 +59,9 @@ public:
   char bridge_secret[16]; // for XOR encryption of bridge packets (ESP-NOW only)
   // Power setting
   uint8_t powersaving_enabled = 0; // boolean
+  // Clock convergence ('clocks on'/'clocks off'). Only builds that define
+  // CLOCK_CONVERGE_MS act on it; elsewhere it is carried and ignored.
+  uint8_t clock_converge = 1; // boolean
   // Gps settings
   uint8_t gps_enabled = 0;
   uint32_t gps_interval = 0; // in seconds
@@ -208,6 +211,7 @@ private:
     void structure() override {
       def("adc_mult", _parent->adc_multiplier);
       def("pwr_sav_en", _parent->powersaving_enabled);
+      def("clk_conv", _parent->clock_converge);
     }
   public:
     PowerPrefs(NodePrefs* parent) : _parent(parent) { }
